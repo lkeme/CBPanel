@@ -1,0 +1,588 @@
+import { useEffect, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { Activity, Download, ExternalLink, FilePlus2, ListChecks, RefreshCw, Trash2 } from "lucide-react";
+
+import type { TranslationKey } from "../../i18n";
+import type { BinaryInfo, BrowserCoreEnvRuntimeValue } from "../../shared/browserCore";
+import {
+  CLOAKBROWSER_ENV_SUGGESTION_KEYS,
+  OPTIONAL_CLOAKBROWSER_ENV_KEYS,
+  type AppSettings,
+  type BinarySettings,
+  type BrowserCoreEnvValueKind,
+  type BrowserCoreEnvVarSetting,
+  isManagedCloakBrowserEnvKey,
+  normalizeCloakBrowserEnvKey,
+} from "../../shared/settings";
+import {
+  BrowserCoreOperationPanel,
+  BrowserCoreUpdateStatus,
+  browserCoreOperationActive,
+  isBrowserCoreBusy,
+} from "../browser-core/BrowserCoreStatusPanels";
+import { CopyButton } from "../ui/CopyButton";
+import { Field, Segmented, ToggleField } from "../ui/form-controls";
+import { Switch } from "../ui/switch";
+
+const CLOAKBROWSER_CONFIG_DOC_URL = "https://github.com/CloakHQ/CloakBrowser/tree/main#configuration";
+
+type ControlledBrowserCoreEnvKey = (typeof OPTIONAL_CLOAKBROWSER_ENV_KEYS)[number];
+
+const controlledBrowserCoreEnvDefaults: Record<ControlledBrowserCoreEnvKey, {
+  value: string;
+  valueKind: BrowserCoreEnvValueKind;
+}> = {
+  CLOAKBROWSER_BINARY_PATH: { value: "", valueKind: "path" },
+  CLOAKBROWSER_DOWNLOAD_URL: { value: "", valueKind: "url" },
+  CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS: { value: "12", valueKind: "number" },
+};
+
+export function BrowserCoreSettingsPanel({
+  binaryInfo,
+  busy,
+  checkBrowserCoreUpdate,
+  clearBinaryCache,
+  importBrowserCoreZip,
+  installBinary,
+  openRuntimeCheck,
+  saveSettings,
+  settings,
+  t,
+  updateBinary,
+}: {
+  binaryInfo: BinaryInfo | null;
+  busy: string;
+  checkBrowserCoreUpdate: () => Promise<void>;
+  clearBinaryCache: () => Promise<void>;
+  importBrowserCoreZip: (filePath: string) => void;
+  installBinary: () => Promise<void>;
+  openRuntimeCheck: () => void;
+  saveSettings: (patch: Partial<AppSettings>) => Promise<void>;
+  settings: AppSettings;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  updateBinary: () => Promise<void>;
+}) {
+  const binary = settings.binary;
+  const [importPath, setImportPath] = useState("");
+  const managedCoreDisabled = Boolean(
+    binary.customEnvVars.find((item) => item.key === "CLOAKBROWSER_BINARY_PATH" && item.enabled && item.value.trim()),
+  );
+  const operationBusy = browserCoreOperationActive(binaryInfo?.core?.operation) || isBrowserCoreBusy(busy);
+  const checkBusy = busy === "browser-core-check-update";
+  const importBusy = busy === "browser-core-import";
+  const actionBusy = operationBusy || checkBusy;
+  const coreInstalled = Boolean(binaryInfo?.installed);
+  const updateAvailable = Boolean(binaryInfo?.core?.update?.updateAvailable);
+  const statusDetail = managedCoreDisabled
+    ? t("browserCore.managedActionsDisabled")
+    : coreInstalled
+      ? t("browserCore.installedStatusDetail")
+      : t("browserCore.missingStatusDetail");
+
+  function saveBinary(patch: Partial<BinarySettings>) {
+    void saveSettings({ binary: { ...binary, ...patch } });
+  }
+
+  return (
+    <div className="settings-stack no-padding">
+      <section className="settings-section">
+        <div className="settings-section-head browser-core-download-head">
+          <h2>{t("browserCore.downloadInstall")}</h2>
+          <div className="row-actions">
+            <button
+              className="command success"
+              disabled={managedCoreDisabled || actionBusy}
+              onClick={() => void installBinary()}
+              title={managedCoreDisabled ? t("browserCore.managedActionsDisabled") : undefined}
+              type="button"
+            >
+              <Download size={16} aria-hidden="true" />
+              {coreInstalled ? t("actions.reinstall") : t("actions.install")}
+            </button>
+            <button className="command" disabled={actionBusy} onClick={() => void checkBrowserCoreUpdate()} type="button">
+              <Activity size={16} aria-hidden="true" />
+              {t("actions.checkUpdate")}
+            </button>
+            {updateAvailable && (
+              <button
+                className="command primary"
+                disabled={managedCoreDisabled || actionBusy}
+                onClick={() => void updateBinary()}
+                title={managedCoreDisabled ? t("browserCore.managedActionsDisabled") : undefined}
+                type="button"
+              >
+                <RefreshCw size={16} aria-hidden="true" />
+                {t("actions.update")}
+              </button>
+            )}
+            <button
+              className="command danger subtle"
+              disabled={managedCoreDisabled || actionBusy}
+              onClick={() => void clearBinaryCache()}
+              title={managedCoreDisabled ? t("browserCore.managedActionsDisabled") : undefined}
+              type="button"
+            >
+              <Trash2 size={16} aria-hidden="true" />
+              {t("actions.clearCache")}
+            </button>
+            <button className="command subtle" onClick={openRuntimeCheck} type="button">
+              <ListChecks size={16} aria-hidden="true" />
+              {t("browserCore.runtimeCheckTitle")}
+            </button>
+          </div>
+        </div>
+        <div className={`settings-status-line ${coreInstalled ? "enabled" : "warning"}`}>
+          <strong>{coreInstalled ? t("browserCore.readyShort") : t("browserCore.missingShort")}</strong>
+          <span>{statusDetail}</span>
+        </div>
+        {binaryInfo?.core?.env.some((item) => item.requiresRuntimeRestart) && (
+          <div className="result-line">{t("browserCore.envChangesRestartShort")}</div>
+        )}
+        {operationBusy && (
+          <BrowserCoreOperationPanel busy={busy} operation={binaryInfo?.core?.operation} t={t} />
+        )}
+        <dl className="kv-list browser-core-download-details">
+          <div>
+            <dt>{coreInstalled ? t("browserCore.installedVersion") : t("browserCore.targetVersion")}</dt>
+            <dd>
+              <BrowserCoreDetailValue value={binaryInfo?.version} />
+            </dd>
+          </div>
+          <div>
+            <dt>{t("browserCore.wrapperVersion")}</dt>
+            <dd>
+              <BrowserCoreDetailValue value={binaryInfo?.core?.versions.wrapperVersion} />
+            </dd>
+          </div>
+          <div>
+            <dt>{coreInstalled ? t("browserCore.executablePath") : t("browserCore.expectedExecutablePath")}</dt>
+            <dd>
+              <BrowserCoreDetailValue copyable t={t} value={binaryInfo?.binaryPath} />
+            </dd>
+          </div>
+          <div>
+            <dt>{coreInstalled ? t("browserCore.cacheDirectory") : t("browserCore.expectedCacheDirectory")}</dt>
+            <dd>
+              <BrowserCoreDetailValue copyable t={t} value={binaryInfo?.cacheDir} />
+            </dd>
+          </div>
+          <div>
+            <dt>{t("browserCore.primaryUrl")}</dt>
+            <dd>
+              <BrowserCoreDetailValue copyable t={t} value={binaryInfo?.core?.downloads.current.primaryUrl ?? binaryInfo?.downloadUrl} />
+            </dd>
+          </div>
+          <div>
+            <dt>{t("browserCore.fallbackUrl")}</dt>
+            <dd>
+              <BrowserCoreDetailValue copyable t={t} value={binaryInfo?.core?.downloads.current.fallbackUrl} />
+            </dd>
+          </div>
+        </dl>
+        <ToggleField
+          checked={binary.checkForUpdatesOnStartup}
+          help={t("browserCore.startupCheckHelp")}
+          label={t("browserCore.startupCheck")}
+          onChange={(checkForUpdatesOnStartup) => saveBinary({ checkForUpdatesOnStartup })}
+        />
+        <ToggleField
+          checked={binary.preferExistingCache}
+          label={t("browserCore.preferExistingCache")}
+          help={t("browserCore.preferExistingCacheHelp")}
+          onChange={(preferExistingCache) => saveBinary({ preferExistingCache })}
+        />
+      </section>
+
+      {binaryInfo?.core?.update && <BrowserCoreUpdateStatus core={binaryInfo.core} t={t} />}
+
+      <section className="settings-section">
+        <h2>{t("browserCore.offlineImport")}</h2>
+        <Field label={t("browserCore.cacheDirMode")}>
+          <Segmented
+            value={binary.cacheDirMode}
+            options={[
+              { value: "auto", label: t("browserCore.cacheAuto") },
+              { value: "custom", label: t("browserCore.cacheCustom") },
+            ]}
+            onChange={(cacheDirMode) => saveBinary({ cacheDirMode })}
+          />
+        </Field>
+        {binary.cacheDirMode === "custom" && (
+          <Field label={t("browserCore.customCacheDir")} wide>
+            <input
+              value={binary.customCacheDir}
+              onChange={(event) => saveBinary({ customCacheDir: event.target.value })}
+              placeholder={t("browserCore.customCacheDirPlaceholder")}
+            />
+          </Field>
+        )}
+        <Field label={t("browserCore.manualImport")} help={t("browserCore.manualImportHelp")} wide>
+          <div className="inline-file-row">
+            <input value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder={t("browserCore.importZipPlaceholder")} />
+            {isTauri() ? (
+              <button className="command subtle" onClick={() => void pickBrowserCoreZip(setImportPath, t)} type="button">
+                {t("actions.chooseFile")}
+              </button>
+            ) : (
+              <span className="input-hint">{t("browserCore.webManualPathOnly")}</span>
+            )}
+            <button className="command" disabled={!importPath.trim() || actionBusy || importBusy} onClick={() => importBrowserCoreZip(importPath)} type="button">
+              {t("browserCore.analyzeImport")}
+            </button>
+          </div>
+        </Field>
+      </section>
+
+      <section className="settings-section">
+        <div className="settings-section-head">
+          <h2>{t("browserCore.runtimeVariables")}</h2>
+          <a className="command subtle" href={CLOAKBROWSER_CONFIG_DOC_URL} rel="noreferrer" target="_blank">
+            <ExternalLink size={16} aria-hidden="true" />
+            {t("browserCore.envDocs")}
+          </a>
+        </div>
+        <BrowserCoreEnvTable env={managedBrowserCoreRuntimeEnv(binaryInfo?.core?.env ?? [])} t={t} />
+        <CustomEnvVarEditor binary={binary} saveBinary={saveBinary} t={t} />
+      </section>
+    </div>
+  );
+}
+
+function BrowserCoreDetailValue({
+  copyable = false,
+  t,
+  value,
+}: {
+  copyable?: boolean;
+  t?: (key: TranslationKey) => string;
+  value?: string | null;
+}) {
+  const text = value?.trim() || "-";
+  const copyValue = copyable ? value?.trim() : "";
+  const canCopy = Boolean(copyValue && t);
+  return (
+    <span className={`browser-core-detail-value ${canCopy ? "copyable" : ""} ${value?.trim() ? "" : "empty"}`}>
+      <span className="mono-cell" title={text}>
+        {text}
+      </span>
+      {canCopy && t && copyValue && <CopyButton value={copyValue} t={t} />}
+    </span>
+  );
+}
+
+async function pickBrowserCoreZip(
+  setImportPath: React.Dispatch<React.SetStateAction<string>>,
+  t: (key: TranslationKey) => string,
+) {
+  try {
+    const selected = await openDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "CloakBrowser Archive", extensions: ["zip", "tar.gz", "tgz"] }],
+    });
+    if (typeof selected === "string") setImportPath(selected);
+  } catch (error) {
+    console.warn(t("browserCore.filePickerFailed"), error);
+  }
+}
+
+function BrowserCoreEnvTable({
+  env,
+  t,
+}: {
+  env: BrowserCoreEnvRuntimeValue[];
+  t: (key: TranslationKey) => string;
+}) {
+  if (env.length === 0) return <div className="preflight-empty">{t("browserCore.envEmpty")}</div>;
+  return (
+    <div className="browser-core-env-table">
+      {env.map((item) => (
+        <div className="browser-core-env-row" key={item.key}>
+          <span>
+            <strong className="mono-cell">{item.key}</strong>
+            <small>{item.detail || envSourceText(item.source, t)}</small>
+          </span>
+          <span className={`pill ${item.enabled ? "running" : "stopped"}`}>
+            {item.enabled ? t("status.enabled") : t("status.disabled")}
+          </span>
+          <span className="mono-cell">{item.maskedValue || "-"}</span>
+          <small>{item.requiresRuntimeRestart ? t("browserCore.restartRequired") : "-"}</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function envSourceText(
+  source: BrowserCoreEnvRuntimeValue["source"],
+  t: (key: TranslationKey) => string,
+): string {
+  if (source === "settings") return t("browserCore.envSource.settings");
+  if (source === "custom") return t("browserCore.envSource.custom");
+  if (source === "external") return t("browserCore.envSource.external");
+  if (source === "cbpanel-default") return t("browserCore.envSource.cbpanel");
+  return t("browserCore.envSource.cloakbrowser");
+}
+
+function managedBrowserCoreRuntimeEnv(env: BrowserCoreEnvRuntimeValue[]): BrowserCoreEnvRuntimeValue[] {
+  return env.filter((item) => isManagedCloakBrowserEnvKey(item.key));
+}
+
+function CustomEnvVarEditor({
+  binary,
+  saveBinary,
+  t,
+}: {
+  binary: BinarySettings;
+  saveBinary: (patch: Partial<BinarySettings>) => void;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  const blank = (): BrowserCoreEnvVarSetting => ({
+    id: crypto.randomUUID(),
+    key: "",
+    value: "",
+    enabled: true,
+    sensitive: false,
+    description: "",
+    valueKind: "text",
+  });
+  const customRows = binary.customEnvVars;
+  const customKeyOptions = [
+    ...CLOAKBROWSER_ENV_SUGGESTION_KEYS,
+    ...customRows.map((item) => item.key),
+  ].filter((key, index, list) => list.indexOf(key) === index);
+  const [draft, setDraft] = useState<BrowserCoreEnvVarSetting>(() => blank());
+  const normalizedKey = normalizeCloakBrowserEnvKey(draft.key);
+  const duplicate = normalizedKey ? binary.customEnvVars.some((item) => item.key === normalizedKey) : false;
+  const blockedManaged = normalizedKey ? isManagedCloakBrowserEnvKey(normalizedKey) : false;
+  const canAdd = Boolean(normalizedKey && draft.value.trim() && !duplicate && !blockedManaged);
+
+  function updateCustomEnv(id: string, patch: Partial<BrowserCoreEnvVarSetting>) {
+    saveBinary({
+      customEnvVars: binary.customEnvVars.map((item) => (item.id === id ? { ...item, ...patch } : item)),
+    });
+  }
+
+  function deleteCustomEnv(id: string) {
+    saveBinary({ customEnvVars: binary.customEnvVars.filter((item) => item.id !== id) });
+  }
+
+  function addCustomEnv() {
+    if (!canAdd || !normalizedKey) return;
+    saveBinary({
+      customEnvVars: [
+        ...binary.customEnvVars,
+        {
+          ...draft,
+          id: crypto.randomUUID(),
+          key: normalizedKey,
+          sensitive: false,
+          valueKind: envValueKindForKey(normalizedKey, draft.valueKind),
+        },
+      ],
+    });
+    setDraft(blank());
+  }
+
+  return (
+    <section className="custom-env-editor">
+      <div className="panel-heading">
+        <span>
+          <strong>{t("browserCore.customEnv")}</strong>
+          <small>{t("browserCore.envEditorHelp")}</small>
+        </span>
+        <button
+          aria-label={t("browserCore.addEnv")}
+          className="icon-button compact"
+          disabled={!canAdd}
+          onClick={addCustomEnv}
+          title={t("browserCore.addEnv")}
+          type="button"
+        >
+          <FilePlus2 size={16} aria-hidden="true" />
+        </button>
+      </div>
+      <div className="custom-env-list">
+        {customRows.map((item) => (
+          <div className={`custom-env-row ${item.enabled ? "" : "disabled"}`} key={item.id}>
+            <Switch
+              aria-label={t("browserCore.envEnabled")}
+              checked={item.enabled}
+              className="toggle-switch"
+              onCheckedChange={(enabled) => updateCustomEnv(item.id, { enabled })}
+            />
+            <EnvKeyCombobox
+              options={customKeyOptions}
+              t={t}
+              value={item.key}
+              onChange={(key) => updateCustomEnv(item.id, { key, valueKind: envValueKindForKey(key, item.valueKind) })}
+            />
+            <input
+              className="mono-cell"
+              value={item.value}
+              onChange={(event) => updateCustomEnv(item.id, { value: event.target.value })}
+              placeholder={t("browserCore.envValuePlaceholder")}
+            />
+            <button
+              aria-label={t("actions.delete")}
+              className="icon-button compact danger"
+              onClick={() => deleteCustomEnv(item.id)}
+              title={t("actions.delete")}
+              type="button"
+            >
+              <Trash2 size={15} aria-hidden="true" />
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="custom-env-add-row">
+        <span className="env-row-enabled muted">{t("browserCore.envNew")}</span>
+        <EnvKeyCombobox
+          options={customKeyOptions}
+          t={t}
+          value={draft.key}
+          onChange={(key) => setDraft((current) => ({ ...current, key, valueKind: envValueKindForKey(key, current.valueKind) }))}
+        />
+        <input
+          className="mono-cell"
+          value={draft.value}
+          onChange={(event) => setDraft((current) => ({ ...current, value: event.target.value }))}
+          placeholder={t("browserCore.envValuePlaceholder")}
+        />
+        <button
+          aria-label={t("browserCore.addEnv")}
+          className="icon-button compact"
+          disabled={!canAdd}
+          onClick={addCustomEnv}
+          title={t("browserCore.addEnv")}
+          type="button"
+        >
+          <FilePlus2 size={16} aria-hidden="true" />
+        </button>
+      </div>
+      {blockedManaged && <div className="inline-error">{t("browserCore.envManagedBlocked")}</div>}
+      {duplicate && <div className="inline-error">{t("browserCore.envDuplicate")}</div>}
+    </section>
+  );
+}
+
+function EnvKeyCombobox({
+  disabled = false,
+  onChange,
+  options,
+  t,
+  value,
+}: {
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  options: readonly string[];
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  value: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [input, setInput] = useState(value);
+  useEffect(() => setInput(value), [value]);
+  const normalizedInput = normalizeCloakBrowserEnvKey(input);
+  const normalizedValue = normalizeCloakBrowserEnvKey(value) ?? value;
+  const filteredOptions = options.filter((option) => option.toLowerCase().includes(input.trim().toLowerCase()));
+  const canUseCustom = Boolean(input.trim() && normalizedInput && !isManagedCloakBrowserEnvKey(normalizedInput));
+
+  function commit(nextValue: string | undefined) {
+    const normalized = normalizeCloakBrowserEnvKey(nextValue);
+    if (!normalized || isManagedCloakBrowserEnvKey(normalized)) return;
+    onChange(normalized);
+    setInput(normalized);
+    setOpen(false);
+  }
+
+  return (
+    <div
+      className={`env-key-combobox ${open ? "open" : ""} ${disabled ? "disabled" : ""}`}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          if (canUseCustom) commit(input);
+          setOpen(false);
+        }
+      }}
+    >
+      <input
+        className="mono-cell"
+        disabled={disabled}
+        value={input}
+        onChange={(event) => {
+          setInput(event.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setOpen(false);
+          if (event.key === "Enter") {
+            event.preventDefault();
+            commit(input);
+          }
+        }}
+        placeholder={t("browserCore.envKeyPlaceholder")}
+      />
+      <button
+        aria-label={t("browserCore.envKeyOptions")}
+        className="env-key-combobox-trigger"
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        type="button"
+      >
+        <ChevronDownIcon />
+      </button>
+      {open && !disabled && (
+        <div className="env-key-combobox-list" role="listbox">
+          {filteredOptions.map((option) => (
+            <button
+              className={option === normalizedValue ? "active" : ""}
+              key={option}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                commit(option);
+              }}
+              role="option"
+              type="button"
+            >
+              <span className="mono-cell">{option}</span>
+              <small>{t(`browserCore.envSuggestion.${option}` as TranslationKey)}</small>
+            </button>
+          ))}
+          {canUseCustom && normalizedInput && !filteredOptions.includes(normalizedInput) && (
+            <button
+              className="create"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                commit(input);
+              }}
+              type="button"
+            >
+              <FilePlus2 size={15} aria-hidden="true" />
+              <span className="mono-cell">{normalizedInput}</span>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function envValueKindForKey(key: string, fallback: BrowserCoreEnvValueKind): BrowserCoreEnvValueKind {
+  const controlled = controlledBrowserCoreEnvDefaults[key as ControlledBrowserCoreEnvKey];
+  if (controlled) return controlled.valueKind;
+  if (key.endsWith("_DIR") || key.endsWith("_CDM")) return "directory";
+  if (key.endsWith("_URL")) return "url";
+  if (key.endsWith("_SECONDS") || key.endsWith("_TIMEOUT")) return "number";
+  if (key === "CLOAKBROWSER_WIDEVINE") return "boolean";
+  return fallback === "secret" ? "text" : fallback;
+}
+
+function ChevronDownIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" focusable="false">
+      <path d="M4.25 6.25 8 10l3.75-3.75" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+    </svg>
+  );
+}
