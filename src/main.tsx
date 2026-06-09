@@ -868,7 +868,7 @@ function App() {
               />
             )}
 
-            <div className={`main-grid ${inspectorOpen ? "inspector-open" : "no-inspector"}`}>
+            <div key={workbenchView} className={`main-grid motion-content-enter ${inspectorOpen ? "inspector-open" : "no-inspector"}`}>
               {workbenchView === "profiles" ? (
                 <section className="table-surface">
                   <ProfileTable

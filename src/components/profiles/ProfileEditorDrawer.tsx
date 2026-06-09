@@ -117,47 +117,49 @@ export function ProfileEditorDrawer(props: {
         </nav>
 
         <div className="editor-scroll">
-          {activeTab === "runtime" && (
-            <ProfileEditorRuntimeTab
-              draft={draft}
-              groups={props.groups}
-              nameError={props.nameError}
-              setDraft={props.setDraft}
-              tags={props.tags}
-              t={t}
-            />
-          )}
-          {activeTab === "proxy" && (
-            <ProfileEditorProxyTab
-              draft={draft}
-              setDraft={props.setDraft}
-              busy={props.busy}
-              copyManagedProxyToLocal={props.copyManagedProxyToLocal}
-              environments={props.environments}
-              localProxyDraftIds={props.localProxyDraftIds}
-              proxies={props.proxies}
-              proxyCheck={props.proxyCheck}
-              proxyLibraryDraftIds={props.proxyLibraryDraftIds}
-              checkProxy={props.checkProxy}
-              saveDraftProxyToLibrary={props.saveDraftProxyToLibrary}
-              setDraftProxyLibraryId={props.setDraftProxyLibraryId}
-              setDraftProxyLocal={props.setDraftProxyLocal}
-              t={t}
-            />
-          )}
-          {activeTab === "fingerprint" && <ProfileEditorFingerprintTab draft={draft} setDraft={props.setDraft} t={t} />}
-          {activeTab === "advanced" && (
-            <ProfileEditorAdvancedTab
-              draft={draft}
-              setDraft={props.setDraft}
-              busy={props.busy}
-              extensions={props.extensions}
-              boundExtensionIds={props.boundExtensionIds}
-              setDraftExtensionBinding={props.setDraftExtensionBinding}
-              t={t}
-              draftIsNew={draftIsNew}
-            />
-          )}
+          <div key={activeTab} className="editor-tab-content motion-tab-content">
+            {activeTab === "runtime" && (
+              <ProfileEditorRuntimeTab
+                draft={draft}
+                groups={props.groups}
+                nameError={props.nameError}
+                setDraft={props.setDraft}
+                tags={props.tags}
+                t={t}
+              />
+            )}
+            {activeTab === "proxy" && (
+              <ProfileEditorProxyTab
+                draft={draft}
+                setDraft={props.setDraft}
+                busy={props.busy}
+                copyManagedProxyToLocal={props.copyManagedProxyToLocal}
+                environments={props.environments}
+                localProxyDraftIds={props.localProxyDraftIds}
+                proxies={props.proxies}
+                proxyCheck={props.proxyCheck}
+                proxyLibraryDraftIds={props.proxyLibraryDraftIds}
+                checkProxy={props.checkProxy}
+                saveDraftProxyToLibrary={props.saveDraftProxyToLibrary}
+                setDraftProxyLibraryId={props.setDraftProxyLibraryId}
+                setDraftProxyLocal={props.setDraftProxyLocal}
+                t={t}
+              />
+            )}
+            {activeTab === "fingerprint" && <ProfileEditorFingerprintTab draft={draft} setDraft={props.setDraft} t={t} />}
+            {activeTab === "advanced" && (
+              <ProfileEditorAdvancedTab
+                draft={draft}
+                setDraft={props.setDraft}
+                busy={props.busy}
+                extensions={props.extensions}
+                boundExtensionIds={props.boundExtensionIds}
+                setDraftExtensionBinding={props.setDraftExtensionBinding}
+                t={t}
+                draftIsNew={draftIsNew}
+              />
+            )}
+          </div>
         </div>
       </div>
     </Drawer>

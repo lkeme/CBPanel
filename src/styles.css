@@ -53,6 +53,10 @@
   --shadow-panel: 0 12px 30px rgba(45, 62, 97, 0.07);
   --shadow-popover: 0 16px 36px rgba(45, 62, 97, 0.14);
   --shadow-sheet: 0 28px 70px rgba(45, 62, 97, 0.22);
+  --motion-fast: 120ms;
+  --motion-standard: 180ms;
+  --motion-slow: 240ms;
+  --motion-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --radius: 8px;
   --radius-control: 7px;
   --control-height: 40px;
@@ -2445,6 +2449,7 @@ textarea {
   border: 0;
   border-radius: 0;
   backdrop-filter: blur(2px);
+  animation: cbpanel-scrim-in var(--motion-standard) var(--motion-ease) both;
 }
 
 .drawer-panel {
@@ -2456,6 +2461,8 @@ textarea {
   background: var(--surface);
   border-left: 1px solid var(--border);
   box-shadow: var(--shadow-sheet);
+  animation: cbpanel-drawer-in var(--motion-slow) var(--motion-ease) both;
+  will-change: transform, opacity;
 }
 
 .drawer-header {
@@ -2553,6 +2560,7 @@ textarea {
   border: 0;
   border-radius: 0;
   backdrop-filter: blur(2px);
+  animation: cbpanel-scrim-in var(--motion-standard) var(--motion-ease) both;
 }
 
 .modal-panel {
@@ -2568,6 +2576,9 @@ textarea {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow-sheet);
+  animation: cbpanel-modal-in var(--motion-standard) var(--motion-ease) both;
+  transform-origin: center 42%;
+  will-change: transform, opacity;
 }
 
 .confirm-panel {
@@ -2623,6 +2634,72 @@ textarea {
   margin: 0;
   color: var(--foreground-muted);
   line-height: 1.55;
+}
+
+.motion-content-enter {
+  animation: cbpanel-content-in var(--motion-standard) var(--motion-ease) both;
+}
+
+.motion-tab-content {
+  min-width: 0;
+}
+
+.motion-tab-content[data-state="active"],
+.motion-tab-content.editor-tab-content {
+  animation: cbpanel-tab-in var(--motion-fast) var(--motion-ease) both;
+}
+
+@keyframes cbpanel-scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes cbpanel-drawer-in {
+  from {
+    opacity: 0.72;
+    transform: translateX(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes cbpanel-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes cbpanel-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes cbpanel-tab-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .modal-input-field {
@@ -2781,6 +2858,10 @@ textarea {
   min-height: 0;
   overflow: auto;
   scrollbar-color: var(--border-strong) transparent;
+}
+
+.editor-tab-content {
+  min-width: 0;
 }
 
 .form-grid {

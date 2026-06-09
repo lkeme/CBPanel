@@ -72,7 +72,7 @@ export function SettingsDrawer({
           <TabsTrigger value="advanced">{t("settings.advanced")}</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="general">
+        <TabsContent value="general" className="motion-tab-content">
           <section className="settings-section">
             <h2>{t("settings.appPreferences")}</h2>
             <Field label={t("settings.language")}>
@@ -89,7 +89,7 @@ export function SettingsDrawer({
           </section>
         </TabsContent>
 
-        <TabsContent value="appearance">
+        <TabsContent value="appearance" className="motion-tab-content">
           <div className="settings-stack no-padding">
             <section className="settings-section">
               <h2>{t("settings.themeDisplay")}</h2>
@@ -160,7 +160,7 @@ export function SettingsDrawer({
           </div>
         </TabsContent>
 
-        <TabsContent value="network">
+        <TabsContent value="network" className="motion-tab-content">
           <NetworkSettingsPanel
             checkGithubMirrors={checkGithubMirrors}
             saveSettings={saveSettings}
@@ -169,7 +169,7 @@ export function SettingsDrawer({
           />
         </TabsContent>
 
-        <TabsContent value="browserCore">
+        <TabsContent value="browserCore" className="motion-tab-content">
           <BrowserCoreSettingsPanel
             binaryInfo={binaryInfo}
             busy={busy}
@@ -185,7 +185,7 @@ export function SettingsDrawer({
           />
         </TabsContent>
 
-        <TabsContent value="advanced">
+        <TabsContent value="advanced" className="motion-tab-content">
           <section className="settings-section">
             <h2>{t("settings.maintenanceEntry")}</h2>
             <ToggleField
