@@ -16,7 +16,7 @@ import {
   ProfileInspectorAside,
   firstPreflightFailure,
 } from "./components/profiles/ProfileDetails";
-import type { ProfileEditorTab } from "./components/profiles/ProfileEditorDrawer";
+import { ProfileEditorDrawer, type ProfileEditorTab } from "./components/profiles/ProfileEditorDrawer";
 import { ProfileWorkbenchControls } from "./components/profiles/ProfileWorkbenchControls";
 import { ProfilePagination, ProfileTable, statusText } from "./components/profiles/ProfileTable";
 import {
@@ -29,7 +29,7 @@ import {
 } from "./components/profiles/profileWorkbenchHelpers";
 import type { ConfirmDialogState, ExtensionImportDialogState, TextInputDialogState } from "./components/registry/RegistryDialogs";
 import { buildModuleStats, type ModeFilter, type ProxyFilter, type StatusFilter, type WorkbenchView } from "./components/registry/registryStats";
-import type { SettingsTab } from "./components/settings/SettingsDrawer";
+import { SettingsDrawer, type SettingsTab } from "./components/settings/SettingsDrawer";
 import { LoadingSkeleton } from "./components/ui/LoadingSkeleton";
 import { TooltipProvider } from "./components/ui/tooltip";
 import {
@@ -79,17 +79,11 @@ import { type TranslationKey, localeFromMode, translate } from "./i18n";
 import "subsetted-fonts/SarasaUiSC-Regular/SarasaUiSC-Regular.css";
 import "./styles.css";
 
-const SettingsDrawer = lazy(() =>
-  import("./components/settings/SettingsDrawer").then((module) => ({ default: module.SettingsDrawer })),
-);
 const ColumnSettingsDrawer = lazy(() =>
   import("./components/profiles/ColumnSettingsDrawer").then((module) => ({ default: module.ColumnSettingsDrawer })),
 );
 const RegistryModuleView = lazy(() =>
   import("./components/registry/RegistryModuleView").then((module) => ({ default: module.RegistryModuleView })),
-);
-const ProfileEditorDrawer = lazy(() =>
-  import("./components/profiles/ProfileEditorDrawer").then((module) => ({ default: module.ProfileEditorDrawer })),
 );
 const BrowserCoreImportDialog = lazy(() =>
   import("./components/browser-core/BrowserCoreImportDialog").then((module) => ({ default: module.BrowserCoreImportDialog })),
@@ -868,104 +862,106 @@ function App() {
               />
             )}
 
-            <div key={workbenchView} className={`main-grid motion-content-enter ${inspectorOpen ? "inspector-open" : "no-inspector"}`}>
-              {workbenchView === "profiles" ? (
-                <section className="table-surface">
-                  <ProfileTable
-                    allPageSelected={allPageSelected}
-                    columns={visibleColumns}
-                    environments={state?.environments ?? []}
-                    profiles={pagedProfiles}
-                    proxies={state?.proxies ?? []}
-                    pendingLaunchIds={pendingLaunchIds}
-                    selectedId={selectedId}
-                    selectedIds={selectedIds}
-                    sessionsByProfileId={sessionsByProfileId}
-                    t={t}
-                    tagFilters={tagFilters}
-                    toggleCurrentPageSelected={toggleCurrentPageSelected}
-                    toggleSelected={toggleSelected}
-                    toggleTagFilter={toggleTagFilter}
-                    selectProfile={selectProfile}
-                    launchProfile={launchProfile}
-                    browserCoreMissing={browserCoreMissing}
-                    stopProfile={stopProfile}
-                  />
-                  <ProfilePagination
-                    currentPage={currentPage}
-                    filteredCount={filteredProfiles.length}
-                    pageEnd={pageEnd}
-                    pageSize={pageSize}
-                    pageStart={filteredProfiles.length === 0 ? 0 : pageStart + 1}
-                    saveSettings={saveSettings}
-                    selectedCount={selectedProfiles.length}
-                    setProfilePage={setProfilePage}
-                    settings={normalizedSettings}
-                    t={t}
-                    totalPages={totalPages}
-                    totalProfiles={totalProfiles}
-                  />
-                </section>
-              ) : (
-                <Suspense fallback={<LoadingSkeleton rows={4} />}>
-                  <RegistryModuleView
-                    busy={busy}
-                    binaryInfo={binaryInfo}
-                    browserCoreMissing={browserCoreMissing}
-                    copyDiagnostics={copyDiagnostics}
-                    diagnostics={diagnostics}
-                    exportDiagnostics={exportDiagnostics}
-                    refreshBinary={() => loadBinaryInfo(true)}
-                    refreshDiagnostics={refreshDiagnostics}
-                    runtime={runtime}
-                    stats={moduleStats}
-                    state={state}
-                    storage={state?.storage}
-                    t={t}
-                    trash={state?.trash ?? []}
-                    view={workbenchView}
-                    openBrowserCoreSettings={() => openSettings("browserCore")}
-                    checkManagedProxy={checkManagedProxy}
-                    clearTrashEnvironments={clearTrashEnvironments}
-                    deleteExtension={deleteExtension}
-                    deleteExtensionSource={deleteExtensionSource}
-                    duplicateProxy={duplicateProxy}
-                    editGroup={(group) => setRegistryEditor({ kind: "group", mode: "edit", entity: group })}
-                    editProxy={(proxy) => openProxyEditor("edit", proxy)}
-                    editTag={(tag) => setRegistryEditor({ kind: "tag", mode: "edit", entity: tag })}
-                    editExtensionSource={(source) => setExtensionSourceEditor({ mode: "edit", source })}
-                    addExtensionSource={() => setExtensionSourceEditor({ mode: "create" })}
-                    addRemoteExtension={() => setExtensionImport({ kind: "remote" })}
-                    bindExtensionToSelected={bindExtensionToSelected}
-                    checkExtension={checkExtension}
-                    checkExtensionUpdate={checkExtensionUpdate}
-                    showProfiles={showProfileView}
-                    importExtensionArchive={(kind) => setExtensionImport({ kind })}
-                    importExtensionDirectory={() => setExtensionImport({ kind: "directory" })}
-                    installExtension={installExtension}
-                    mergeGroup={(group) => setRegistryMerge({ kind: "group", entity: group })}
-                    mergeTag={(tag) => setRegistryMerge({ kind: "tag", entity: tag })}
-                    newGroup={() => setRegistryEditor({ kind: "group", mode: "create" })}
-                    newTag={() => setRegistryEditor({ kind: "tag", mode: "create" })}
-                    newProxy={() => openProxyEditor("create")}
-                    reinstallExtension={reinstallExtension}
-                    permanentlyDeleteTrashEnvironment={permanentlyDeleteTrashEnvironment}
-                    refreshExtensionSource={refreshExtensionSource}
-                    requestProxyDelete={requestProxyDelete}
-                    requestProxyReference={(action, proxy) => setProxyReference({ action, proxy })}
-                    requestGroupDelete={requestGroupDelete}
-                    requestTagDelete={requestTagDelete}
-                    restoreTrashEnvironment={restoreTrashEnvironment}
-                    toggleExtensionSourceStatus={toggleExtensionSourceStatus}
-                    toggleExtensionSourceUnsigned={toggleExtensionSourceUnsigned}
-                    unbindExtensionFromSelected={unbindExtensionFromSelected}
-                    updateExtension={updateExtension}
-                    updateGroup={updateGroup}
-                    updateProxy={updateProxy}
-                    updateTag={updateTag}
-                  />
-                </Suspense>
-              )}
+            <div className={`main-grid ${inspectorOpen ? "inspector-open" : "no-inspector"}`}>
+              <div key={workbenchView} className="workbench-content motion-content-enter">
+                {workbenchView === "profiles" ? (
+                  <section className="table-surface">
+                    <ProfileTable
+                      allPageSelected={allPageSelected}
+                      columns={visibleColumns}
+                      environments={state?.environments ?? []}
+                      profiles={pagedProfiles}
+                      proxies={state?.proxies ?? []}
+                      pendingLaunchIds={pendingLaunchIds}
+                      selectedId={selectedId}
+                      selectedIds={selectedIds}
+                      sessionsByProfileId={sessionsByProfileId}
+                      t={t}
+                      tagFilters={tagFilters}
+                      toggleCurrentPageSelected={toggleCurrentPageSelected}
+                      toggleSelected={toggleSelected}
+                      toggleTagFilter={toggleTagFilter}
+                      selectProfile={selectProfile}
+                      launchProfile={launchProfile}
+                      browserCoreMissing={browserCoreMissing}
+                      stopProfile={stopProfile}
+                    />
+                    <ProfilePagination
+                      currentPage={currentPage}
+                      filteredCount={filteredProfiles.length}
+                      pageEnd={pageEnd}
+                      pageSize={pageSize}
+                      pageStart={filteredProfiles.length === 0 ? 0 : pageStart + 1}
+                      saveSettings={saveSettings}
+                      selectedCount={selectedProfiles.length}
+                      setProfilePage={setProfilePage}
+                      settings={normalizedSettings}
+                      t={t}
+                      totalPages={totalPages}
+                      totalProfiles={totalProfiles}
+                    />
+                  </section>
+                ) : (
+                  <Suspense fallback={<LoadingSkeleton rows={4} />}>
+                    <RegistryModuleView
+                      busy={busy}
+                      binaryInfo={binaryInfo}
+                      browserCoreMissing={browserCoreMissing}
+                      copyDiagnostics={copyDiagnostics}
+                      diagnostics={diagnostics}
+                      exportDiagnostics={exportDiagnostics}
+                      refreshBinary={() => loadBinaryInfo(true)}
+                      refreshDiagnostics={refreshDiagnostics}
+                      runtime={runtime}
+                      stats={moduleStats}
+                      state={state}
+                      storage={state?.storage}
+                      t={t}
+                      trash={state?.trash ?? []}
+                      view={workbenchView}
+                      openBrowserCoreSettings={() => openSettings("browserCore")}
+                      checkManagedProxy={checkManagedProxy}
+                      clearTrashEnvironments={clearTrashEnvironments}
+                      deleteExtension={deleteExtension}
+                      deleteExtensionSource={deleteExtensionSource}
+                      duplicateProxy={duplicateProxy}
+                      editGroup={(group) => setRegistryEditor({ kind: "group", mode: "edit", entity: group })}
+                      editProxy={(proxy) => openProxyEditor("edit", proxy)}
+                      editTag={(tag) => setRegistryEditor({ kind: "tag", mode: "edit", entity: tag })}
+                      editExtensionSource={(source) => setExtensionSourceEditor({ mode: "edit", source })}
+                      addExtensionSource={() => setExtensionSourceEditor({ mode: "create" })}
+                      addRemoteExtension={() => setExtensionImport({ kind: "remote" })}
+                      bindExtensionToSelected={bindExtensionToSelected}
+                      checkExtension={checkExtension}
+                      checkExtensionUpdate={checkExtensionUpdate}
+                      showProfiles={showProfileView}
+                      importExtensionArchive={(kind) => setExtensionImport({ kind })}
+                      importExtensionDirectory={() => setExtensionImport({ kind: "directory" })}
+                      installExtension={installExtension}
+                      mergeGroup={(group) => setRegistryMerge({ kind: "group", entity: group })}
+                      mergeTag={(tag) => setRegistryMerge({ kind: "tag", entity: tag })}
+                      newGroup={() => setRegistryEditor({ kind: "group", mode: "create" })}
+                      newTag={() => setRegistryEditor({ kind: "tag", mode: "create" })}
+                      newProxy={() => openProxyEditor("create")}
+                      reinstallExtension={reinstallExtension}
+                      permanentlyDeleteTrashEnvironment={permanentlyDeleteTrashEnvironment}
+                      refreshExtensionSource={refreshExtensionSource}
+                      requestProxyDelete={requestProxyDelete}
+                      requestProxyReference={(action, proxy) => setProxyReference({ action, proxy })}
+                      requestGroupDelete={requestGroupDelete}
+                      requestTagDelete={requestTagDelete}
+                      restoreTrashEnvironment={restoreTrashEnvironment}
+                      toggleExtensionSourceStatus={toggleExtensionSourceStatus}
+                      toggleExtensionSourceUnsigned={toggleExtensionSourceUnsigned}
+                      unbindExtensionFromSelected={unbindExtensionFromSelected}
+                      updateExtension={updateExtension}
+                      updateGroup={updateGroup}
+                      updateProxy={updateProxy}
+                      updateTag={updateTag}
+                    />
+                  </Suspense>
+                )}
+              </div>
 
               {workbenchView === "profiles" && inspectorOpen && draft && (
                 <ProfileInspectorAside
@@ -989,74 +985,70 @@ function App() {
         </section>
 
       {drawerMode === "edit" && draft && (
-        <Suspense fallback={<LazyDrawerFallback close={closeDrawer} title={t("actions.edit")} t={t} />}>
-          <ProfileEditorDrawer
-            activeTab={activeTab}
-            busy={busy}
-            checkPreflight={checkPreflight}
-            checkProxy={checkProxy}
-            close={closeDrawer}
-            deleteProfile={deleteProfile}
-            draftIsNew={draftIsNew}
-            draft={draft}
-            duplicateProfile={duplicateProfile}
-            environments={state?.environments ?? []}
-            extensions={state?.extensions ?? []}
-            groups={state?.groups ?? []}
-            localProxyDraftIds={localProxyDraftIds}
-            nameError={profileNameError}
-            tags={state?.tags ?? []}
-            boundExtensionIds={state?.environments?.find((environment) => environment.id === draft.id)?.extensionIds ?? []}
-            proxies={state?.proxies ?? []}
-            proxyCheck={proxyCheck}
-            proxyLibraryDraftIds={draftProxyLibraryIds}
-            browserCoreMissing={browserCoreMissing}
-            running={draftRunning}
-            saveDraft={saveDraft}
-            saveDraftProxyToLibrary={saveDraftProxyToLibrary}
-            setActiveTab={setActiveTab}
-            setDraftProxyLibraryId={(draftId, proxyId) => {
-              setLocalProxyDraftIds((current) => withoutIds(current, [draftId]));
-              setDraftProxyLibraryIds((current) => ({ ...current, [draftId]: proxyId }));
-            }}
-            setDraftExtensionBinding={setDraftExtensionBinding}
-            setDraft={updateDraft}
-            setDraftProxyLocal={(draftId) => {
-              setLocalProxyDraftIds((current) => new Set(current).add(draftId));
-              setDraftProxyLibraryIds((current) => omitKeys(current, [draftId]));
-            }}
-            stopProfile={() => stopProfile()}
-            copyManagedProxyToLocal={copyManagedProxyToLocal}
-            launchProfile={() => launchProfile()}
-            t={t}
-          />
-        </Suspense>
+        <ProfileEditorDrawer
+          activeTab={activeTab}
+          busy={busy}
+          checkPreflight={checkPreflight}
+          checkProxy={checkProxy}
+          close={closeDrawer}
+          deleteProfile={deleteProfile}
+          draftIsNew={draftIsNew}
+          draft={draft}
+          duplicateProfile={duplicateProfile}
+          environments={state?.environments ?? []}
+          extensions={state?.extensions ?? []}
+          groups={state?.groups ?? []}
+          localProxyDraftIds={localProxyDraftIds}
+          nameError={profileNameError}
+          tags={state?.tags ?? []}
+          boundExtensionIds={state?.environments?.find((environment) => environment.id === draft.id)?.extensionIds ?? []}
+          proxies={state?.proxies ?? []}
+          proxyCheck={proxyCheck}
+          proxyLibraryDraftIds={draftProxyLibraryIds}
+          browserCoreMissing={browserCoreMissing}
+          running={draftRunning}
+          saveDraft={saveDraft}
+          saveDraftProxyToLibrary={saveDraftProxyToLibrary}
+          setActiveTab={setActiveTab}
+          setDraftProxyLibraryId={(draftId, proxyId) => {
+            setLocalProxyDraftIds((current) => withoutIds(current, [draftId]));
+            setDraftProxyLibraryIds((current) => ({ ...current, [draftId]: proxyId }));
+          }}
+          setDraftExtensionBinding={setDraftExtensionBinding}
+          setDraft={updateDraft}
+          setDraftProxyLocal={(draftId) => {
+            setLocalProxyDraftIds((current) => new Set(current).add(draftId));
+            setDraftProxyLibraryIds((current) => omitKeys(current, [draftId]));
+          }}
+          stopProfile={() => stopProfile()}
+          copyManagedProxyToLocal={copyManagedProxyToLocal}
+          launchProfile={() => launchProfile()}
+          t={t}
+        />
       )}
 
       {drawerMode === "settings" && (
-        <Suspense fallback={<LazyDrawerFallback close={closeDrawer} title={t("nav.settings")} t={t} />}>
-          <SettingsDrawer
-            binaryInfo={binaryInfo}
-            busy={busy}
-            checkBrowserCoreUpdate={checkBrowserCoreUpdate}
-            checkGithubMirrors={checkGithubMirrors}
-            close={closeDrawer}
-            importBrowserCoreZip={(filePath) => setBrowserCoreImport({ filePath })}
-            installBinary={installBinary}
-            initialTab={settingsInitialTab}
-            openRuntimeCheck={() => {
-              setDrawerMode(null);
-              setWorkbenchView("runtimeCheck");
-            }}
-            requestAdvancedWebEntry={() => requestAdvancedWebEntry(normalizedSettings)}
-            runtime={runtime}
-            settings={settings}
-            saveSettings={saveSettings}
-            t={t}
-            updateBinary={updateBinary}
-            clearBinaryCache={clearBinaryCache}
-          />
-        </Suspense>
+        <SettingsDrawer
+          binaryInfo={binaryInfo}
+          busy={busy}
+          checkBrowserCoreUpdate={checkBrowserCoreUpdate}
+          checkGithubMirrors={checkGithubMirrors}
+          close={closeDrawer}
+          importBrowserCoreZip={(filePath) => setBrowserCoreImport({ filePath })}
+          installBinary={installBinary}
+          initialTab={settingsInitialTab}
+          openRuntimeCheck={() => {
+            setDrawerMode(null);
+            setWorkbenchView("runtimeCheck");
+          }}
+          requestAdvancedWebEntry={() => requestAdvancedWebEntry(normalizedSettings)}
+          runtime={runtime}
+          settings={settings}
+          saveSettings={saveSettings}
+          t={t}
+          updateBinary={updateBinary}
+          clearBinaryCache={clearBinaryCache}
+        />
       )}
 
       {drawerMode === "columns" && (
@@ -1233,7 +1225,7 @@ function LazyDrawerFallback({
   t: (key: TranslationKey) => string;
 }) {
   return (
-    <div className="drawer-layer" role="dialog" aria-modal="true" aria-busy="true">
+    <div className="drawer-layer lazy-fallback-layer" role="dialog" aria-modal="true" aria-busy="true">
       <button className="drawer-scrim" aria-label={t("actions.close")} onClick={close} type="button" />
       <section className="drawer-panel">
         <header className="drawer-header">
@@ -1254,7 +1246,7 @@ function LazyDrawerFallback({
 
 function LazyModalFallback({ t }: { t: (key: TranslationKey) => string }) {
   return (
-    <div className="modal-layer" role="dialog" aria-modal="true" aria-busy="true">
+    <div className="modal-layer lazy-fallback-layer" role="dialog" aria-modal="true" aria-busy="true">
       <div className="modal-scrim" />
       <section className="modal-panel">
         <div className="modal-body">
