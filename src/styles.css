@@ -1230,12 +1230,7 @@ code {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
   width: 100%;
-}
-
-.row-actions-cell > span {
-  flex: 1;
 }
 
 .row-primary {

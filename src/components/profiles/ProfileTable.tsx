@@ -393,7 +393,6 @@ function renderCell({
               {launchPending ? statusText("launching", t) : t("actions.open")}
             </button>
           )}
-          {session?.lastError && <CircleAlert className="fail" size={15} aria-label={session.lastError} />}
         </div>
       );
   }
