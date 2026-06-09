@@ -170,17 +170,24 @@ export function RegistryModuleView({
           </button>
         }
       >
-        <div className="module-card-grid">
+        <div className="module-card-grid group-tile-grid">
           {stats.groups.map((group) => (
-            <div className="module-card managed" key={group.id ?? group.name}>
-              <button className="module-card-main" onClick={() => showProfiles({ group: group.name })} type="button">
-                <strong>{group.name}</strong>
-                <span>{t("module.profileCount", { count: group.count })}</span>
-                <small>{t("module.runningCount", { count: group.running })}</small>
+            <div className="module-card managed group-tile" key={group.id ?? group.name}>
+              <button className="group-tile-main" onClick={() => showProfiles({ group: group.name })} type="button">
+                <span className="group-tile-icon" style={group.color ? { color: group.color } : undefined} aria-hidden="true">
+                  <FolderKanban size={18} />
+                </span>
+                <span className="group-tile-copy">
+                  <strong>{group.name}</strong>
+                  <small>
+                    {t("module.profileCount", { count: group.count })} · {t("module.runningCount", { count: group.running })}
+                  </small>
+                  {group.description && <small>{group.description}</small>}
+                </span>
+                <span className="group-tile-status">{group.isDefault ? <span className="pill stopped">{t("form.default")}</span> : renderEntityStatus(group.status, t)}</span>
               </button>
               {group.id && (
-                <div className="module-row-actions">
-                  {renderEntityStatus(group.status, t)}
+                <div className="module-row-actions group-tile-actions">
                   <button
                     className="command subtle"
                     disabled={busy === `group-update:${group.id}`}
@@ -192,48 +199,53 @@ export function RegistryModuleView({
                   >
                     {t("actions.edit")}
                   </button>
-                  <button
-                    className="command subtle"
-                    disabled={group.isDefault || busy === `group-update:${group.id}`}
-                    onClick={() => {
-                      const entity = groups.find((item) => item.id === group.id);
-                      if (entity) void updateGroup(entity, { status: entity.status === "disabled" ? "enabled" : "disabled" });
-                    }}
-                    title={group.isDefault ? t("module.defaultGroupLocked") : undefined}
-                    type="button"
-                  >
-                    {t(group.status === "disabled" ? "actions.enable" : "actions.disable")}
-                  </button>
-                  <button
-                    className="command subtle"
-                    disabled={group.isDefault || !groups.some((item) => item.id !== group.id) || busy === `group-merge:${group.id}`}
-                    onClick={() => {
-                      const entity = groups.find((item) => item.id === group.id);
-                      if (entity) void mergeGroup(entity);
-                    }}
-                    title={
-                      group.isDefault
-                        ? t("module.defaultGroupLocked")
-                        : groups.some((item) => item.id !== group.id)
-                          ? undefined
-                          : t("module.noMergeTarget")
-                    }
-                    type="button"
-                  >
-                    {t("actions.merge")}
-                  </button>
-                  <button
-                    className="command danger subtle"
-                    disabled={group.isDefault || busy === `group-delete:${group.id}`}
-                    onClick={() => {
-                      const entity = groups.find((item) => item.id === group.id);
-                      if (entity) requestGroupDelete(entity);
-                    }}
-                    title={group.isDefault ? t("module.defaultGroupLocked") : undefined}
-                    type="button"
-                  >
-                    {t("actions.delete")}
-                  </button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button className="icon-button compact" aria-label={t("actions.more")} title={t("actions.more")} type="button">
+                        <MoreHorizontal size={16} aria-hidden="true" />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="group-tile-menu">
+                      <DropdownMenuItem
+                        disabled={group.isDefault || busy === `group-update:${group.id}`}
+                        onSelect={() => {
+                          const entity = groups.find((item) => item.id === group.id);
+                          if (entity) void updateGroup(entity, { status: entity.status === "disabled" ? "enabled" : "disabled" });
+                        }}
+                        title={group.isDefault ? t("module.defaultGroupLocked") : undefined}
+                      >
+                        {t(group.status === "disabled" ? "actions.enable" : "actions.disable")}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        disabled={group.isDefault || !groups.some((item) => item.id !== group.id) || busy === `group-merge:${group.id}`}
+                        onSelect={() => {
+                          const entity = groups.find((item) => item.id === group.id);
+                          if (entity) void mergeGroup(entity);
+                        }}
+                        title={
+                          group.isDefault
+                            ? t("module.defaultGroupLocked")
+                            : groups.some((item) => item.id !== group.id)
+                              ? undefined
+                              : t("module.noMergeTarget")
+                        }
+                      >
+                        {t("actions.merge")}
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        className="dropdown-menu-item-danger"
+                        disabled={group.isDefault || busy === `group-delete:${group.id}`}
+                        onSelect={() => {
+                          const entity = groups.find((item) => item.id === group.id);
+                          if (entity) requestGroupDelete(entity);
+                        }}
+                        title={group.isDefault ? t("module.defaultGroupLocked") : undefined}
+                      >
+                        {t("actions.delete")}
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </div>
               )}
             </div>
