@@ -1885,6 +1885,19 @@ dl.browser-core-download-details .mono-cell {
   justify-content: flex-end;
 }
 
+.proxy-row-menu {
+  min-width: 150px;
+}
+
+.dropdown-menu-item-danger {
+  color: var(--danger);
+}
+
+.dropdown-menu-item-danger[data-highlighted] {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
 .proxy-check-state {
   overflow: hidden;
 }

@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from "react";
-import { Archive, FilePlus2, FolderKanban, Info, Network, Plug, RotateCcw, Tags, Trash2 } from "lucide-react";
+import { Archive, FilePlus2, FolderKanban, Info, MoreHorizontal, Network, Plug, RotateCcw, Tags, Trash2 } from "lucide-react";
 
 import type { TranslationKey } from "../../i18n";
 import { formatTime } from "../../lib/utils";
@@ -8,6 +8,7 @@ import type { ExtensionEntity, ExtensionSourceEntity, GroupEntity, ProxyEntity, 
 import type { PanelState } from "../../shared/profile";
 import type { DesktopRuntimeInfo, StorageInfo } from "../../shared/settings";
 import { maskManagedProxyForDisplay } from "../profiles/proxyDisplay";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "../ui/dropdown-menu";
 import type { ModeFilter, ModuleStat, ModuleStats, ProxyFilter, StatusFilter, WorkbenchView } from "./registryStats";
 import { RegistryModuleEmpty, RegistryModuleShell } from "./RegistryModuleShell";
 
@@ -746,9 +747,6 @@ function ProxyRegistryRow({
             <button className="command subtle" disabled={busy === `proxy-check:${proxy.id}`} onClick={() => void checkManagedProxy(proxy)} type="button">
               {t("actions.check")}
             </button>
-            <button className="command subtle" disabled={busy === `proxy-duplicate:${proxy.id}`} onClick={() => void duplicateProxy(proxy)} type="button">
-              {t("actions.duplicate")}
-            </button>
             <button
               className="command subtle"
               disabled={busy === `proxy-update:${proxy.id}`}
@@ -757,27 +755,40 @@ function ProxyRegistryRow({
             >
               {t(proxy.status === "disabled" ? "actions.enable" : "actions.disable")}
             </button>
-            <button
-              className="command subtle"
-              disabled={!canReplace || !hasReferences || busy === `proxy-replace:${proxy.id}`}
-              onClick={() => requestProxyReference("replace", proxy)}
-              title={!canReplace ? t("module.noReplaceTarget") : !hasReferences ? t("module.noReferences") : undefined}
-              type="button"
-            >
-              {t("actions.replaceReferences")}
-            </button>
-            <button
-              className="command subtle"
-              disabled={!hasReferences || busy === `proxy-unbind:${proxy.id}`}
-              onClick={() => requestProxyReference("unbind", proxy)}
-              title={!hasReferences ? t("module.noReferences") : undefined}
-              type="button"
-            >
-              {t("actions.unbindReferences")}
-            </button>
-            <button className="command danger subtle" disabled={busy === `proxy-delete:${proxy.id}`} onClick={() => requestProxyDelete(proxy)} type="button">
-              {t("actions.delete")}
-            </button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className="icon-button compact" aria-label={t("actions.more")} title={t("actions.more")} type="button">
+                  <MoreHorizontal size={16} aria-hidden="true" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="proxy-row-menu">
+                <DropdownMenuItem disabled={busy === `proxy-duplicate:${proxy.id}`} onSelect={() => void duplicateProxy(proxy)}>
+                  {t("actions.duplicate")}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={!canReplace || !hasReferences || busy === `proxy-replace:${proxy.id}`}
+                  onSelect={() => requestProxyReference("replace", proxy)}
+                  title={!canReplace ? t("module.noReplaceTarget") : !hasReferences ? t("module.noReferences") : undefined}
+                >
+                  {t("actions.replaceReferences")}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={!hasReferences || busy === `proxy-unbind:${proxy.id}`}
+                  onSelect={() => requestProxyReference("unbind", proxy)}
+                  title={!hasReferences ? t("module.noReferences") : undefined}
+                >
+                  {t("actions.unbindReferences")}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  className="dropdown-menu-item-danger"
+                  disabled={busy === `proxy-delete:${proxy.id}`}
+                  onSelect={() => requestProxyDelete(proxy)}
+                >
+                  {t("actions.delete")}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         )}
       </div>
