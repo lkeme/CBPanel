@@ -57,8 +57,9 @@ export function ProfileInspectorAside({
           {t("actions.edit")}
         </button>
       </header>
+      <LaunchFailurePanel editProfile={editProfile} session={selectedSession} t={t} />
       <ProfileSummaryPanel draft={draft} session={selectedSession} storage={storage} t={t} />
-      <PreflightPanel busy={busy} onAction={runPreflightAction} report={preflight} t={t} />
+      <PreflightPanel busy={busy} launchBlocked={hasLaunchFailure(selectedSession)} onAction={runPreflightAction} report={preflight} t={t} />
       <SessionPanel session={selectedSession} state={state} draft={draft} t={t} />
       <ScorePanel draft={draft} t={t} />
       <CodePanel
@@ -121,8 +122,9 @@ export function DetailsDrawer({
             {t("actions.edit")}
           </button>
         </div>
+        <LaunchFailurePanel editProfile={editProfile} session={selectedSession} t={t} />
         <ProfileSummaryPanel draft={draft} session={selectedSession} storage={storage} t={t} />
-        <PreflightPanel busy={busy} onAction={runPreflightAction} report={preflight} t={t} />
+        <PreflightPanel busy={busy} launchBlocked={hasLaunchFailure(selectedSession)} onAction={runPreflightAction} report={preflight} t={t} />
         <SessionPanel session={selectedSession} state={state} draft={draft} t={t} />
         <ScorePanel draft={draft} t={t} />
         <CodePanel
@@ -137,26 +139,66 @@ export function DetailsDrawer({
   );
 }
 
+function LaunchFailurePanel({
+  editProfile,
+  session,
+  t,
+}: {
+  editProfile: () => void;
+  session?: SessionSummary;
+  t: (key: TranslationKey) => string;
+}) {
+  if (!hasLaunchFailure(session)) return null;
+  const rawMessage = session?.lastError ?? "";
+  const message = cleanLaunchError(rawMessage);
+  return (
+    <section className="side-section launch-failure-card">
+      <div className="launch-failure-icon" aria-hidden="true">
+        <CircleAlert size={18} />
+      </div>
+      <div className="launch-failure-copy">
+        <span>{t("diagnostic.launchBlocked")}</span>
+        <strong>{proxyExitFailureTitle(rawMessage, t)}</strong>
+        <small>{message || t("diagnostic.launchBlockedDetail")}</small>
+      </div>
+      <button className="command subtle compact" onClick={editProfile} type="button">
+        <SlidersHorizontal size={16} aria-hidden="true" />
+        {t("actions.edit")}
+      </button>
+    </section>
+  );
+}
+
 export function ProfileSummaryPanel({ draft, session, storage, t }: { draft: BrowserProfile; session?: SessionSummary; storage?: StorageInfo; t: (key: TranslationKey) => string }) {
+  const status = session?.status ?? "stopped";
+  const items = [
+    { label: t("table.group"), value: draft.group || "-" },
+    { label: t("table.mode"), value: t(draft.mode === "persistent" ? "mode.persistent" : "mode.ephemeral") },
+    { label: t("table.status"), value: statusText(status, t), tone: status },
+    { label: t("panel.storage"), value: storage?.kind ?? "sqlite" },
+  ];
   return (
     <section className="side-section profile-summary">
       <div className="section-title">
         <Fingerprint size={17} />
         <h2>{draft.name}</h2>
       </div>
-      <div className="summary-grid">
-        <span>{draft.group}</span>
-        <span>{t(draft.mode === "persistent" ? "mode.persistent" : "mode.ephemeral")}</span>
-        <span>{statusText(session?.status ?? "stopped", t)}</span>
-        <span>{storage?.kind ?? "sqlite"}</span>
-      </div>
+      <dl className="summary-strip">
+        {items.map((item) => (
+          <div className={item.tone ? `summary-chip ${item.tone}` : "summary-chip"} key={item.label}>
+            <dt>{item.label}</dt>
+            <dd>{item.value}</dd>
+          </div>
+        ))}
+      </dl>
     </section>
   );
 }
 
-export function SessionPanel({ session, state, draft, t }: { session?: SessionSummary; state: PanelState | null; draft: BrowserProfile; t: (key: TranslationKey) => string }) {
+export function SessionPanel({ session, state, draft, t }: { session?: SessionSummary; state: PanelState | null; draft: BrowserProfile; t: (key: TranslationKey, params?: Record<string, string | number>) => string }) {
   const launch = session?.launch;
   const events = session?.events ?? [];
+  const launchFailed = hasLaunchFailure(session);
   return (
     <section className="side-section">
       <div className="section-title">
@@ -187,17 +229,23 @@ export function SessionPanel({ session, state, draft, t }: { session?: SessionSu
           <dd>{launch ? `${launch.runtimeLauncher} -> ${launch.sdkLauncher}` : draft.runtime.launcher}</dd>
         </div>
       </dl>
-      {session?.lastError && <div className="inline-error">{session.lastError}</div>}
+      {session?.lastError && !launchFailed && <div className="inline-error">{session.lastError}</div>}
       {events.length > 0 && (
-        <div className="session-events" aria-label={t("aria.sessionEvents")}>
-          {events.map((event) => (
-            <div className={`session-event ${event.level}`} key={`${event.at}-${event.message}`}>
-              <span>{formatTime(event.at)}</span>
-              <strong>{event.message}</strong>
-              {event.detail && <small>{event.detail}</small>}
-            </div>
-          ))}
-        </div>
+        <details className="session-events" aria-label={t("aria.sessionEvents")}>
+          <summary>
+            <span>{t("diagnostic.launchLog")}</span>
+            <strong>{t("diagnostic.eventCount", { count: events.length })}</strong>
+          </summary>
+          <div className="session-event-list">
+            {events.map((event) => (
+              <div className={`session-event ${event.level}`} key={`${event.at}-${event.message}`}>
+                <span>{formatTime(event.at)}</span>
+                <strong>{event.message}</strong>
+                {event.detail && <small>{event.detail}</small>}
+              </div>
+            ))}
+          </div>
+        </details>
       )}
     </section>
   );
@@ -205,11 +253,13 @@ export function SessionPanel({ session, state, draft, t }: { session?: SessionSu
 
 export function PreflightPanel({
   busy,
+  launchBlocked,
   onAction,
   report,
   t,
 }: {
   busy: string;
+  launchBlocked?: boolean;
   onAction: (action: ProfilePreflightAction) => Promise<void>;
   report: ProfilePreflightReport | null;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
@@ -223,7 +273,10 @@ export function PreflightPanel({
         {report && <span className={`pill ${report.ok ? "running" : "error"}`}>{report.ok ? t("form.pass") : t("form.fail")}</span>}
       </div>
       {!report ? (
-        <div className="preflight-empty">{t("preflight.notRun")}</div>
+        <div className={launchBlocked ? "preflight-empty diagnostic-note" : "preflight-empty"}>
+          <strong>{launchBlocked ? t("diagnostic.launchCheckInterrupted") : t("preflight.notRun")}</strong>
+          {launchBlocked && <small>{t("diagnostic.launchCheckInterruptedDetail")}</small>}
+        </div>
       ) : (
         <>
           <div className={`preflight-summary ${report.ok ? "pass" : "fail"}`}>
@@ -291,6 +344,19 @@ export function formatSummary(
 
 export function firstPreflightFailure(report: ProfilePreflightReport): ProfilePreflightReport["items"][number] | undefined {
   return report.items.find((item) => item.severity === "fail");
+}
+
+function hasLaunchFailure(session?: SessionSummary): boolean {
+  return session?.status === "error" && Boolean(session.lastError);
+}
+
+function cleanLaunchError(message: string): string {
+  return message.replace(/^代理出口检测失败，已阻止启动：/, "").replace(/^Proxy exit check failed, launch blocked:\s*/i, "").trim();
+}
+
+function proxyExitFailureTitle(message: string, t: (key: TranslationKey) => string): string {
+  if (/代理出口|proxy exit/i.test(message)) return t("diagnostic.proxyExitFailed");
+  return t("diagnostic.launchFailed");
 }
 
 export function preflightToastMessage(

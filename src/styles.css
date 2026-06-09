@@ -2243,21 +2243,51 @@ dl.browser-core-download-details .mono-cell {
   background: var(--surface);
 }
 
-.summary-grid {
+.summary-strip {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
   gap: 8px;
+  margin: 0;
 }
 
-.summary-grid span {
-  min-height: 34px;
-  padding: 7px 9px;
+.summary-chip {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding: 8px 9px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
+}
+
+.summary-chip dt {
   overflow: hidden;
+  color: var(--foreground-muted);
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
+}
+
+.summary-chip dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary-chip.error {
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border));
+}
+
+.summary-chip.running,
+.summary-chip.launching {
+  background: var(--success-soft);
+  border-color: color-mix(in srgb, var(--success) 24%, var(--border));
 }
 
 .section-title {
@@ -3849,6 +3879,62 @@ textarea {
   border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
 }
 
+.launch-failure-card {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  color: var(--danger);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--danger) 14%, transparent), transparent 56%),
+    var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 36%, var(--border));
+}
+
+.launch-failure-icon {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--border));
+  border-radius: var(--radius-control);
+}
+
+.launch-failure-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.launch-failure-copy span {
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.launch-failure-copy strong {
+  color: var(--foreground);
+  font-size: 15px;
+}
+
+.launch-failure-copy small {
+  color: var(--foreground-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.inspector .launch-failure-card {
+  grid-template-columns: 34px minmax(0, 1fr);
+}
+
+.inspector .launch-failure-card .command {
+  grid-column: 2;
+  justify-self: start;
+}
+
 .kv-list,
 .env-grid {
   display: grid;
@@ -3890,6 +3976,22 @@ textarea {
 .preflight-summary {
   display: grid;
   gap: 4px;
+}
+
+.diagnostic-note {
+  display: grid;
+  gap: 4px;
+}
+
+.diagnostic-note strong {
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.diagnostic-note small {
+  color: var(--foreground-muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .preflight-summary.fail {
@@ -3943,6 +4045,46 @@ textarea {
   display: grid;
   gap: 10px;
   margin-top: 12px;
+}
+
+.session-events {
+  gap: 0;
+  padding: 0;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.session-events summary {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.session-events summary::-webkit-details-marker {
+  display: none;
+}
+
+.session-events summary span {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.session-events summary strong {
+  color: var(--foreground-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.session-event-list {
+  display: grid;
+  padding: 0 12px 8px;
 }
 
 .score-row {
