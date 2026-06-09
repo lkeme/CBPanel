@@ -9,6 +9,7 @@ import type { PanelState } from "../../shared/profile";
 import type { DesktopRuntimeInfo, StorageInfo } from "../../shared/settings";
 import { maskManagedProxyForDisplay } from "../profiles/proxyDisplay";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "../ui/dropdown-menu";
+import { LoadingSkeleton } from "../ui/LoadingSkeleton";
 import type { ModeFilter, ModuleStat, ModuleStats, ProxyFilter, StatusFilter, WorkbenchView } from "./registryStats";
 import { RegistryModuleEmpty, RegistryModuleShell } from "./RegistryModuleShell";
 
@@ -144,7 +145,7 @@ export function RegistryModuleView({
 }: RegistryModuleViewProps) {
   if (view === "runtimeCheck") {
     return (
-      <Suspense fallback={<div className="preflight-empty">{t("status.loading")}</div>}>
+      <Suspense fallback={<LoadingSkeleton rows={4} />}>
         <RuntimeCheckContent
           binaryInfo={binaryInfo}
           browserCoreMissing={browserCoreMissing}
@@ -619,7 +620,7 @@ export function RegistryModuleView({
   if (view === "system") {
     return (
       <RegistryModuleShell icon={<Info size={19} />} title={t("system.title")} body={t("system.diagnostics")}>
-        <Suspense fallback={<div className="preflight-empty">{t("status.loading")}</div>}>
+        <Suspense fallback={<LoadingSkeleton rows={5} />}>
           <SystemStatusContent
             binaryInfo={binaryInfo}
             busy={busy}

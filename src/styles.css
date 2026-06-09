@@ -3968,6 +3968,90 @@ textarea {
   border-radius: var(--radius);
 }
 
+.loading-skeleton {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 2px rgba(35, 49, 83, 0.035);
+}
+
+.loading-skeleton-drawer {
+  margin: 16px;
+}
+
+.loading-skeleton-modal {
+  border-color: var(--border-subtle);
+  box-shadow: none;
+}
+
+.loading-skeleton-head {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.loading-skeleton-mark,
+.loading-skeleton-title,
+.loading-skeleton-line {
+  display: block;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, transparent, color-mix(in srgb, var(--surface) 72%, transparent), transparent),
+    color-mix(in srgb, var(--surface-muted) 86%, var(--border));
+  background-size: 220% 100%;
+  border-radius: 999px;
+  animation: cbpanel-skeleton 1.15s ease-in-out infinite;
+}
+
+.loading-skeleton-mark {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-control);
+}
+
+.loading-skeleton-title {
+  width: min(280px, 68%);
+  height: 16px;
+}
+
+.loading-skeleton-lines {
+  display: grid;
+  gap: 9px;
+}
+
+.loading-skeleton-line {
+  height: 12px;
+}
+
+.loading-skeleton-line:nth-child(2n) {
+  width: 86%;
+}
+
+.loading-skeleton-line:nth-child(3n) {
+  width: 64%;
+}
+
+@keyframes cbpanel-skeleton {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-skeleton-mark,
+  .loading-skeleton-title,
+  .loading-skeleton-line {
+    animation: none;
+  }
+}
+
 .preflight-summary {
   display: grid;
   gap: 4px;

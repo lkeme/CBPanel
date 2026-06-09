@@ -30,6 +30,7 @@ import {
 import type { ConfirmDialogState, ExtensionImportDialogState, TextInputDialogState } from "./components/registry/RegistryDialogs";
 import { buildModuleStats, type ModeFilter, type ProxyFilter, type StatusFilter, type WorkbenchView } from "./components/registry/registryStats";
 import type { SettingsTab } from "./components/settings/SettingsDrawer";
+import { LoadingSkeleton } from "./components/ui/LoadingSkeleton";
 import { TooltipProvider } from "./components/ui/tooltip";
 import {
   type BrowserProfile,
@@ -906,7 +907,7 @@ function App() {
                   />
                 </section>
               ) : (
-                <Suspense fallback={<div className="preflight-empty">{t("status.loading")}</div>}>
+                <Suspense fallback={<LoadingSkeleton rows={4} />}>
                   <RegistryModuleView
                     busy={busy}
                     binaryInfo={binaryInfo}
@@ -1244,7 +1245,7 @@ function LazyDrawerFallback({
           </button>
         </header>
         <div className="drawer-scroll">
-          <div className="preflight-empty">{t("status.loading")}</div>
+          <LoadingSkeleton variant="drawer" />
         </div>
       </section>
     </div>
@@ -1257,7 +1258,7 @@ function LazyModalFallback({ t }: { t: (key: TranslationKey) => string }) {
       <div className="modal-scrim" />
       <section className="modal-panel">
         <div className="modal-body">
-          <div className="preflight-empty">{t("status.loading")}</div>
+          <LoadingSkeleton rows={2} variant="modal" />
         </div>
       </section>
     </div>
