@@ -1827,8 +1827,27 @@ dl.browser-core-download-details .mono-cell {
 }
 
 .module-list-row.proxy-registry-row {
-  grid-template-columns: minmax(230px, 1.2fr) minmax(120px, 0.55fr) minmax(132px, 0.5fr) minmax(150px, 0.75fr) minmax(320px, auto);
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
+  padding: 16px;
+}
+
+.proxy-registry-topline,
+.proxy-registry-bottomline {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+  align-items: center;
+}
+
+.proxy-registry-topline {
+  grid-template-columns: minmax(260px, 1fr) minmax(110px, 0.32fr) minmax(132px, auto) auto;
+}
+
+.proxy-registry-bottomline {
+  grid-template-columns: minmax(260px, 1fr) minmax(0, auto);
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
 }
 
 .proxy-registry-main,
@@ -1854,6 +1873,31 @@ dl.browser-core-download-details .mono-cell {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.proxy-registry-status {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.proxy-row-actions {
+  justify-content: flex-end;
+}
+
+.proxy-check-state {
+  overflow: hidden;
+}
+
+.proxy-check-state .pill {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.proxy-check-state .pill.error {
+  justify-content: flex-start;
 }
 
 .module-count-button {
@@ -1884,6 +1928,37 @@ dl.browser-core-download-details .mono-cell {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@media (max-width: 1280px) {
+  .proxy-registry-topline {
+    grid-template-columns: minmax(260px, 1fr) minmax(108px, auto) minmax(128px, auto);
+  }
+
+  .proxy-registry-status {
+    grid-column: 2 / 4;
+    justify-content: flex-end;
+  }
+
+  .proxy-registry-bottomline {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .proxy-row-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 980px) {
+  .proxy-registry-topline {
+    grid-template-columns: minmax(0, 1fr) minmax(112px, auto);
+  }
+
+  .proxy-registry-meta,
+  .module-count-button,
+  .proxy-registry-status {
+    grid-column: auto;
+  }
 }
 
 .module-subsection {

@@ -714,71 +714,73 @@ function ProxyRegistryRow({
 
   return (
     <div className="module-list-row managed proxy-registry-row">
-      <span className="proxy-registry-main">
-        <strong>{proxy?.name ?? stat.name}</strong>
-        <small className="mono-cell">{maskManagedProxyForDisplay(proxy, address)}</small>
-        {proxy?.notes && <small>{proxy.notes}</small>}
-      </span>
-      <span className="proxy-registry-meta">
-        <strong>{proxy?.scheme.toUpperCase() ?? "-"}</strong>
-        <small>{proxy?.username ? t("proxy.credentials.saved") : t("proxy.credentials.none")}</small>
-      </span>
-      <button
-        className="module-count-button"
-        disabled={!proxy || stat.count === 0}
-        onClick={() => proxy && showProfiles({ proxyId: proxy.id })}
-        title={stat.count === 0 ? t("module.noReferences") : undefined}
-        type="button"
-      >
-        <strong>{t("module.profileCount", { count: stat.count })}</strong>
-        <small>{t("module.runningCount", { count: stat.running })}</small>
-      </button>
-      <span className="proxy-check-state">
-        {proxyCheckSummary(check, t)}
-      </span>
-      {proxy && (
-        <div className="module-row-actions">
-          {renderEntityStatus(proxy.status, t)}
-          <button className="command subtle" disabled={busy === `proxy-load:${proxy.id}`} onClick={() => void editProxy(proxy)} type="button">
-            {t("actions.edit")}
-          </button>
-          <button className="command subtle" disabled={busy === `proxy-check:${proxy.id}`} onClick={() => void checkManagedProxy(proxy)} type="button">
-            {t("actions.check")}
-          </button>
-          <button className="command subtle" disabled={busy === `proxy-duplicate:${proxy.id}`} onClick={() => void duplicateProxy(proxy)} type="button">
-            {t("actions.duplicate")}
-          </button>
-          <button
-            className="command subtle"
-            disabled={busy === `proxy-update:${proxy.id}`}
-            onClick={() => void updateProxy(proxy, { status: proxy.status === "disabled" ? "enabled" : "disabled" })}
-            type="button"
-          >
-            {t(proxy.status === "disabled" ? "actions.enable" : "actions.disable")}
-          </button>
-          <button
-            className="command subtle"
-            disabled={!canReplace || !hasReferences || busy === `proxy-replace:${proxy.id}`}
-            onClick={() => requestProxyReference("replace", proxy)}
-            title={!canReplace ? t("module.noReplaceTarget") : !hasReferences ? t("module.noReferences") : undefined}
-            type="button"
-          >
-            {t("actions.replaceReferences")}
-          </button>
-          <button
-            className="command subtle"
-            disabled={!hasReferences || busy === `proxy-unbind:${proxy.id}`}
-            onClick={() => requestProxyReference("unbind", proxy)}
-            title={!hasReferences ? t("module.noReferences") : undefined}
-            type="button"
-          >
-            {t("actions.unbindReferences")}
-          </button>
-          <button className="command danger subtle" disabled={busy === `proxy-delete:${proxy.id}`} onClick={() => requestProxyDelete(proxy)} type="button">
-            {t("actions.delete")}
-          </button>
-        </div>
-      )}
+      <div className="proxy-registry-topline">
+        <span className="proxy-registry-main">
+          <strong>{proxy?.name ?? stat.name}</strong>
+          <small className="mono-cell">{maskManagedProxyForDisplay(proxy, address)}</small>
+          {proxy?.notes && <small>{proxy.notes}</small>}
+        </span>
+        <span className="proxy-registry-meta">
+          <strong>{proxy?.scheme.toUpperCase() ?? "-"}</strong>
+          <small>{proxy?.username ? t("proxy.credentials.saved") : t("proxy.credentials.none")}</small>
+        </span>
+        <button
+          className="module-count-button"
+          disabled={!proxy || stat.count === 0}
+          onClick={() => proxy && showProfiles({ proxyId: proxy.id })}
+          title={stat.count === 0 ? t("module.noReferences") : undefined}
+          type="button"
+        >
+          <strong>{t("module.profileCount", { count: stat.count })}</strong>
+          <small>{t("module.runningCount", { count: stat.running })}</small>
+        </button>
+        {proxy && <span className="proxy-registry-status">{renderEntityStatus(proxy.status, t)}</span>}
+      </div>
+      <div className="proxy-registry-bottomline">
+        <span className="proxy-check-state">{proxyCheckSummary(check, t)}</span>
+        {proxy && (
+          <div className="module-row-actions proxy-row-actions">
+            <button className="command subtle" disabled={busy === `proxy-load:${proxy.id}`} onClick={() => void editProxy(proxy)} type="button">
+              {t("actions.edit")}
+            </button>
+            <button className="command subtle" disabled={busy === `proxy-check:${proxy.id}`} onClick={() => void checkManagedProxy(proxy)} type="button">
+              {t("actions.check")}
+            </button>
+            <button className="command subtle" disabled={busy === `proxy-duplicate:${proxy.id}`} onClick={() => void duplicateProxy(proxy)} type="button">
+              {t("actions.duplicate")}
+            </button>
+            <button
+              className="command subtle"
+              disabled={busy === `proxy-update:${proxy.id}`}
+              onClick={() => void updateProxy(proxy, { status: proxy.status === "disabled" ? "enabled" : "disabled" })}
+              type="button"
+            >
+              {t(proxy.status === "disabled" ? "actions.enable" : "actions.disable")}
+            </button>
+            <button
+              className="command subtle"
+              disabled={!canReplace || !hasReferences || busy === `proxy-replace:${proxy.id}`}
+              onClick={() => requestProxyReference("replace", proxy)}
+              title={!canReplace ? t("module.noReplaceTarget") : !hasReferences ? t("module.noReferences") : undefined}
+              type="button"
+            >
+              {t("actions.replaceReferences")}
+            </button>
+            <button
+              className="command subtle"
+              disabled={!hasReferences || busy === `proxy-unbind:${proxy.id}`}
+              onClick={() => requestProxyReference("unbind", proxy)}
+              title={!hasReferences ? t("module.noReferences") : undefined}
+              type="button"
+            >
+              {t("actions.unbindReferences")}
+            </button>
+            <button className="command danger subtle" disabled={busy === `proxy-delete:${proxy.id}`} onClick={() => requestProxyDelete(proxy)} type="button">
+              {t("actions.delete")}
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
