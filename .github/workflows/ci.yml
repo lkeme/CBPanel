@@ -4,6 +4,16 @@ on:
   push:
     branches:
       - master
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.mdx"
+      - "README*"
+      - "CHANGELOG*"
+      - "LICENSE"
+      - "NOTICE*"
+      - "docs/**"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE*"
   pull_request:
 
 jobs:
