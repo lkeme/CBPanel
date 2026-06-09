@@ -258,17 +258,22 @@ export function RegistryModuleView({
           </button>
         }
       >
-        <div className="module-chip-grid">
+        <div className="module-chip-grid tag-tile-grid">
           {stats.tags.map((tag) => (
-            <div className="module-chip managed" key={tag.id ?? tag.name}>
-              <button className="module-card-main" onClick={() => showProfiles({ tags: [tag.name] })} type="button">
-                <span className="tag">{tag.name}</span>
-                <strong>{tag.count}</strong>
-                <small>{t("module.runningCount", { count: tag.running })}</small>
+            <div className="module-chip managed tag-tile" key={tag.id ?? tag.name}>
+              <button className="tag-tile-main" onClick={() => showProfiles({ tags: [tag.name] })} type="button">
+                <span className="tag-tile-dot" style={tag.color ? { backgroundColor: tag.color } : undefined} aria-hidden="true" />
+                <span className="tag-tile-copy">
+                  <strong>{tag.name}</strong>
+                  <small>
+                    {t("module.profileCount", { count: tag.count })} · {t("module.runningCount", { count: tag.running })}
+                  </small>
+                  {tag.description && <small>{tag.description}</small>}
+                </span>
+                {tag.status && <span className="tag-tile-status">{renderEntityStatus(tag.status, t)}</span>}
               </button>
               {tag.id && (
-                <div className="module-row-actions">
-                  {renderEntityStatus(tag.status, t)}
+                <div className="module-row-actions tag-tile-actions">
                   <button
                     className="command subtle"
                     disabled={busy === `tag-update:${tag.id}`}
@@ -280,40 +285,45 @@ export function RegistryModuleView({
                   >
                     {t("actions.edit")}
                   </button>
-                  <button
-                    className="command subtle"
-                    disabled={busy === `tag-update:${tag.id}`}
-                    onClick={() => {
-                      const entity = tags.find((item) => item.id === tag.id);
-                      if (entity) void updateTag(entity, { status: entity.status === "disabled" ? "enabled" : "disabled" });
-                    }}
-                    type="button"
-                  >
-                    {t(tag.status === "disabled" ? "actions.enable" : "actions.disable")}
-                  </button>
-                  <button
-                    className="command subtle"
-                    disabled={!tags.some((item) => item.id !== tag.id) || busy === `tag-merge:${tag.id}`}
-                    onClick={() => {
-                      const entity = tags.find((item) => item.id === tag.id);
-                      if (entity) void mergeTag(entity);
-                    }}
-                    title={tags.some((item) => item.id !== tag.id) ? undefined : t("module.noMergeTarget")}
-                    type="button"
-                  >
-                    {t("actions.merge")}
-                  </button>
-                  <button
-                    className="command danger subtle"
-                    disabled={busy === `tag-delete:${tag.id}`}
-                    onClick={() => {
-                      const entity = tags.find((item) => item.id === tag.id);
-                      if (entity) requestTagDelete(entity);
-                    }}
-                    type="button"
-                  >
-                    {t("actions.delete")}
-                  </button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button className="icon-button compact" aria-label={t("actions.more")} title={t("actions.more")} type="button">
+                        <MoreHorizontal size={16} aria-hidden="true" />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="tag-tile-menu">
+                      <DropdownMenuItem
+                        disabled={busy === `tag-update:${tag.id}`}
+                        onSelect={() => {
+                          const entity = tags.find((item) => item.id === tag.id);
+                          if (entity) void updateTag(entity, { status: entity.status === "disabled" ? "enabled" : "disabled" });
+                        }}
+                      >
+                        {t(tag.status === "disabled" ? "actions.enable" : "actions.disable")}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        disabled={!tags.some((item) => item.id !== tag.id) || busy === `tag-merge:${tag.id}`}
+                        onSelect={() => {
+                          const entity = tags.find((item) => item.id === tag.id);
+                          if (entity) void mergeTag(entity);
+                        }}
+                        title={tags.some((item) => item.id !== tag.id) ? undefined : t("module.noMergeTarget")}
+                      >
+                        {t("actions.merge")}
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        className="dropdown-menu-item-danger"
+                        disabled={busy === `tag-delete:${tag.id}`}
+                        onSelect={() => {
+                          const entity = tags.find((item) => item.id === tag.id);
+                          if (entity) requestTagDelete(entity);
+                        }}
+                      >
+                        {t("actions.delete")}
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </div>
               )}
             </div>

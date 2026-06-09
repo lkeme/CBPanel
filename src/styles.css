@@ -1743,6 +1743,10 @@ dl.browser-core-download-details .mono-cell {
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
 }
 
+.module-chip-grid.tag-tile-grid {
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+
 .module-card,
 .module-chip,
 .module-list-row,
@@ -1794,6 +1798,79 @@ dl.browser-core-download-details .mono-cell {
   background: transparent;
   border: 0;
   border-radius: 0;
+}
+
+.tag-tile {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding: 13px;
+}
+
+.tag-tile-main {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  gap: 10px;
+  min-width: 0;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.tag-tile-main:hover .tag-tile-copy strong {
+  color: var(--primary);
+}
+
+.tag-tile-dot {
+  width: 8px;
+  height: 28px;
+  margin-top: 2px;
+  background: var(--primary);
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.tag-tile-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.tag-tile-copy strong,
+.tag-tile-copy small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag-tile-copy strong {
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.tag-tile-copy small {
+  color: var(--foreground-muted);
+  font-size: 12px;
+}
+
+.tag-tile-status {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.tag-tile-actions {
+  justify-content: flex-end;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+}
+
+.tag-tile-menu {
+  min-width: 132px;
 }
 
 .module-row-actions {
