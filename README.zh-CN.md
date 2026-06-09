@@ -6,6 +6,10 @@ CBPanel 是 [CloakBrowser](https://github.com/CloakHQ/CloakBrowser/) 的本地 W
 
 ![CBPanel workbench](.github/assets/cbpanel-workbench.png)
 
+## 兼容性说明
+
+目前只测试过 Windows 便携版；其他产物按当前状态提供，不保证可用。
+
 ## 快速开始
 
 ```bash

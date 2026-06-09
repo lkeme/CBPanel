@@ -6,6 +6,10 @@ CBPanel is a local Web + Desktop management shell for [CloakBrowser](https://git
 
 ![CBPanel workbench](.github/assets/cbpanel-workbench.png)
 
+## Compatibility Note
+
+Only the Windows portable build has been tested. Other artifacts are provided as-is and are not guaranteed to work.
+
 ## Quick Start
 
 ```bash
