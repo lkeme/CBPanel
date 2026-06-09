@@ -2,10 +2,14 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { currentRustTarget, sidecarFileName } from "./release-target.mjs";
+import { isWindowsRustTarget, sidecarFileName } from "./release-target.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const rustTarget = process.env.CBPANEL_RUST_TARGET ?? currentRustTarget();
+const rustTarget = process.env.CBPANEL_RUST_TARGET ?? "x86_64-pc-windows-msvc";
+if (!isWindowsRustTarget(rustTarget)) {
+  throw new Error(`Unsupported Windows release target: ${rustTarget}`);
+}
+process.env.CBPANEL_RUST_TARGET = rustTarget;
 const sidecarPath = path.join(root, "sidecars", sidecarFileName(rustTarget));
 const releaseConfigPath = path.join(root, "src-tauri", "tauri.release.sidecar.conf.json");
 const npmExecPath = process.env.npm_execpath;

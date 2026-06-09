@@ -122,10 +122,14 @@ pub fn run() {
         sidecar: None,
     });
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let mut builder = tauri::Builder::default();
+    if !release_smoke_enabled() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             restore_existing_window(app);
-        }))
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(runtime_state)
