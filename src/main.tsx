@@ -11,6 +11,7 @@ import { AppSidebar } from "./components/app/AppSidebar";
 import { DesktopTitlebar } from "./components/app/DesktopTitlebar";
 import type { BrowserCoreImportDialogState } from "./components/browser-core/BrowserCoreImportDialog";
 import { browserCoreOperationActive, isBrowserCoreBusy } from "./components/browser-core/BrowserCoreStatusPanels";
+import { ColumnSettingsDrawer } from "./components/profiles/ColumnSettingsDrawer";
 import {
   DetailsDrawer,
   ProfileInspectorAside,
@@ -79,9 +80,6 @@ import { type TranslationKey, localeFromMode, translate } from "./i18n";
 import "subsetted-fonts/SarasaUiSC-Regular/SarasaUiSC-Regular.css";
 import "./styles.css";
 
-const ColumnSettingsDrawer = lazy(() =>
-  import("./components/profiles/ColumnSettingsDrawer").then((module) => ({ default: module.ColumnSettingsDrawer })),
-);
 const RegistryModuleView = lazy(() =>
   import("./components/registry/RegistryModuleView").then((module) => ({ default: module.RegistryModuleView })),
 );
@@ -1052,14 +1050,12 @@ function App() {
       )}
 
       {drawerMode === "columns" && (
-        <Suspense fallback={<LazyDrawerFallback close={closeDrawer} title={t("table.columnSettings")} t={t} />}>
-          <ColumnSettingsDrawer
-            close={closeDrawer}
-            settings={settings}
-            saveSettings={saveSettings}
-            t={t}
-          />
-        </Suspense>
+        <ColumnSettingsDrawer
+          close={closeDrawer}
+          settings={settings}
+          saveSettings={saveSettings}
+          t={t}
+        />
       )}
 
       {drawerMode === "details" && draft && (
