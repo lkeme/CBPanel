@@ -44,6 +44,7 @@ export function ProfileInspectorAside({
   storage?: StorageInfo;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }) {
+  const launchFailed = hasLaunchFailure(selectedSession);
   return (
     <aside className="inspector">
       <header className="inspector-header">
@@ -52,14 +53,16 @@ export function ProfileInspectorAside({
           <strong>{t("workspace.selectedProfile")}</strong>
           <small>{t("workspace.inspectorHint")}</small>
         </div>
-        <button className="command subtle" onClick={editProfile} type="button">
-          <SlidersHorizontal size={17} />
-          {t("actions.edit")}
-        </button>
+        {!launchFailed && (
+          <button className="command subtle" onClick={editProfile} type="button">
+            <SlidersHorizontal size={17} />
+            {t("actions.edit")}
+          </button>
+        )}
       </header>
       <LaunchFailurePanel editProfile={editProfile} session={selectedSession} t={t} />
       <ProfileSummaryPanel draft={draft} session={selectedSession} storage={storage} t={t} />
-      <PreflightPanel busy={busy} launchBlocked={hasLaunchFailure(selectedSession)} onAction={runPreflightAction} report={preflight} t={t} />
+      <PreflightPanel busy={busy} launchBlocked={launchFailed} onAction={runPreflightAction} report={preflight} t={t} />
       <SessionPanel session={selectedSession} state={state} draft={draft} t={t} />
       <ScorePanel draft={draft} t={t} />
       <CodePanel
@@ -102,6 +105,7 @@ export function DetailsDrawer({
   storage?: StorageInfo;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }) {
+  const launchFailed = hasLaunchFailure(selectedSession);
   return (
     <div className="drawer-layer" role="dialog" aria-modal="true" aria-label={t("workspace.inspector")}>
       <button className="drawer-scrim" aria-label={t("actions.close")} onClick={close} type="button" />
@@ -116,15 +120,17 @@ export function DetailsDrawer({
             <X size={18} />
           </button>
         </header>
-        <div className="detail-drawer-actions">
-          <button className="command primary" onClick={editProfile} type="button">
-            <SlidersHorizontal size={17} aria-hidden="true" />
-            {t("actions.edit")}
-          </button>
-        </div>
+        {!launchFailed && (
+          <div className="detail-drawer-actions">
+            <button className="command primary" onClick={editProfile} type="button">
+              <SlidersHorizontal size={17} aria-hidden="true" />
+              {t("actions.edit")}
+            </button>
+          </div>
+        )}
         <LaunchFailurePanel editProfile={editProfile} session={selectedSession} t={t} />
         <ProfileSummaryPanel draft={draft} session={selectedSession} storage={storage} t={t} />
-        <PreflightPanel busy={busy} launchBlocked={hasLaunchFailure(selectedSession)} onAction={runPreflightAction} report={preflight} t={t} />
+        <PreflightPanel busy={busy} launchBlocked={launchFailed} onAction={runPreflightAction} report={preflight} t={t} />
         <SessionPanel session={selectedSession} state={state} draft={draft} t={t} />
         <ScorePanel draft={draft} t={t} />
         <CodePanel

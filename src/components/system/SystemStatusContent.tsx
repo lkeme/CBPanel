@@ -277,7 +277,7 @@ function EnvStatusPanel({
         <strong>{t("form.env")}</strong>
         <span>{t("form.readOnly")}</span>
       </div>
-      <dl className="env-grid">
+      <dl className="env-grid system-env-grid">
         {binaryEnvRows.map((row) => (
           <div key={row.key}>
             <dt>{row.label}</dt>
