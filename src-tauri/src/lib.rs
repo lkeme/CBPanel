@@ -19,7 +19,6 @@ const MIN_WINDOW_WIDTH: u32 = 1180;
 const MIN_WINDOW_HEIGHT: u32 = 680;
 const TRAY_ID: &str = "cbpanel-main-tray";
 const TRAY_OPEN_ID: &str = "tray-open";
-const TRAY_RUNTIME_CHECK_ID: &str = "tray-runtime-check";
 const TRAY_SETTINGS_ID: &str = "tray-settings";
 const TRAY_QUIT_ID: &str = "tray-quit";
 const TRAY_ACTION_EVENT: &str = "cbpanel-tray-action";
@@ -251,11 +250,10 @@ fn restore_window(window: &tauri::WebviewWindow) -> Result<(), String> {
 
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let menu = MenuBuilder::new(app)
-        .text(TRAY_OPEN_ID, "打开 CBPanel")
-        .text(TRAY_RUNTIME_CHECK_ID, "运行前检查")
+        .text(TRAY_OPEN_ID, "打开主界面")
         .text(TRAY_SETTINGS_ID, "设置")
         .separator()
-        .text(TRAY_QUIT_ID, "退出 CBPanel")
+        .text(TRAY_QUIT_ID, "退出")
         .build()?;
 
     let icon = app.default_window_icon().cloned();
@@ -267,10 +265,6 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             TRAY_OPEN_ID => {
                 restore_existing_window(app);
                 emit_tray_action(app, "open");
-            }
-            TRAY_RUNTIME_CHECK_ID => {
-                restore_existing_window(app);
-                emit_tray_action(app, "runtimeCheck");
             }
             TRAY_SETTINGS_ID => {
                 restore_existing_window(app);

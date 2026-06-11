@@ -216,15 +216,10 @@ function App() {
     let unlisten: (() => void) | undefined;
     void import("@tauri-apps/api/event")
       .then(({ listen }) =>
-        listen<{ action: "open" | "settings" | "runtimeCheck" | "quit" }>("cbpanel-tray-action", (event) => {
+        listen<{ action: "open" | "settings" | "quit" }>("cbpanel-tray-action", (event) => {
           if (disposed) return;
           if (event.payload.action === "settings") {
             openSettings("general");
-            return;
-          }
-          if (event.payload.action === "runtimeCheck") {
-            setDrawerMode(null);
-            setWorkbenchView("runtimeCheck");
             return;
           }
           if (event.payload.action === "quit") {
