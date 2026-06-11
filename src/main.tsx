@@ -67,6 +67,7 @@ import {
   type ProfileColumnConfig,
   ADVANCED_WEB_ENTRY_CODE,
   DEFAULT_APP_SETTINGS,
+  mergeSettings,
   normalizeSettings,
 } from "./shared/settings";
 import { api, errorMessage, initializeDesktopBridge, referenceErrorMessage, type RuntimeError } from "./lib/apiClient";
@@ -186,6 +187,10 @@ function App() {
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const importInput = useRef<HTMLInputElement>(null);
   const pendingLaunchIdsRef = useRef<Set<string>>(new Set());
+  const confirmedSettingsRef = useRef<AppSettings | null>(null);
+  const optimisticSettingsRef = useRef<AppSettings | null>(null);
+  const settingsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const settingsSaveSeqRef = useRef(0);
   const startupBrowserCoreCheckDone = useRef(false);
 
   const settings = state?.settings ?? DEFAULT_APP_SETTINGS;
@@ -198,6 +203,9 @@ function App() {
 
   useEffect(() => {
     applyAppearance(settings);
+    if (!optimisticSettingsRef.current) {
+      confirmedSettingsRef.current = normalizeSettings(settings);
+    }
   }, [settings]);
 
   useEffect(() => {
@@ -377,7 +385,11 @@ function App() {
 
   async function loadState() {
     const next = await api<PanelState>("/api/state");
-    setState(next);
+    const optimisticSettings = optimisticSettingsRef.current;
+    if (!optimisticSettings) {
+      confirmedSettingsRef.current = normalizeSettings(next.settings);
+    }
+    setState(optimisticSettings ? { ...next, settings: optimisticSettings } : next);
   }
 
   async function loadRuntimeInfo() {
@@ -466,17 +478,39 @@ function App() {
   }
 
   async function saveSettings(patch: Partial<AppSettings>) {
+    const baseSettings = optimisticSettingsRef.current ?? confirmedSettingsRef.current ?? normalizeSettings(settings);
+    const nextSettings = mergeSettings(baseSettings, patch);
+    const saveSeq = settingsSaveSeqRef.current + 1;
+    settingsSaveSeqRef.current = saveSeq;
+    optimisticSettingsRef.current = nextSettings;
+    setState((current) => (current ? { ...current, settings: nextSettings } : current));
     setBusy("settings");
+    const requestPatch = settingsPatchFromNext(patch, nextSettings);
+    const save = settingsSaveQueueRef.current
+      .catch(() => undefined)
+      .then(() =>
+        api<AppSettings>("/api/settings", {
+          method: "PUT",
+          body: JSON.stringify(requestPatch),
+        }),
+      );
+    settingsSaveQueueRef.current = save.then(() => undefined, () => undefined);
     try {
-      const saved = await api<AppSettings>("/api/settings", {
-        method: "PUT",
-        body: JSON.stringify(patch),
-      });
-      setState((current) => (current ? { ...current, settings: saved } : current));
+      const saved = normalizeSettings(await save);
+      confirmedSettingsRef.current = saved;
+      if (saveSeq === settingsSaveSeqRef.current) {
+        optimisticSettingsRef.current = null;
+        setState((current) => (current ? { ...current, settings: saved } : current));
+      }
     } catch (error) {
-      toast("error", (error as Error).message);
+      if (saveSeq === settingsSaveSeqRef.current) {
+        optimisticSettingsRef.current = null;
+        const confirmedSettings = confirmedSettingsRef.current ?? baseSettings;
+        setState((current) => (current ? { ...current, settings: confirmedSettings } : current));
+        toast("error", (error as Error).message);
+      }
     } finally {
-      setBusy("");
+      if (saveSeq === settingsSaveSeqRef.current) setBusy("");
     }
   }
 
@@ -807,7 +841,6 @@ function App() {
   async function rememberCloseToTrayIfNeeded(rememberChoice: boolean, options: { wait?: boolean } = {}) {
     if (!rememberChoice || normalizedSettings.desktop.closeToTray) return;
     const nextDesktop = { ...normalizedSettings.desktop, closeToTray: true };
-    setState((current) => (current ? { ...current, settings: { ...normalizedSettings, desktop: nextDesktop } } : current));
     const save = saveSettings({ desktop: nextDesktop });
     if (options.wait) await save;
     else void save;
@@ -823,6 +856,11 @@ function App() {
 
   function hideWindowToTray() {
     runDesktopCommand("cbpanel_window_hide_to_tray");
+  }
+
+  async function hideWindowToTrayAfterSettingsSaved() {
+    await settingsSaveQueueRef.current;
+    hideWindowToTray();
   }
 
   function quitDesktopApp() {
@@ -860,7 +898,7 @@ function App() {
       return;
     }
     if (normalizedSettings.desktop.closeToTray) {
-      hideWindowToTray();
+      void hideWindowToTrayAfterSettingsSaved();
       return;
     }
     setConfirmDialog({
@@ -869,17 +907,18 @@ function App() {
       confirmLabel: t("tray.hideToTray"),
       cancelLabel: t("actions.cancel"),
       dangerLabel: t("tray.quitApp"),
+      busyKey: "settings",
       rememberChoice: {
         label: t("tray.rememberCloseToTray"),
       },
       onConfirm: async ({ rememberChoice }) => {
+        await rememberCloseToTrayIfNeeded(rememberChoice, { wait: true });
         setConfirmDialog(null);
-        void rememberCloseToTrayIfNeeded(rememberChoice);
         hideWindowToTray();
       },
       onDanger: async ({ rememberChoice }) => {
-        setConfirmDialog(null);
         await rememberCloseToTrayIfNeeded(rememberChoice, { wait: true });
+        setConfirmDialog(null);
         quitDesktopApp();
       },
     });
@@ -1328,6 +1367,17 @@ function App() {
       </main>
     </TooltipProvider>
   );
+}
+
+function settingsPatchFromNext(patch: Partial<AppSettings>, nextSettings: AppSettings): Partial<AppSettings> {
+  return {
+    ...(patch.appearance !== undefined ? { appearance: nextSettings.appearance } : {}),
+    ...(patch.table !== undefined ? { table: nextSettings.table } : {}),
+    ...(patch.desktop !== undefined ? { desktop: nextSettings.desktop } : {}),
+    ...(patch.storage !== undefined ? { storage: nextSettings.storage } : {}),
+    ...(patch.binary !== undefined ? { binary: nextSettings.binary } : {}),
+    ...(patch.networkTrace !== undefined ? { networkTrace: nextSettings.networkTrace } : {}),
+  };
 }
 
 function LazyDrawerFallback({
