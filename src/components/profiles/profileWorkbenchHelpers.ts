@@ -1,6 +1,6 @@
 import type { TranslationKey } from "../../i18n";
 import type { BrowserProfile, PanelState, ProxySettings } from "../../shared/profile";
-import { buildProxyUrl, parseProxyUrlInput } from "../../shared/profile";
+import { buildProxyUrl, parseProxyUrlInput, validateStartUrl } from "../../shared/profile";
 import type { ProxyEntity } from "../../shared/entities";
 import type { AppSettings } from "../../shared/settings";
 import { normalizeSettings } from "../../shared/settings";
@@ -91,6 +91,11 @@ export function profileNameValidationError(
     return t("form.profileNameDuplicate");
   }
   return "";
+}
+
+export function profileStartUrlValidationError(draft: BrowserProfile, t: (key: TranslationKey) => string): string {
+  const result = validateStartUrl(draft.startUrl);
+  return result.ok ? "" : t("form.startUrlInvalid");
 }
 
 function profileNameKey(value: string): string {

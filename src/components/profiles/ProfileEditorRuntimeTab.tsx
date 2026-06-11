@@ -12,6 +12,7 @@ import type { GroupEntity, TagEntity } from "../../shared/entities";
 import { Field, FormSection, OptionControl, Segmented } from "../ui/form-controls";
 import { Switch } from "../ui/switch";
 import { GroupPicker, TagPicker } from "./ProfileEditorIdentityPickers";
+import { profileStartUrlValidationError } from "./profileWorkbenchHelpers";
 import { StartUrlCombobox } from "./StartUrlCombobox";
 
 export function ProfileEditorRuntimeTab({
@@ -71,7 +72,7 @@ export function ProfileEditorRuntimeTab({
       </FormSection>
 
       <FormSection title={t("editor.section.runtime")} description={t("tips.launcher")}>
-        <Field label={t("table.startUrl")} wide help={t("tips.startUrl")}>
+        <Field label={t("table.startUrl")} wide help={t("tips.startUrl")} error={profileStartUrlValidationError(draft, t)}>
           <StartUrlCombobox
             customLabel={t("form.startUrlCustom")}
             onChange={(startUrl) => setDraft({ ...draft, startUrl })}

@@ -262,7 +262,7 @@ export interface LaunchSnippet {
 }
 
 export interface StartUrlPreset {
-  id: "creepjs" | "browserleaks-canvas" | "browserleaks-webrtc" | "sannysoft" | "fingerprint-scan";
+  id: "blank" | "creepjs" | "fingerprint-playground" | "browserleaks-canvas" | "browserleaks-webrtc" | "sannysoft" | "fingerprint-scan";
   label: string;
   url: string;
 }
@@ -296,12 +296,50 @@ export const DETECTION_TARGETS = [
 ] as const;
 
 export const START_URL_PRESETS: StartUrlPreset[] = [
+  { id: "blank", label: "Blank Page", url: "about:blank" },
   { id: "creepjs", label: "CreepJS", url: DEFAULT_START_URL },
+  { id: "fingerprint-playground", label: "Fingerprint Playground", url: "https://demo.fingerprint.com/playground" },
   { id: "browserleaks-canvas", label: "BrowserLeaks Canvas", url: "https://browserleaks.com/canvas" },
   { id: "browserleaks-webrtc", label: "BrowserLeaks WebRTC", url: "https://browserleaks.com/webrtc" },
   { id: "sannysoft", label: "SannySoft", url: "https://bot.sannysoft.com/" },
   { id: "fingerprint-scan", label: "Fingerprint Scan", url: "https://fingerprint-scan.com/" },
 ];
+
+export type StartUrlValidationResult =
+  | { ok: true; kind: "empty" | "web" | "system"; value: string; protocol?: string }
+  | { ok: false; value: string; reason: "invalid" | "unsupported-protocol"; message: string; protocol?: string };
+
+const SYSTEM_START_URLS = new Set(["about:blank"]);
+
+export function validateStartUrl(value: string): StartUrlValidationResult {
+  const trimmed = value.trim();
+  if (!trimmed) return { ok: true, kind: "empty", value: "" };
+  if (SYSTEM_START_URLS.has(trimmed.toLowerCase())) return { ok: true, kind: "system", value: trimmed, protocol: "about:" };
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return {
+      ok: false,
+      value: trimmed,
+      reason: "invalid",
+      message: "起始网址必须是完整 URL，例如 https://example.com。",
+    };
+  }
+
+  if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+    return { ok: true, kind: "web", value: trimmed, protocol: parsed.protocol };
+  }
+
+  return {
+    ok: false,
+    value: trimmed,
+    reason: "unsupported-protocol",
+    message: `不支持 ${parsed.protocol} 协议。起始网址只允许 http://、https:// 或 about:blank。`,
+    protocol: parsed.protocol,
+  };
+}
 
 export const RUNTIME_QUICK_ARGS: RuntimeQuickArg[] = [
   {
@@ -1669,8 +1707,8 @@ function openTabAction(target: PreflightActionTarget, label: string): ProfilePre
 }
 
 function validateStartUrlPreflight(startUrl: string): ProfilePreflightItem {
-  const trimmed = startUrl.trim();
-  if (!trimmed) {
+  const result = validateStartUrl(startUrl);
+  if (result.ok && result.kind === "empty") {
     return {
       id: "start-url",
       category: "runtime",
@@ -1680,28 +1718,24 @@ function validateStartUrlPreflight(startUrl: string): ProfilePreflightItem {
     };
   }
 
-  try {
-    const parsed = new URL(trimmed);
+  if (result.ok) {
     return {
       id: "start-url",
       category: "runtime",
-      severity: parsed.protocol === "http:" || parsed.protocol === "https:" ? "pass" : "warn",
+      severity: "pass",
       title: "起始网址",
-      detail:
-        parsed.protocol === "http:" || parsed.protocol === "https:"
-          ? `有效：${trimmed}`
-          : `协议为 ${parsed.protocol}，确认 CloakBrowser 可以打开该地址。`,
-    };
-  } catch (error) {
-    return {
-      id: "start-url",
-      category: "runtime",
-      severity: "fail",
-      title: "起始网址",
-      detail: `URL 无效：${(error as Error).message}`,
-      actions: [openTabAction("runtime", "修正网址")],
+      detail: result.kind === "system" ? `系统页面：${result.value}` : `有效：${result.value}`,
     };
   }
+
+  return {
+    id: "start-url",
+    category: "runtime",
+    severity: "fail",
+    title: "起始网址",
+    detail: result.message,
+    actions: [openTabAction("runtime", "修正网址")],
+  };
 }
 
 function validateViewportPreflight(profile: BrowserProfile): ProfilePreflightItem {

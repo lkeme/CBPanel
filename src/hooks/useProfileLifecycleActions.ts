@@ -3,7 +3,7 @@ import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import type { TranslationKey } from "../i18n";
 import { preflightToastMessage } from "../components/profiles/ProfileDetails";
 import { networkCheckSummaryText } from "../components/profiles/ProfileTable";
-import { profileNameValidationError, selectedProxyIdForDraft } from "../components/profiles/profileWorkbenchHelpers";
+import { profileNameValidationError, profileStartUrlValidationError, selectedProxyIdForDraft } from "../components/profiles/profileWorkbenchHelpers";
 import type { ConfirmDialogState } from "../components/registry/RegistryDialogs";
 import type { WorkbenchView } from "../components/registry/registryStats";
 import { api, errorMessage } from "../lib/apiClient";
@@ -80,6 +80,8 @@ export function useProfileLifecycleActions({
     if (!draft) return null;
     const nameError = profileNameValidationError(draft, state?.profiles ?? [], draftIsNew, t);
     if (nameError) throw new Error(nameError);
+    const startUrlError = profileStartUrlValidationError(draft, t);
+    if (startUrlError) throw new Error(startUrlError);
     const payload = { ...draft, updatedAt: nowIso() };
     const draftProxyId = localProxyDraftIds.has(draft.id)
       ? undefined

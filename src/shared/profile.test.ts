@@ -27,6 +27,7 @@ import {
   setRuntimeQuickArg,
   snapshotToMarkdown,
   updateDetectionCheck,
+  validateStartUrl,
 } from "./profile";
 
 test("defaultProfile starts on CreepJS for first-run fingerprint inspection", () => {
@@ -37,9 +38,30 @@ test("start URL presets include the legacy detection targets", () => {
   const urls = START_URL_PRESETS.map((preset) => preset.url);
 
   assert.equal(urls.includes(DEFAULT_START_URL), true);
+  assert.equal(urls.includes("about:blank"), true);
+  assert.equal(urls.includes("https://demo.fingerprint.com/playground"), true);
   for (const target of DETECTION_TARGETS) {
     assert.equal(urls.includes(target), true);
   }
+});
+
+test("start URL validation allows web URLs and approved system pages only", () => {
+  assert.deepEqual(validateStartUrl(""), { ok: true, kind: "empty", value: "" });
+  assert.deepEqual(validateStartUrl(" about:blank "), { ok: true, kind: "system", value: "about:blank", protocol: "about:" });
+  assert.deepEqual(validateStartUrl("https://example.com/path"), { ok: true, kind: "web", value: "https://example.com/path", protocol: "https:" });
+
+  assert.equal(validateStartUrl("example.com").ok, false);
+  assert.equal(validateStartUrl("ftp://example.com").ok, false);
+});
+
+test("preflight applies start URL validation rules", () => {
+  const blankReport = preflightProfile(defaultProfile({ startUrl: "about:blank" }), { binaryInstalled: true });
+  assert.equal(blankReport.items.find((item) => item.id === "start-url")?.severity, "pass");
+
+  const invalidReport = preflightProfile(defaultProfile({ startUrl: "ftp://example.com" }), { binaryInstalled: true });
+  const startUrl = invalidReport.items.find((item) => item.id === "start-url");
+  assert.equal(startUrl?.severity, "fail");
+  assert.equal(startUrl?.actions?.[0]?.target, "runtime");
 });
 
 test("normalizeProfile does not let undefined overwrite generated identity", () => {
