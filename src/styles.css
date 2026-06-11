@@ -2634,10 +2634,10 @@ textarea {
 .confirm-choice {
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr);
-  align-items: start;
+  align-items: center;
   gap: 10px;
   min-width: 0;
-  padding: 8px 0;
+  padding: 7px 0;
   color: var(--foreground-muted);
   font-size: 13px;
   font-weight: 700;
@@ -2655,7 +2655,6 @@ textarea {
   place-items: center;
   width: 18px;
   height: 18px;
-  margin-top: 1px;
   color: var(--primary);
   border: 1px solid var(--border-strong);
   border-radius: 999px;
@@ -2698,16 +2697,7 @@ textarea {
 }
 
 .confirm-choice-text {
-  display: grid;
-  gap: 3px;
   min-width: 0;
-}
-
-.confirm-choice-text small {
-  color: var(--foreground-subtle);
-  font-size: 12px;
-  font-weight: 650;
-  line-height: 1.35;
 }
 
 .confirm-footer-note {

@@ -921,12 +921,10 @@ function App() {
           {
             value: "tray",
             label: t("tray.hideToTray"),
-            description: t("tray.hideToTrayChoiceDescription"),
           },
           {
             value: "quit",
             label: t("tray.quitApp"),
-            description: t("tray.quitAppChoiceDescription"),
           },
         ],
       },

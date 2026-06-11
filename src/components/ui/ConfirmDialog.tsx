@@ -10,7 +10,6 @@ type ConfirmDialogContext = {
 type ConfirmDialogChoice = {
   value: string;
   label: string;
-  description?: string;
 };
 
 export type ConfirmDialogState = {
@@ -100,7 +99,6 @@ export function ConfirmDialog({
               <span className="confirm-choice-mark" aria-hidden="true" />
               <span className="confirm-choice-text">
                 <span>{option.label}</span>
-                {option.description && <small>{option.description}</small>}
               </span>
             </label>
           ))}
