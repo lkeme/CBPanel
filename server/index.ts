@@ -274,10 +274,7 @@ function requireDesktopToken(request: express.Request, response: express.Respons
     return;
   }
 
-  const authorization = request.header("authorization");
-  const headerToken = request.header("x-cbpanel-token");
-  const bearerToken = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : undefined;
-  if (headerToken === DESKTOP_TOKEN || bearerToken === DESKTOP_TOKEN) {
+  if (hasDesktopShellToken(request)) {
     next();
     return;
   }
@@ -291,6 +288,33 @@ function requireDesktopToken(request: express.Request, response: express.Respons
       response.status(401).json({ error: "Desktop API token is invalid" });
     })
     .catch((error) => sendError(response, error));
+}
+
+function requireDesktopShellToken(request: express.Request, response: express.Response, next: express.NextFunction): void {
+  if (SHELL_MODE !== "desktop") {
+    response.status(404).json({ error: "Desktop shutdown is not available in web mode" });
+    return;
+  }
+
+  if (!DESKTOP_TOKEN) {
+    response.status(503).json({ error: "Desktop sidecar token is not configured" });
+    return;
+  }
+
+  if (!hasDesktopShellToken(request)) {
+    response.status(401).json({ error: "Desktop API token is invalid" });
+    return;
+  }
+
+  next();
+}
+
+function hasDesktopShellToken(request: express.Request): boolean {
+  if (!DESKTOP_TOKEN) return false;
+  const authorization = request.header("authorization");
+  const headerToken = request.header("x-cbpanel-token");
+  const bearerToken = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : undefined;
+  return headerToken === DESKTOP_TOKEN || bearerToken === DESKTOP_TOKEN;
 }
 
 function desktopSidecarCors(request: express.Request, response: express.Response, next: express.NextFunction): void {
@@ -426,6 +450,13 @@ async function createApp(): Promise<express.Express> {
 
   app.get("/api/desktop/runtime", (_request, response) => {
     response.json(desktopRuntimeService.info());
+  });
+
+  app.post("/api/desktop/shutdown", requireDesktopShellToken, (_request, response) => {
+    response.status(202).json({ ok: true });
+    setImmediate(() => {
+      void shutdown().finally(() => process.exit(0));
+    });
   });
 
   app.get("/api/environments", async (_request, response) => {
@@ -1276,6 +1307,7 @@ function uniquePaths(paths: string[]): string[] {
 }
 
 let server: http.Server;
+let shutdownPromise: Promise<void> | undefined;
 
 async function main(): Promise<void> {
   const app = await createApp();
@@ -1287,9 +1319,12 @@ async function main(): Promise<void> {
 }
 
 async function shutdown(): Promise<void> {
-  await sessionService.stopAll();
-  repository.close();
-  server?.close();
+  shutdownPromise ??= (async () => {
+    await sessionService.stopAll();
+    repository.close();
+    server?.close();
+  })();
+  return shutdownPromise;
 }
 
 process.on("SIGINT", () => {

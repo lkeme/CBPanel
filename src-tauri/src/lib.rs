@@ -1,10 +1,12 @@
 use serde::Serialize;
 use std::{
     env,
+    io::{Read, Write},
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
+    time::{Duration, Instant},
 };
 use tauri::{
     menu::MenuBuilder,
@@ -46,6 +48,8 @@ struct SidecarStatus {
 struct RuntimeState {
     config: RuntimeConfig,
     sidecar: Option<Child>,
+    sidecar_port: Option<u16>,
+    sidecar_token: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -63,13 +67,26 @@ struct TrayActionPayload {
 impl RuntimeState {
     fn stop_sidecar(&mut self) {
         if let Some(mut child) = self.sidecar.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            let shutdown_requested = match (self.sidecar_port, self.sidecar_token.as_deref()) {
+                (Some(port), Some(token)) => request_sidecar_shutdown(port, token).is_ok(),
+                _ => false,
+            };
+            let exited = if shutdown_requested {
+                wait_for_child_exit(&mut child, Duration::from_secs(8))
+            } else {
+                false
+            };
+            if !exited {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
             self.config.sidecar = SidecarStatus {
                 status: "stopped",
                 detail: "Node sidecar was stopped by the desktop shell.".into(),
             };
         }
+        self.sidecar_port = None;
+        self.sidecar_token = None;
     }
 }
 
@@ -163,6 +180,8 @@ pub fn run() {
     let runtime_state = Mutex::new(RuntimeState {
         config: degraded_config("Desktop runtime is starting."),
         sidecar: None,
+        sidecar_port: None,
+        sidecar_token: None,
     });
 
     let mut builder = tauri::Builder::default();
@@ -336,6 +355,8 @@ fn prepare_runtime(app: &mut tauri::App) -> RuntimeState {
         return RuntimeState {
             config,
             sidecar: None,
+            sidecar_port: None,
+            sidecar_token: None,
         };
     }
 
@@ -349,6 +370,8 @@ fn prepare_runtime(app: &mut tauri::App) -> RuntimeState {
             RuntimeState {
                 config,
                 sidecar: Some(child),
+                sidecar_port: Some(port),
+                sidecar_token: Some(token),
             }
         }
         Err(error) => {
@@ -359,6 +382,8 @@ fn prepare_runtime(app: &mut tauri::App) -> RuntimeState {
             RuntimeState {
                 config,
                 sidecar: None,
+                sidecar_port: None,
+                sidecar_token: None,
             }
         }
     }
@@ -386,6 +411,56 @@ fn desktop_runtime_token() -> String {
     }
 
     uuid::Uuid::new_v4().simple().to_string()
+}
+
+fn request_sidecar_shutdown(port: u16, token: &str) -> Result<(), String> {
+    let address = format!("127.0.0.1:{port}");
+    let mut stream = std::net::TcpStream::connect_timeout(
+        &address
+            .parse()
+            .map_err(|error| format!("Invalid sidecar address {address}: {error}."))?,
+        Duration::from_secs(2),
+    )
+    .map_err(|error| format!("Could not connect to sidecar shutdown endpoint: {error}."))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let request = format!(
+        "POST /api/desktop/shutdown HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-CBPanel-Token: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("Could not request sidecar shutdown: {error}."))?;
+
+    let mut response_buffer = [0_u8; 256];
+    stream
+        .read(&mut response_buffer)
+        .map_err(|error| format!("Could not read sidecar shutdown response: {error}."))?;
+    let response = String::from_utf8_lossy(&response_buffer);
+    let status = response
+        .lines()
+        .next()
+        .ok_or_else(|| "Sidecar shutdown response was empty.".to_string())?;
+    if status.contains(" 2") {
+        Ok(())
+    } else {
+        Err(format!("Sidecar shutdown request failed: {status}."))
+    }
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 fn release_smoke_enabled() -> bool {

@@ -27,6 +27,7 @@ type RuntimeHandle = {
 
 type RunningSession = SessionSummary & {
   runtime?: RuntimeHandle;
+  runtimePromise?: Promise<RuntimeHandle>;
   closingByPanel?: boolean;
 };
 
@@ -79,6 +80,7 @@ type CloakBrowserPuppeteerModule = {
 export class SessionService {
   private readonly sessions = new Map<string, RunningSession>();
   private readonly githubMirrorProbeService = new GithubMirrorProbeService();
+  private stoppingAll = false;
 
   constructor(private readonly options: SessionServiceOptions) {}
 
@@ -97,11 +99,14 @@ export class SessionService {
   }
 
   async launchProfile(profile: BrowserProfile): Promise<SessionSummary> {
+    this.assertCanLaunch();
     const runtimeProfile = (await this.resolveRuntimeProfile(profile, { install: true })).profile;
+    this.assertCanLaunch();
     if (this.hasActiveSession(runtimeProfile.id)) {
       throw Object.assign(new Error("该配置已经在运行"), { status: 409 });
     }
     const binary = await this.options.readBinaryInfo();
+    this.assertCanLaunch();
     if (!binary.installed) {
       throw Object.assign(new Error("CloakBrowser 内核未安装；请先在运行前检查或设置中安装浏览器内核。"), {
         status: 409,
@@ -132,10 +137,13 @@ export class SessionService {
       const userDataDir = this.profileDataDir(runtimeProfile);
       session.launch = buildSessionLaunchPlan(runtimeProfile, userDataDir);
       pushSessionEvent(session, "info", "启动计划已生成", `${session.launch.runtimeLauncher} -> ${session.launch.sdkLauncher}`);
-
-      const runtime = await this.startRuntime(runtimeProfile, session);
       if (session.status === "stopped") return publicSession(session);
+
+      session.runtimePromise = this.startRuntime(runtimeProfile, session);
+      const runtime = await session.runtimePromise;
+      if (session.status !== "launching") return publicSession(session);
       session.runtime = runtime;
+      delete session.runtimePromise;
       session.status = "running";
       pushSessionEvent(session, "info", "CloakBrowser 已启动", runtime.pageUrl());
       if (runtime.warning) {
@@ -150,6 +158,7 @@ export class SessionService {
       session.lastError = (error as Error).message;
       pushSessionEvent(session, "error", "启动失败", session.lastError);
       delete session.runtime;
+      delete session.runtimePromise;
       throw error;
     }
   }
@@ -164,7 +173,8 @@ export class SessionService {
     session.closingByPanel = true;
     pushSessionEvent(session, "info", "停止会话");
     try {
-      await session.runtime?.close();
+      const runtime = session.runtime ?? (await session.runtimePromise?.catch(() => undefined));
+      await runtime?.close();
       this.markSessionStopped(profileId, "会话已停止");
       return publicSession(session);
     } catch (error) {
@@ -177,7 +187,18 @@ export class SessionService {
   }
 
   async stopAll(): Promise<void> {
-    await Promise.all([...this.sessions.keys()].map((profileId) => this.stopProfile(profileId)));
+    this.stoppingAll = true;
+    try {
+      await Promise.all([...this.sessions.keys()].map((profileId) => this.stopProfile(profileId)));
+    } finally {
+      this.stoppingAll = false;
+    }
+  }
+
+  private assertCanLaunch(): void {
+    if (this.stoppingAll) {
+      throw Object.assign(new Error("CBPanel 正在关闭运行环境，暂不能启动新会话。"), { status: 409 });
+    }
   }
 
   private async buildPreflightEnvironment(
@@ -272,6 +293,7 @@ export class SessionService {
     session.status = "stopped";
     session.stoppedAt = new Date().toISOString();
     delete session.runtime;
+    delete session.runtimePromise;
     delete session.lastError;
     delete session.closingByPanel;
     pushSessionEvent(session, "info", detail);
@@ -294,7 +316,7 @@ export class SessionService {
     if (typeof source.on === "function") source.on(eventName, onClosed);
   }
 
-  private async startRuntime(profile: BrowserProfile, session: RunningSession): Promise<RuntimeHandle> {
+  protected async startRuntime(profile: BrowserProfile, session: RunningSession): Promise<RuntimeHandle> {
     if (profile.runtime.launcher === "puppeteer-browser") {
       return this.startPuppeteerRuntime(profile, session);
     }
