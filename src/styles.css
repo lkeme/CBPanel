@@ -2961,12 +2961,18 @@ textarea {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.start-url-control {
+.start-url-combobox {
   position: relative;
+  min-width: 0;
+}
+
+.start-url-combobox-control {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(136px, auto);
+  grid-template-columns: minmax(0, 1fr) 38px;
   align-items: stretch;
   min-width: 0;
+  min-height: var(--control-height);
+  color: var(--foreground);
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
@@ -2976,9 +2982,14 @@ textarea {
     box-shadow 160ms ease;
 }
 
-.start-url-control > input {
+.start-url-combobox.open .start-url-combobox-control,
+.start-url-combobox:focus-within .start-url-combobox-control {
+  border-color: color-mix(in srgb, var(--primary) 42%, var(--border));
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.start-url-combobox-control input {
   min-width: 0;
-  height: auto;
   min-height: calc(var(--control-height) - 2px);
   background: transparent;
   border: 0;
@@ -2986,43 +2997,87 @@ textarea {
   box-shadow: none;
 }
 
-.start-url-control > input:focus {
+.start-url-combobox-control input:focus {
   box-shadow: none;
 }
 
-.start-url-control:focus-within {
-  border-color: color-mix(in srgb, var(--primary) 42%, var(--border));
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-.start-url-control .select-menu {
+.start-url-combobox-control button {
+  display: inline-grid;
+  place-items: center;
   min-width: 0;
-  border-left: 1px solid var(--border);
-}
-
-.start-url-control .select-menu-trigger {
-  min-height: calc(var(--control-height) - 2px);
-  height: 100%;
+  color: var(--foreground-muted);
   background: var(--surface-muted);
   border: 0;
+  border-left: 1px solid var(--border);
   border-radius: 0 calc(var(--radius-control) - 1px) calc(var(--radius-control) - 1px) 0;
-  box-shadow: none;
 }
 
-.start-url-control .select-menu-trigger:hover,
-.start-url-control .select-menu.open .select-menu-trigger {
+.start-url-combobox-control button:hover,
+.start-url-combobox.open .start-url-combobox-control button {
+  color: var(--foreground);
   background: var(--primary-soft);
-  border-color: transparent;
 }
 
-.start-url-control .select-menu-value strong {
+.start-url-combobox-list {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  z-index: 70;
+  display: grid;
+  width: 100%;
+  max-height: 260px;
+  overflow: auto;
+  padding: 5px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sheet);
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.start-url-combobox-list button,
+.start-url-combobox-empty {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  min-height: 40px;
+  padding: 7px 8px;
+  color: var(--foreground);
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+}
+
+.start-url-combobox-list button:hover,
+.start-url-combobox-list button.active {
+  background: var(--primary-soft);
+  border-color: color-mix(in srgb, var(--primary) 22%, var(--border));
+}
+
+.start-url-combobox-list strong,
+.start-url-combobox-list small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.start-url-combobox-list strong {
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.start-url-combobox-list small {
+  color: var(--primary);
+  font-family: var(--font-mono);
   font-size: 12px;
+  font-weight: 650;
 }
 
-.start-url-control .select-menu-list {
-  right: 0;
-  left: auto;
-  width: min(560px, calc(100vw - 64px));
+.start-url-combobox-empty {
+  color: var(--foreground-muted);
+  font-size: 13px;
 }
 
 .segmented {

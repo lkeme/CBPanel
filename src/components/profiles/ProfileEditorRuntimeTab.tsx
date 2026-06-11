@@ -1,27 +1,18 @@
 import type { TranslationKey } from "../../i18n";
 import {
   PROFILE_PRESETS,
-  START_URL_PRESETS,
   type BrowserProfile,
   type ColorScheme,
   type LauncherKind,
   type ProfileMode,
-  type StartUrlPreset,
   type ViewportMode,
   applyProfilePreset,
 } from "../../shared/profile";
 import type { GroupEntity, TagEntity } from "../../shared/entities";
-import { SelectMenu } from "../ui/SelectMenu";
 import { Field, FormSection, OptionControl, Segmented } from "../ui/form-controls";
 import { Switch } from "../ui/switch";
 import { GroupPicker, TagPicker } from "./ProfileEditorIdentityPickers";
-
-type StartUrlPresetValue = StartUrlPreset["id"] | "custom";
-
-function selectedStartUrlPreset(value: string): StartUrlPresetValue {
-  const matched = START_URL_PRESETS.find((preset) => preset.url === value.trim());
-  return matched?.id ?? "custom";
-}
+import { StartUrlCombobox } from "./StartUrlCombobox";
 
 export function ProfileEditorRuntimeTab({
   draft,
@@ -81,27 +72,13 @@ export function ProfileEditorRuntimeTab({
 
       <FormSection title={t("editor.section.runtime")} description={t("tips.launcher")}>
         <Field label={t("table.startUrl")} wide help={t("tips.startUrl")}>
-          <div className="start-url-control">
-            <input value={draft.startUrl} onChange={(event) => setDraft({ ...draft, startUrl: event.target.value })} placeholder={t("placeholder.startUrl")} />
-            <SelectMenu<StartUrlPresetValue>
-              placeholder={t("form.startUrlPreset")}
-              showTriggerMeta={false}
-              value={selectedStartUrlPreset(draft.startUrl)}
-              options={[
-                ...START_URL_PRESETS.map((preset) => ({
-                  value: preset.id,
-                  label: preset.label,
-                  meta: preset.url,
-                })),
-                { value: "custom", label: t("form.startUrlCustom") },
-              ]}
-              onChange={(value) => {
-                if (value === "custom") return;
-                const preset = START_URL_PRESETS.find((item) => item.id === value);
-                if (preset) setDraft({ ...draft, startUrl: preset.url });
-              }}
-            />
-          </div>
+          <StartUrlCombobox
+            customLabel={t("form.startUrlCustom")}
+            onChange={(startUrl) => setDraft({ ...draft, startUrl })}
+            placeholder={t("placeholder.startUrl")}
+            presetLabel={t("form.startUrlPreset")}
+            value={draft.startUrl}
+          />
         </Field>
         <Field label={t("table.launcher")} wide help={t("tips.launcher")}>
           <Segmented<LauncherKind>
