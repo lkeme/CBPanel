@@ -21,8 +21,9 @@ import {
   browserCoreOperationActive,
   isBrowserCoreBusy,
 } from "../browser-core/BrowserCoreStatusPanels";
-import { CopyButton } from "../ui/CopyButton";
 import { Field, Segmented, ToggleField } from "../ui/form-controls";
+import { CopyableValueRow, KeyValueList } from "../ui/KeyValueList";
+import { StatusPill } from "../ui/StatusPill";
 import { Switch } from "../ui/switch";
 import { EnvKeyCombobox } from "./EnvKeyCombobox";
 
@@ -143,44 +144,17 @@ export function BrowserCoreSettingsPanel({
         {operationBusy && (
           <BrowserCoreOperationPanel busy={busy} operation={binaryInfo?.core?.operation} t={t} />
         )}
-        <dl className="kv-list browser-core-download-details">
-          <div>
-            <dt>{coreInstalled ? t("browserCore.installedVersion") : t("browserCore.targetVersion")}</dt>
-            <dd>
-              <BrowserCoreDetailValue value={binaryInfo?.version} />
-            </dd>
-          </div>
-          <div>
-            <dt>{t("browserCore.wrapperVersion")}</dt>
-            <dd>
-              <BrowserCoreDetailValue value={binaryInfo?.core?.versions.wrapperVersion} />
-            </dd>
-          </div>
-          <div>
-            <dt>{coreInstalled ? t("browserCore.executablePath") : t("browserCore.expectedExecutablePath")}</dt>
-            <dd>
-              <BrowserCoreDetailValue copyable t={t} value={binaryInfo?.binaryPath} />
-            </dd>
-          </div>
-          <div>
-            <dt>{coreInstalled ? t("browserCore.cacheDirectory") : t("browserCore.expectedCacheDirectory")}</dt>
-            <dd>
-              <BrowserCoreDetailValue copyable t={t} value={binaryInfo?.cacheDir} />
-            </dd>
-          </div>
-          <div>
-            <dt>{t("browserCore.primaryUrl")}</dt>
-            <dd>
-              <BrowserCoreDetailValue copyable t={t} value={binaryInfo?.core?.downloads.current.primaryUrl ?? binaryInfo?.downloadUrl} />
-            </dd>
-          </div>
-          <div>
-            <dt>{t("browserCore.fallbackUrl")}</dt>
-            <dd>
-              <BrowserCoreDetailValue copyable t={t} value={binaryInfo?.core?.downloads.current.fallbackUrl} />
-            </dd>
-          </div>
-        </dl>
+        <KeyValueList
+          className="browser-core-download-details"
+          items={[
+            { label: coreInstalled ? t("browserCore.installedVersion") : t("browserCore.targetVersion"), value: <CopyableValueRow value={binaryInfo?.version} /> },
+            { label: t("browserCore.wrapperVersion"), value: <CopyableValueRow value={binaryInfo?.core?.versions.wrapperVersion} /> },
+            { label: coreInstalled ? t("browserCore.executablePath") : t("browserCore.expectedExecutablePath"), value: <CopyableValueRow t={t} value={binaryInfo?.binaryPath} /> },
+            { label: coreInstalled ? t("browserCore.cacheDirectory") : t("browserCore.expectedCacheDirectory"), value: <CopyableValueRow t={t} value={binaryInfo?.cacheDir} /> },
+            { label: t("browserCore.primaryUrl"), value: <CopyableValueRow t={t} value={binaryInfo?.core?.downloads.current.primaryUrl ?? binaryInfo?.downloadUrl} /> },
+            { label: t("browserCore.fallbackUrl"), value: <CopyableValueRow t={t} value={binaryInfo?.core?.downloads.current.fallbackUrl} /> },
+          ]}
+        />
         <ToggleField
           checked={binary.checkForUpdatesOnStartup}
           help={t("browserCore.startupCheckHelp")}
@@ -250,28 +224,6 @@ export function BrowserCoreSettingsPanel({
   );
 }
 
-function BrowserCoreDetailValue({
-  copyable = false,
-  t,
-  value,
-}: {
-  copyable?: boolean;
-  t?: (key: TranslationKey) => string;
-  value?: string | null;
-}) {
-  const text = value?.trim() || "-";
-  const copyValue = copyable ? value?.trim() : "";
-  const canCopy = Boolean(copyValue && t);
-  return (
-    <span className={`browser-core-detail-value ${canCopy ? "copyable" : ""} ${value?.trim() ? "" : "empty"}`}>
-      <span className="mono-cell" title={text}>
-        {text}
-      </span>
-      {canCopy && t && copyValue && <CopyButton value={copyValue} t={t} />}
-    </span>
-  );
-}
-
 async function pickBrowserCoreZip(
   setImportPath: React.Dispatch<React.SetStateAction<string>>,
   t: (key: TranslationKey) => string,
@@ -304,9 +256,9 @@ function BrowserCoreEnvTable({
             <strong className="mono-cell">{item.key}</strong>
             <small>{item.detail || envSourceText(item.source, t)}</small>
           </span>
-          <span className={`pill ${item.enabled ? "running" : "stopped"}`}>
+          <StatusPill tone={item.enabled ? "running" : "stopped"}>
             {item.enabled ? t("status.enabled") : t("status.disabled")}
-          </span>
+          </StatusPill>
           <span className="mono-cell">{item.maskedValue || "-"}</span>
           <small>{item.requiresRuntimeRestart ? t("browserCore.restartRequired") : "-"}</small>
         </div>

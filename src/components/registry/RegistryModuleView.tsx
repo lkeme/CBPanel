@@ -10,6 +10,7 @@ import type { DesktopRuntimeInfo, StorageInfo } from "../../shared/settings";
 import { maskManagedProxyForDisplay } from "../profiles/proxyDisplay";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "../ui/dropdown-menu";
 import { LoadingSkeleton } from "../ui/LoadingSkeleton";
+import { StatusPill } from "../ui/StatusPill";
 import type { ModeFilter, ModuleStat, ModuleStats, ProxyFilter, StatusFilter, WorkbenchView } from "./registryStats";
 import { RegistryModuleEmpty, RegistryModuleShell } from "./RegistryModuleShell";
 
@@ -185,7 +186,7 @@ export function RegistryModuleView({
                   </small>
                   {group.description && <small>{group.description}</small>}
                 </span>
-                <span className="group-tile-status">{group.isDefault ? <span className="pill stopped">{t("form.default")}</span> : renderEntityStatus(group.status, t)}</span>
+                <span className="group-tile-status">{group.isDefault ? <StatusPill tone="stopped">{t("form.default")}</StatusPill> : renderEntityStatus(group.status, t)}</span>
               </button>
               {group.id && (
                 <div className="module-row-actions group-tile-actions">
@@ -702,7 +703,7 @@ export function RegistryModuleView({
 
 function renderEntityStatus(status: string | undefined, t: (key: TranslationKey) => string) {
   const enabled = status !== "disabled";
-  return <span className={`pill ${enabled ? "running" : "stopped"}`}>{t(enabled ? "status.enabled" : "status.disabled")}</span>;
+  return <StatusPill tone={enabled ? "running" : "stopped"}>{t(enabled ? "status.enabled" : "status.disabled")}</StatusPill>;
 }
 
 function ProxyRegistryRow({
@@ -823,15 +824,15 @@ function proxyCheckSummary(
   check: ProxyEntity["lastCheck"],
   t: (key: TranslationKey, params?: Record<string, string | number>) => string,
 ): React.ReactNode {
-  if (!check) return <span className="pill stopped">{t("module.proxyUnchecked")}</span>;
+  if (!check) return <StatusPill tone="stopped">{t("module.proxyUnchecked")}</StatusPill>;
   if (check.ok) {
     const trace = [check.trace?.loc, check.trace?.colo].filter(Boolean).join(" / ");
     const detail = check.ip
       ? `${t("proxy.check.okWithIp", { ip: check.ip, latency: check.latencyMs ?? "-" })}${trace ? ` / ${trace}` : ""}`
       : t("proxy.check.ok", { latency: check.latencyMs ?? "-" });
-    return <span className="pill running">{detail}</span>;
+    return <StatusPill tone="running">{detail}</StatusPill>;
   }
-  return <span className="pill error">{check.error || t("proxy.check.failed")}</span>;
+  return <StatusPill tone="error">{check.error || t("proxy.check.failed")}</StatusPill>;
 }
 
 function ModuleEmpty({ t }: { t: (key: TranslationKey) => string }) {

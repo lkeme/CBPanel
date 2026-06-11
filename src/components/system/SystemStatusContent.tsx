@@ -5,6 +5,7 @@ import type { SystemDiagnostics } from "../../shared/entities";
 import type { BinaryInfo, CloakBrowserEnvInfo } from "../../shared/browserCore";
 import type { PanelState } from "../../shared/profile";
 import type { DesktopRuntimeInfo, StorageInfo } from "../../shared/settings";
+import { KeyValueList } from "../ui/KeyValueList";
 
 const binaryEnvRows: Array<{ key: keyof CloakBrowserEnvInfo; label: string }> = [
   { key: "binaryPath", label: "CLOAKBROWSER_BINARY_PATH" },
@@ -61,152 +62,84 @@ export function SystemStatusContent({
               </button>
             </div>
           </div>
-          <dl className="kv-list">
-            <div>
-              <dt>{t("system.checkedAt")}</dt>
-              <dd>{diagnostics?.checkedAt ? new Date(diagnostics.checkedAt).toLocaleString() : "-"}</dd>
-            </div>
-            <div>
-              <dt>{t("system.schemaVersion")}</dt>
-              <dd>{diagnostics?.schemaVersion ?? "-"}</dd>
-            </div>
-            <div>
-              <dt>{t("session.dataDir")}</dt>
-              <dd>{diagnostics?.dataDir ?? state?.meta.dataDir ?? "-"}</dd>
-            </div>
-          </dl>
+          <KeyValueList
+            items={[
+              { label: t("system.checkedAt"), value: diagnostics?.checkedAt ? new Date(diagnostics.checkedAt).toLocaleString() : "-" },
+              { label: t("system.schemaVersion"), value: diagnostics?.schemaVersion ?? "-" },
+              { label: t("session.dataDir"), value: diagnostics?.dataDir ?? state?.meta.dataDir ?? "-" },
+            ]}
+          />
         </section>
 
         <section className="settings-section">
           <h2>{t("system.storage")}</h2>
-          <dl className="kv-list">
-            <div>
-              <dt>{t("settings.kind")}</dt>
-              <dd>{storage?.kind ?? "sqlite"}</dd>
-            </div>
-            <div>
-              <dt>{t("settings.database")}</dt>
-              <dd>{storage?.databasePath ?? "-"}</dd>
-            </div>
-            <div>
-              <dt>{t("settings.legacyJson")}</dt>
-              <dd>{storage?.legacyJsonPath ?? "-"}</dd>
-            </div>
-            <div>
-              <dt>{t("settings.portable")}</dt>
-              <dd>{storage?.portable ? t("settings.yes") : t("settings.no")}</dd>
-            </div>
-            <div>
-              <dt>{t("settings.migrated")}</dt>
-              <dd>{storage?.migratedFromJson ? t("settings.yes") : t("settings.no")}</dd>
-            </div>
-            <div>
-              <dt>{t("session.dataDir")}</dt>
-              <dd>{state?.meta.dataDir ?? "-"}</dd>
-            </div>
-          </dl>
+          <KeyValueList
+            items={[
+              { label: t("settings.kind"), value: storage?.kind ?? "sqlite" },
+              { label: t("settings.database"), value: storage?.databasePath ?? "-" },
+              { label: t("settings.legacyJson"), value: storage?.legacyJsonPath ?? "-" },
+              { label: t("settings.portable"), value: storage?.portable ? t("settings.yes") : t("settings.no") },
+              { label: t("settings.migrated"), value: storage?.migratedFromJson ? t("settings.yes") : t("settings.no") },
+              { label: t("session.dataDir"), value: state?.meta.dataDir ?? "-" },
+            ]}
+          />
           {storage?.migrationError && <div className="inline-error">{storage.migrationError}</div>}
         </section>
 
         <section className="settings-section">
           <h2>{t("system.networkTrace")}</h2>
-          <dl className="kv-list">
-            <div>
-              <dt>{t("networkTrace.provider")}</dt>
-              <dd>{diagnostics?.networkTrace.providerName ?? state?.settings.networkTrace.providerId ?? "-"}</dd>
-            </div>
-            <div>
-              <dt>{t("networkTrace.url")}</dt>
-              <dd>{diagnostics?.networkTrace.providerUrl ?? "-"}</dd>
-            </div>
-            <div>
-              <dt>{t("networkTrace.timeout")}</dt>
-              <dd>{diagnostics?.networkTrace.timeoutSeconds ?? state?.settings.networkTrace.timeoutSeconds ?? "-"}</dd>
-            </div>
-          </dl>
+          <KeyValueList
+            items={[
+              { label: t("networkTrace.provider"), value: diagnostics?.networkTrace.providerName ?? state?.settings.networkTrace.providerId ?? "-" },
+              { label: t("networkTrace.url"), value: diagnostics?.networkTrace.providerUrl ?? "-" },
+              { label: t("networkTrace.timeout"), value: diagnostics?.networkTrace.timeoutSeconds ?? state?.settings.networkTrace.timeoutSeconds ?? "-" },
+            ]}
+          />
         </section>
 
         <section className="settings-section">
           <h2>{t("system.sessions")}</h2>
-          <dl className="kv-list">
-            <div>
-              <dt>{t("system.total")}</dt>
-              <dd>{diagnostics?.sessions.total ?? state?.sessions.length ?? 0}</dd>
-            </div>
-            <div>
-              <dt>{t("status.running")}</dt>
-              <dd>{diagnostics?.sessions.running ?? 0}</dd>
-            </div>
-            <div>
-              <dt>{t("status.launching")}</dt>
-              <dd>{diagnostics?.sessions.launching ?? 0}</dd>
-            </div>
-            <div>
-              <dt>{t("status.error")}</dt>
-              <dd>{diagnostics?.sessions.error ?? 0}</dd>
-            </div>
-          </dl>
+          <KeyValueList
+            items={[
+              { label: t("system.total"), value: diagnostics?.sessions.total ?? state?.sessions.length ?? 0 },
+              { label: t("status.running"), value: diagnostics?.sessions.running ?? 0 },
+              { label: t("status.launching"), value: diagnostics?.sessions.launching ?? 0 },
+              { label: t("status.error"), value: diagnostics?.sessions.error ?? 0 },
+            ]}
+          />
         </section>
 
         <section className="settings-section">
           <h2>{t("system.runtime")}</h2>
-          <dl className="kv-list">
-            <div>
-              <dt>{t("settings.shell")}</dt>
-              <dd>{runtime?.shell ?? "web"}</dd>
-            </div>
-            <div>
-              <dt>{t("settings.platform")}</dt>
-              <dd>{runtime?.platform ?? "-"}</dd>
-            </div>
-            <div>
-              <dt>{t("settings.chrome")}</dt>
-              <dd>{runtime?.chrome ?? "native"}</dd>
-            </div>
-            <div>
-              <dt>{t("settings.sidecar")}</dt>
-              <dd>{runtime?.sidecar.status ?? t("settings.notApplicable")}</dd>
-            </div>
-            <div>
-              <dt>{t("settings.advancedWebEntry")}</dt>
-              <dd>{state?.settings.desktop.advancedWebEntry ? t("settings.yes") : t("settings.no")}</dd>
-            </div>
-            <div>
-              <dt>{t("system.webEndpoint")}</dt>
-              <dd>{runtime ? `${runtime.api.host}:${runtime.api.port}` : "-"}</dd>
-            </div>
-            <div>
-              <dt>{t("system.webToken")}</dt>
-              <dd>{runtime?.api.tokenRequired ? t("system.required") : t("system.notRequired")}</dd>
-            </div>
-          </dl>
+          <KeyValueList
+            items={[
+              { label: t("settings.shell"), value: runtime?.shell ?? "web" },
+              { label: t("settings.platform"), value: runtime?.platform ?? "-" },
+              { label: t("settings.chrome"), value: runtime?.chrome ?? "native" },
+              { label: t("settings.sidecar"), value: runtime?.sidecar.status ?? t("settings.notApplicable") },
+              { label: t("settings.advancedWebEntry"), value: state?.settings.desktop.advancedWebEntry ? t("settings.yes") : t("settings.no") },
+              { label: t("system.webEndpoint"), value: runtime ? `${runtime.api.host}:${runtime.api.port}` : "-" },
+              { label: t("system.webToken"), value: runtime?.api.tokenRequired ? t("system.required") : t("system.notRequired") },
+            ]}
+          />
           {state?.settings.desktop.advancedWebEntry && <div className="result-line">{t("system.advancedWebLocalOnly")}</div>}
         </section>
 
         <section className="settings-section">
           <h2>{t("system.extensions")}</h2>
-          <dl className="kv-list">
-            <div>
-              <dt>{t("module.extensionSourcesTitle")}</dt>
-              <dd>
-                {diagnostics
+          <KeyValueList
+            items={[
+              {
+                label: t("module.extensionSourcesTitle"),
+                value: diagnostics
                   ? `${diagnostics.extensionSources.enabled}/${diagnostics.extensionSources.total}`
-                  : `${state?.extensionSources?.filter((source) => source.status === "enabled").length ?? 0}/${state?.extensionSources?.length ?? 0}`}
-              </dd>
-            </div>
-            <div>
-              <dt>{t("system.extensionCache")}</dt>
-              <dd>{diagnostics?.extensionCache.directory ?? "-"}</dd>
-            </div>
-            <div>
-              <dt>{t("system.installedCount")}</dt>
-              <dd>{diagnostics?.extensionCache.installedCount ?? state?.extensions?.filter((extension) => extension.installState === "installed").length ?? 0}</dd>
-            </div>
-            <div>
-              <dt>{t("system.lastError")}</dt>
-              <dd>{diagnostics?.extensionSources.lastError ?? diagnostics?.extensionCache.lastError ?? "-"}</dd>
-            </div>
-          </dl>
+                  : `${state?.extensionSources?.filter((source) => source.status === "enabled").length ?? 0}/${state?.extensionSources?.length ?? 0}`,
+              },
+              { label: t("system.extensionCache"), value: diagnostics?.extensionCache.directory ?? "-" },
+              { label: t("system.installedCount"), value: diagnostics?.extensionCache.installedCount ?? state?.extensions?.filter((extension) => extension.installState === "installed").length ?? 0 },
+              { label: t("system.lastError"), value: diagnostics?.extensionSources.lastError ?? diagnostics?.extensionCache.lastError ?? "-" },
+            ]}
+          />
         </section>
 
         <section className="settings-section">
@@ -217,24 +150,14 @@ export function SystemStatusContent({
               {t("actions.refresh")}
             </button>
           </div>
-          <dl className="kv-list">
-            <div>
-              <dt>{t("settings.binary")}</dt>
-              <dd>{binaryInfo?.installed ? t("form.installed") : t("form.missing")}</dd>
-            </div>
-            <div>
-              <dt>{t("form.path")}</dt>
-              <dd>{binaryInfo?.binaryPath ?? "-"}</dd>
-            </div>
-            <div>
-              <dt>{t("form.cache")}</dt>
-              <dd>{binaryInfo?.cacheDir ?? "-"}</dd>
-            </div>
-            <div>
-              <dt>{t("settings.platform")}</dt>
-              <dd>{binaryInfo?.platform ?? "-"}</dd>
-            </div>
-          </dl>
+          <KeyValueList
+            items={[
+              { label: t("settings.binary"), value: binaryInfo?.installed ? t("form.installed") : t("form.missing") },
+              { label: t("form.path"), value: binaryInfo?.binaryPath ?? "-" },
+              { label: t("form.cache"), value: binaryInfo?.cacheDir ?? "-" },
+              { label: t("settings.platform"), value: binaryInfo?.platform ?? "-" },
+            ]}
+          />
           <EnvStatusPanel env={binaryInfo?.env} t={t} />
         </section>
 

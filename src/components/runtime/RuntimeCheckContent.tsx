@@ -3,6 +3,7 @@ import { Download, ListChecks, Settings2 } from "lucide-react";
 import type { TranslationKey } from "../../i18n";
 import type { BrowserCoreInfo } from "../../shared/browserCore";
 import { BrowserCoreOperationPanel, browserCoreOperationActive, isBrowserCoreBusy } from "../browser-core/BrowserCoreStatusPanels";
+import { StatusPill } from "../ui/StatusPill";
 import { ModuleHeader } from "./ModuleHeader";
 
 export type RuntimeCheckBinaryInfo = {
@@ -43,7 +44,7 @@ export function RuntimeCheckContent({
         <div className="runtime-check-hero-copy">
           <div className="runtime-check-hero-title-row">
             <strong>{browserCoreMissing ? t("browserCore.installRequired") : t("browserCore.launchReady")}</strong>
-            <span className={`pill ${browserCoreMissing ? "error" : "running"}`}>{coreStatusValue}</span>
+            <StatusPill tone={browserCoreMissing ? "error" : "running"}>{coreStatusValue}</StatusPill>
           </div>
           <small>{browserCoreMissing ? t("browserCore.installRequiredDetail") : t("browserCore.launchReadyDetail")}</small>
           {!browserCoreMissing && (

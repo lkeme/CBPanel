@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 
 import type { TranslationKey } from "../../i18n";
 import type { BrowserCoreImportAnalysis } from "../../shared/browserCore";
+import { DialogShell } from "../ui/DialogShell";
+import { KeyValueList } from "../ui/KeyValueList";
 
 export type BrowserCoreImportDialogState = {
   filePath: string;
@@ -47,52 +49,9 @@ export function BrowserCoreImportDialog({
 
   const analysis = state.analysis;
   return (
-    <div className="modal-layer" role="dialog" aria-modal="true" aria-labelledby="browser-core-import-title">
-      <button className="modal-scrim" aria-label={t("actions.close")} onClick={isBusy ? undefined : close} type="button" />
-      <section className="modal-panel registry-editor-panel">
-        <header className="modal-header">
-          <h2 id="browser-core-import-title">{t("browserCore.importAnalysis")}</h2>
-          <p>{t("browserCore.manualImportHelp")}</p>
-        </header>
-        <div className="modal-body">
-          {error && <div className="inline-error">{error}</div>}
-          {!analysis && !error && <div className="preflight-empty">{t("browserCore.analyzeImport")}</div>}
-          {analysis && (
-            <div className="settings-stack no-padding">
-              <div className={analysis.allowed ? "settings-status-line enabled" : "inline-error"}>
-                <strong>
-                  {analysis.allowed
-                    ? t("browserCore.importAllowed", { operation: analysis.operation })
-                    : t("browserCore.importBlocked", { reason: analysis.reason ?? "-" })}
-                </strong>
-                <span>{t("browserCore.importVersionChange", { current: analysis.currentVersion, next: analysis.importedVersion ?? "-" })}</span>
-              </div>
-              <dl className="kv-list">
-                <div>
-                  <dt>{t("browserCore.importZipPath")}</dt>
-                  <dd className="mono-cell">{analysis.filePath}</dd>
-                </div>
-                <div>
-                  <dt>{t("form.platform")}</dt>
-                  <dd>{analysis.platform}</dd>
-                </div>
-                <div>
-                  <dt>{t("form.version")}</dt>
-                  <dd>{analysis.importedVersion ?? "-"}</dd>
-                </div>
-                <div>
-                  <dt>SHA-256</dt>
-                  <dd className="mono-cell">{analysis.sha256}</dd>
-                </div>
-                <div>
-                  <dt>{t("form.cache")}</dt>
-                  <dd className="mono-cell">{analysis.targetCacheDir ?? "-"}</dd>
-                </div>
-              </dl>
-            </div>
-          )}
-        </div>
-        <footer className="modal-footer">
+    <DialogShell
+      actions={
+        <>
           <button className="command subtle" disabled={isBusy} onClick={close} type="button">
             {t("actions.cancel")}
           </button>
@@ -104,8 +63,39 @@ export function BrowserCoreImportDialog({
           >
             {t("browserCore.confirmImport")}
           </button>
-        </footer>
-      </section>
-    </div>
+        </>
+      }
+      close={close}
+      closeDisabled={isBusy}
+      description={t("browserCore.manualImportHelp")}
+      labelledBy="browser-core-import-title"
+      panelClassName="registry-editor-panel"
+      t={t}
+      title={t("browserCore.importAnalysis")}
+    >
+      {error && <div className="inline-error">{error}</div>}
+      {!analysis && !error && <div className="preflight-empty">{t("browserCore.analyzeImport")}</div>}
+      {analysis && (
+        <div className="settings-stack no-padding">
+          <div className={analysis.allowed ? "settings-status-line enabled" : "inline-error"}>
+            <strong>
+              {analysis.allowed
+                ? t("browserCore.importAllowed", { operation: analysis.operation })
+                : t("browserCore.importBlocked", { reason: analysis.reason ?? "-" })}
+            </strong>
+            <span>{t("browserCore.importVersionChange", { current: analysis.currentVersion, next: analysis.importedVersion ?? "-" })}</span>
+          </div>
+          <KeyValueList
+            items={[
+              { label: t("browserCore.importZipPath"), value: analysis.filePath, mono: true },
+              { label: t("form.platform"), value: analysis.platform },
+              { label: t("form.version"), value: analysis.importedVersion ?? "-" },
+              { label: "SHA-256", value: analysis.sha256, mono: true },
+              { label: t("form.cache"), value: analysis.targetCacheDir ?? "-", mono: true },
+            ]}
+          />
+        </div>
+      )}
+    </DialogShell>
   );
 }

@@ -2,6 +2,8 @@ import type { TranslationKey } from "../../i18n";
 import { formatTime } from "../../lib/utils";
 import type { BrowserCoreInfo, BrowserCoreOperation } from "../../shared/browserCore";
 import { CopyButton } from "../ui/CopyButton";
+import { KeyValueList } from "../ui/KeyValueList";
+import { StatusPill, type StatusPillTone } from "../ui/StatusPill";
 
 export function BrowserCoreOperationPanel({
   busy,
@@ -15,14 +17,14 @@ export function BrowserCoreOperationPanel({
   const running = operation?.status === "running" || isBrowserCoreBusy(busy);
   const percent = operationPercent(operation);
   const label = operation?.progress?.label ?? browserCoreBusyLabel(busy, t);
-  const statusTone = operation?.status === "failed" ? "error" : running ? "launching" : "running";
+  const statusTone: StatusPillTone = operation?.status === "failed" ? "error" : running ? "launching" : "running";
   return (
     <section className="browser-core-card operation-card">
       <div className="settings-section-head">
         <h2>{t("browserCore.operation")}</h2>
-        <span className={`pill ${statusTone}`}>
+        <StatusPill tone={statusTone}>
           {operation?.phase ?? t("browserCore.operationRunning")}
-        </span>
+        </StatusPill>
       </div>
       <div className="operation-progress-row">
         <div
@@ -64,39 +66,27 @@ export function BrowserCoreUpdateStatus({
 }) {
   const update = core.update;
   if (!update) return null;
-  const tone = update.error ? "error" : update.updateAvailable ? "warning" : "running";
+  const tone: StatusPillTone = update.error ? "error" : update.updateAvailable ? "warning" : "running";
   return (
     <section className="browser-core-card update-status-card">
       <div className="settings-section-head">
         <h2>{t("browserCore.updateStatus")}</h2>
-        <span className={`pill ${tone}`}>
+        <StatusPill tone={tone}>
           {update.error
             ? t("browserCore.updateCheckFailed")
             : update.updateAvailable
               ? t("browserCore.updateAvailableShort")
               : t("browserCore.upToDate")}
-        </span>
+        </StatusPill>
       </div>
-      <dl className="kv-list">
-        <div>
-          <dt>{t("browserCore.lastCheckedAt")}</dt>
-          <dd>{formatTime(update.checkedAt, "dateTime")}</dd>
-        </div>
-        <div>
-          <dt>{t("browserCore.currentVersion")}</dt>
-          <dd>{update.currentVersion}</dd>
-        </div>
-        <div>
-          <dt>{t("browserCore.latestVersion")}</dt>
-          <dd>{update.latestVersion ?? "-"}</dd>
-        </div>
-        {update.error && (
-          <div>
-            <dt>{t("status.error")}</dt>
-            <dd className="inline-error">{update.error}</dd>
-          </div>
-        )}
-      </dl>
+      <KeyValueList
+        items={[
+          { label: t("browserCore.lastCheckedAt"), value: formatTime(update.checkedAt, "dateTime") },
+          { label: t("browserCore.currentVersion"), value: update.currentVersion },
+          { label: t("browserCore.latestVersion"), value: update.latestVersion ?? "-" },
+          ...(update.error ? [{ label: t("status.error"), value: <span className="inline-error">{update.error}</span> }] : []),
+        ]}
+      />
       {update.downloadLinks && (
         <div className="update-download-links">
           <div className="download-url-row">

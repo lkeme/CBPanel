@@ -15,6 +15,8 @@ import {
   profileScore,
 } from "../../shared/profile";
 import type { StorageInfo } from "../../shared/settings";
+import { KeyValueList } from "../ui/KeyValueList";
+import { StatusPill, type StatusPillTone } from "../ui/StatusPill";
 import { statusText } from "./ProfileTable";
 
 export function ProfileInspectorAside({
@@ -211,30 +213,22 @@ export function SessionPanel({ session, state, draft, t }: { session?: SessionSu
         <Monitor size={17} />
         <h2>{t("panel.session")}</h2>
       </div>
-      <dl className="kv-list">
-        <div>
-          <dt>{t("table.status")}</dt>
-          <dd>
-            <span className={`pill ${session?.status ?? "stopped"}`}>{statusText(session?.status ?? "stopped", t)}</span>
-          </dd>
-        </div>
-        <div>
-          <dt>{t("session.startedAt")}</dt>
-          <dd>{session?.startedAt ? new Date(session.startedAt).toLocaleString() : "-"}</dd>
-        </div>
-        <div>
-          <dt>{t("session.page")}</dt>
-          <dd>{session?.pageUrl ?? draft.startUrl ?? "-"}</dd>
-        </div>
-        <div>
-          <dt>{t("session.dataDir")}</dt>
-          <dd>{launch?.userDataDir ?? state?.meta.dataDir ?? "-"}</dd>
-        </div>
-        <div>
-          <dt>{t("table.launcher")}</dt>
-          <dd>{launch ? `${launch.runtimeLauncher} -> ${launch.sdkLauncher}` : draft.runtime.launcher}</dd>
-        </div>
-      </dl>
+      <KeyValueList
+        items={[
+          {
+            label: t("table.status"),
+            value: (
+              <StatusPill tone={(session?.status ?? "stopped") as StatusPillTone}>
+                {statusText(session?.status ?? "stopped", t)}
+              </StatusPill>
+            ),
+          },
+          { label: t("session.startedAt"), value: session?.startedAt ? new Date(session.startedAt).toLocaleString() : "-" },
+          { label: t("session.page"), value: session?.pageUrl ?? draft.startUrl ?? "-" },
+          { label: t("session.dataDir"), value: launch?.userDataDir ?? state?.meta.dataDir ?? "-" },
+          { label: t("table.launcher"), value: launch ? `${launch.runtimeLauncher} -> ${launch.sdkLauncher}` : draft.runtime.launcher },
+        ]}
+      />
       {session?.lastError && !launchFailed && <div className="inline-error">{session.lastError}</div>}
       {events.length > 0 && (
         <details className="session-events" aria-label={t("aria.sessionEvents")}>
@@ -276,7 +270,7 @@ export function PreflightPanel({
       <div className="section-title">
         <ListChecks size={17} />
         <h2>{t("panel.preflight")}</h2>
-        {report && <span className={`pill ${report.ok ? "running" : "error"}`}>{report.ok ? t("form.pass") : t("form.fail")}</span>}
+        {report && <StatusPill tone={report.ok ? "running" : "error"}>{report.ok ? t("form.pass") : t("form.fail")}</StatusPill>}
       </div>
       {!report ? (
         <div className={launchBlocked ? "preflight-empty diagnostic-note" : "preflight-empty"}>
