@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import { createServer } from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -15,7 +16,8 @@ const portableSidecarPath = path.join(portableDir, "sidecars", path.basename(sid
 const portableZip = path.join(root, "release", "CBPanel-win-portable.zip");
 const packageMetadata = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
 const installerPath = path.join(root, "src-tauri", "target", "release", "bundle", "nsis", `CBPanel_${packageMetadata.version}_x64-setup.exe`);
-const smokeDataDir = path.join(portableDir, "portable-data");
+const smokePortableDir = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-release-smoke-"));
+const smokeDataDir = path.join(smokePortableDir, "portable-data");
 const port = process.env.CBPANEL_RELEASE_SMOKE_PORT ? Number(process.env.CBPANEL_RELEASE_SMOKE_PORT) : await findFreePort();
 const token = process.env.CBPANEL_RELEASE_SMOKE_TOKEN ?? `smoke-${Date.now()}`;
 const tauriOrigin = "https://tauri.localhost";
@@ -31,10 +33,10 @@ await assertExists(path.join(portableDir, "portable-data"), "Portable data direc
 await assertExists(portableZip, "Portable ZIP is missing.");
 await assertExists(installerPath, "Windows installer is missing.");
 
-await resetSmokeDataDir({ keepPlaceholder: false });
+await prepareSmokePortableDir();
 
-const child = spawn(path.join(portableDir, "CBPanel.exe"), {
-  cwd: portableDir,
+const child = spawn(path.join(smokePortableDir, "CBPanel.exe"), {
+  cwd: smokePortableDir,
   env: {
     ...process.env,
     CBPANEL_RELEASE_SMOKE: "1",
@@ -64,6 +66,20 @@ try {
   if (!state.settings || state.storage?.kind !== "sqlite" || !Array.isArray(state.profiles)) {
     throw new Error("State payload does not include settings, sqlite storage, and profiles.");
   }
+  const savedSettings = await fetchJson(`http://127.0.0.1:${port}/api/settings`, token, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ desktop: { closeToTray: true } }),
+  });
+  if (savedSettings.desktop?.closeToTray !== true) {
+    throw new Error(`Settings API did not persist close-to-tray: ${JSON.stringify(savedSettings.desktop)}`);
+  }
+  const persistedState = await fetchJson(`http://127.0.0.1:${port}/api/state`, token);
+  if (persistedState.settings?.desktop?.closeToTray !== true) {
+    throw new Error(`State API did not return persisted close-to-tray: ${JSON.stringify(persistedState.settings?.desktop)}`);
+  }
 
   const binary = await fetchJson(`http://127.0.0.1:${port}/api/binary`, token);
   if (typeof binary.installed !== "boolean" || typeof binary.env !== "object") {
@@ -79,7 +95,7 @@ try {
   console.log("Release smoke passed: portable app starts the sidecar, sidecar auth, Tauri WebView CORS, runtime API, binary API, packaged runtime dependencies, SQLite state, installer, and portable layout are present.");
 } finally {
   await stopProcessTree(child);
-  await resetSmokeDataDir({ keepPlaceholder: true });
+  await fs.rm(smokePortableDir, { recursive: true, force: true });
 }
 
 async function waitForReady(inputPort, inputToken) {
@@ -97,9 +113,11 @@ async function waitForReady(inputPort, inputToken) {
   throw new Error(`Sidecar did not become ready: ${lastError?.message ?? "timeout"}`);
 }
 
-async function fetchJson(url, inputToken) {
+async function fetchJson(url, inputToken, init = {}) {
   const response = await fetch(url, {
+    ...init,
     headers: {
+      ...(init.headers ?? {}),
       "X-CBPanel-Token": inputToken,
     },
   });
@@ -175,11 +193,19 @@ async function assertExists(inputPath, message) {
   }
 }
 
-async function resetSmokeDataDir({ keepPlaceholder }) {
-  await fs.rm(smokeDataDir, { recursive: true, force: true });
+async function prepareSmokePortableDir() {
+  await fs.copyFile(path.join(portableDir, "CBPanel.exe"), path.join(smokePortableDir, "CBPanel.exe"));
+  await copyIfExists(path.join(portableDir, "WebView2Loader.dll"), smokePortableDir);
+  await fs.cp(path.join(portableDir, "sidecars"), path.join(smokePortableDir, "sidecars"), { recursive: true });
   await fs.mkdir(smokeDataDir, { recursive: true });
-  if (keepPlaceholder) {
-    await fs.writeFile(path.join(smokeDataDir, ".gitkeep"), "", "utf8");
+  await fs.writeFile(path.join(smokeDataDir, ".gitkeep"), "", "utf8");
+}
+
+async function copyIfExists(source, targetDirectory) {
+  try {
+    await fs.copyFile(source, path.join(targetDirectory, path.basename(source)));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
   }
 }
 

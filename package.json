@@ -15,7 +15,7 @@
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
-    "desktop:portable": "node scripts/package-windows-portable.mjs",
+    "desktop:portable": "npm run sidecar:build && node scripts/package-windows-portable.mjs",
     "sidecar:build": "node scripts/build-sidecar.mjs",
     "release:windows": "node scripts/release-windows.mjs",
     "release:linux": "node scripts/release-linux.mjs",
