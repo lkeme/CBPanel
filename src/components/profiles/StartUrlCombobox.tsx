@@ -2,7 +2,15 @@ import { useId, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 import { START_URL_PRESETS } from "../../shared/profile";
-import { ChoiceEmpty, ChoiceList, ChoiceOption, closeOnFocusLeave } from "../ui/choice-list";
+import {
+  ChoiceEmpty,
+  ChoiceList,
+  ChoiceOption,
+  clampChoiceIndex,
+  closeOnFocusLeave,
+  isComposingInput,
+  nextChoiceIndex,
+} from "../ui/choice-list";
 
 export function StartUrlCombobox({
   customLabel,
@@ -20,6 +28,7 @@ export function StartUrlCombobox({
   const listId = useId();
   const [open, setOpen] = useState(false);
   const [showAllPresets, setShowAllPresets] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
   const selectedUrl = value.trim();
   const presetQuery = selectedUrl.toLowerCase();
   const visiblePresets = showAllPresets
@@ -33,6 +42,25 @@ export function StartUrlCombobox({
   function close() {
     setOpen(false);
     setShowAllPresets(false);
+    setActiveIndex(-1);
+  }
+
+  function openPresets(showAll: boolean) {
+    const nextPresets = showAll ? START_URL_PRESETS : visiblePresets;
+    setShowAllPresets(showAll);
+    setOpen(true);
+    const selectedIndex = nextPresets.findIndex((preset) => preset.url === selectedUrl);
+    setActiveIndex(clampChoiceIndex(selectedIndex, nextPresets.length));
+  }
+
+  function commitActive() {
+    const preset = visiblePresets[activeIndex];
+    if (!preset) {
+      close();
+      return;
+    }
+    onChange(preset.url);
+    close();
   }
 
   return (
@@ -51,18 +79,33 @@ export function StartUrlCombobox({
           onChange={(event) => {
             onChange(event.target.value);
             setShowAllPresets(false);
+            setActiveIndex(-1);
             setOpen(true);
           }}
           onFocus={() => {
             setShowAllPresets(false);
+            setActiveIndex(-1);
             setOpen(true);
           }}
           onKeyDown={(event) => {
-            if (event.key === "ArrowDown") {
+            if (isComposingInput(event)) return;
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              event.preventDefault();
+              const direction = event.key === "ArrowDown" ? 1 : -1;
+              const keyboardPresets = showAllPresets ? visiblePresets : START_URL_PRESETS;
               setShowAllPresets(true);
               setOpen(true);
+              setActiveIndex((current) => nextChoiceIndex(current, keyboardPresets.length, direction));
             }
-            if (event.key === "Escape" || event.key === "Enter") close();
+            if (event.key === "Enter") {
+              if (activeIndex >= 0) {
+                event.preventDefault();
+                commitActive();
+              } else {
+                close();
+              }
+            }
+            if (event.key === "Escape") close();
           }}
           placeholder={placeholder}
         />
@@ -71,8 +114,8 @@ export function StartUrlCombobox({
           title={presetLabel}
           onClick={() => {
             const nextOpen = !open || !showAllPresets;
-            setShowAllPresets(nextOpen);
-            setOpen(nextOpen);
+            if (nextOpen) openPresets(true);
+            else close();
           }}
           type="button"
         >
@@ -83,12 +126,13 @@ export function StartUrlCombobox({
         <ChoiceList className="start-url-combobox-list" id={listId}>
           {visiblePresets.map((preset) => (
             <ChoiceOption
-              active={preset.url === selectedUrl}
+              active={activeIndex === visiblePresets.indexOf(preset) || (activeIndex < 0 && preset.url === selectedUrl)}
               key={preset.id}
               onClick={() => {
                 onChange(preset.url);
                 close();
               }}
+              onMouseEnter={() => setActiveIndex(visiblePresets.indexOf(preset))}
             >
               <strong>{preset.label}</strong>
               <small>{preset.url}</small>

@@ -10,7 +10,7 @@ import {
   type GithubMirrorProviderId,
   type NetworkTraceSettings,
 } from "../../shared/settings";
-import { ChoiceList, ChoiceOption, closeOnFocusLeave } from "../ui/choice-list";
+import { ChoiceList, ChoiceOption, clampChoiceIndex, closeOnFocusLeave, nextChoiceIndex } from "../ui/choice-list";
 import { SelectMenu } from "../ui/SelectMenu";
 import { Field, NumberField } from "../ui/form-controls";
 
@@ -185,6 +185,20 @@ function GithubMirrorSelect({
     },
   ];
   const selected = options.find((option) => option.value === value) ?? options[1];
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === selected.value));
+  const [activeIndex, setActiveIndex] = useState(selectedIndex);
+
+  function openAt(index: number) {
+    setActiveIndex(clampChoiceIndex(index, options.length));
+    setOpen(true);
+  }
+
+  function commit(index: number) {
+    const option = options[index];
+    if (!option) return;
+    onChange(option.value);
+    setOpen(false);
+  }
 
   return (
     <div
@@ -195,7 +209,28 @@ function GithubMirrorSelect({
         aria-label={t("githubMirror.provider")}
         aria-expanded={open}
         className="github-mirror-trigger"
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => {
+          if (!open) openAt(selectedIndex);
+          else setOpen(false);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            const direction = event.key === "ArrowDown" ? 1 : -1;
+            if (open) {
+              setActiveIndex((current) => nextChoiceIndex(current, options.length, direction));
+            } else {
+              setActiveIndex(nextChoiceIndex(selectedIndex, options.length, direction));
+              setOpen(true);
+            }
+          }
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            if (!open) openAt(selectedIndex);
+            else commit(activeIndex);
+          }
+          if (event.key === "Escape") setOpen(false);
+        }}
         type="button"
       >
         <MirrorIcon kind={selected.icon} />
@@ -218,7 +253,7 @@ function GithubMirrorSelect({
             const isMeasuredMirror = option.value !== "off" && option.value !== "auto-best";
             return (
               <ChoiceOption
-                active={selectedOption}
+                active={activeIndex === options.indexOf(option) || (activeIndex < 0 && selectedOption)}
                 className={`github-mirror-option ${option.value === "auto-best" ? "auto" : ""}`}
                 key={option.value}
                 onClick={() => {
@@ -226,6 +261,7 @@ function GithubMirrorSelect({
                   setOpen(false);
                 }}
                 keepFocus
+                onMouseEnter={() => setActiveIndex(options.indexOf(option))}
               >
                 <MirrorIcon kind={option.icon} />
                 <span className="github-mirror-option-main">

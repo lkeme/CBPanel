@@ -6,6 +6,22 @@ export function closeOnFocusLeave(event: React.FocusEvent<HTMLElement>, onClose:
   if (!event.currentTarget.contains(event.relatedTarget as Node | null)) onClose();
 }
 
+export function isComposingInput(event: React.KeyboardEvent<HTMLElement>) {
+  return event.nativeEvent.isComposing || event.key === "Process";
+}
+
+export function nextChoiceIndex(currentIndex: number, itemCount: number, direction: 1 | -1) {
+  if (itemCount <= 0) return -1;
+  if (currentIndex < 0) return direction > 0 ? 0 : itemCount - 1;
+  return (currentIndex + direction + itemCount) % itemCount;
+}
+
+export function clampChoiceIndex(index: number, itemCount: number) {
+  if (itemCount <= 0) return -1;
+  if (index < 0) return 0;
+  return Math.min(index, itemCount - 1);
+}
+
 export function ChoiceList({
   className,
   children,

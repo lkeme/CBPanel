@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { ChoiceList, ChoiceOption, closeOnFocusLeave } from "./choice-list";
+import { ChoiceList, ChoiceOption, clampChoiceIndex, closeOnFocusLeave, nextChoiceIndex } from "./choice-list";
 
 export function SelectMenu<T extends string>({
   disabled = false,
@@ -17,8 +17,22 @@ export function SelectMenu<T extends string>({
 }) {
   const [open, setOpen] = useState(false);
   const selected = options.find((option) => option.value === value);
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
+  const [activeIndex, setActiveIndex] = useState(selectedIndex);
   const label = selected?.label ?? placeholder;
   const meta = selected?.meta;
+
+  function openAt(index: number) {
+    setActiveIndex(clampChoiceIndex(index, options.length));
+    setOpen(true);
+  }
+
+  function commit(index: number) {
+    const option = options[index];
+    if (!option) return;
+    onChange(option.value);
+    setOpen(false);
+  }
 
   return (
     <div
@@ -29,7 +43,28 @@ export function SelectMenu<T extends string>({
         aria-expanded={open}
         className="select-menu-trigger"
         disabled={disabled}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => {
+          if (!open) openAt(selectedIndex);
+          else setOpen(false);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            const direction = event.key === "ArrowDown" ? 1 : -1;
+            if (open) {
+              setActiveIndex((current) => nextChoiceIndex(current, options.length, direction));
+            } else {
+              setActiveIndex(nextChoiceIndex(selectedIndex, options.length, direction));
+              setOpen(true);
+            }
+          }
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            if (!open) openAt(selectedIndex);
+            else commit(activeIndex);
+          }
+          if (event.key === "Escape") setOpen(false);
+        }}
         type="button"
       >
         <span className={`select-menu-value ${meta ? "has-meta" : ""}`}>
@@ -42,8 +77,9 @@ export function SelectMenu<T extends string>({
         <ChoiceList className="select-menu-list">
           {options.map((option) => (
             <ChoiceOption
-              active={option.value === value}
+              active={options[activeIndex]?.value === option.value || (!options[activeIndex] && option.value === value)}
               key={option.value}
+              onMouseEnter={() => setActiveIndex(options.findIndex((candidate) => candidate.value === option.value))}
               onClick={() => {
                 onChange(option.value);
                 setOpen(false);
