@@ -2603,6 +2603,25 @@ textarea {
   width: min(480px, 100%);
 }
 
+.confirm-remember-choice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 10px 11px;
+  color: var(--foreground-muted);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.confirm-remember-choice span {
+  min-width: 0;
+}
+
 .input-panel {
   width: min(520px, 100%);
 }

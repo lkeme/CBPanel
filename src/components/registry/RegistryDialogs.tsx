@@ -4,10 +4,15 @@ import type { TranslationKey } from "../../i18n";
 import type { ExtensionSourceEntity, GroupEntity, ProxyEntity, TagEntity } from "../../shared/entities";
 import { type ProxyScheme, nowIso, parseProxyUrlInput, proxyUrlFromParts } from "../../shared/profile";
 import { DialogShell } from "../ui/DialogShell";
+import { Checkbox } from "../ui/checkbox";
 import { Field, Segmented, ToggleField } from "../ui/form-controls";
 import { PasswordInput } from "../ui/PasswordInput";
 import { SelectMenu } from "../ui/SelectMenu";
 import { maskManagedProxyForDisplay } from "../profiles/proxyDisplay";
+
+type ConfirmDialogContext = {
+  rememberChoice: boolean;
+};
 
 export type ConfirmDialogState = {
   title: string;
@@ -17,8 +22,12 @@ export type ConfirmDialogState = {
   dangerLabel?: string;
   tone?: "danger" | "warning";
   busyKey?: string;
-  onConfirm: () => Promise<void>;
-  onDanger?: () => Promise<void>;
+  onConfirm: (context: ConfirmDialogContext) => Promise<void>;
+  onDanger?: (context: ConfirmDialogContext) => Promise<void>;
+  rememberChoice?: {
+    label: string;
+    defaultChecked?: boolean;
+  };
 } | null;
 
 export type TextInputDialogState = {
@@ -92,6 +101,7 @@ export function ConfirmDialog({
   t: (key: TranslationKey) => string;
 }) {
   const isBusy = Boolean(state.busyKey && busy === state.busyKey);
+  const [rememberChoice, setRememberChoice] = useState(state.rememberChoice?.defaultChecked ?? false);
   return (
     <DialogShell
       actions={
@@ -100,11 +110,11 @@ export function ConfirmDialog({
             {state.cancelLabel ?? t("actions.cancel")}
           </button>
           {state.dangerLabel && state.onDanger && (
-            <button className="command danger" disabled={isBusy} onClick={() => void state.onDanger?.()} type="button">
+            <button className="command danger" disabled={isBusy} onClick={() => void state.onDanger?.({ rememberChoice })} type="button">
               {state.dangerLabel}
             </button>
           )}
-          <button className={`command ${state.tone === "danger" ? "danger" : "primary"}`} disabled={isBusy} onClick={() => void state.onConfirm()} type="button">
+          <button className={`command ${state.tone === "danger" ? "danger" : "primary"}`} disabled={isBusy} onClick={() => void state.onConfirm({ rememberChoice })} type="button">
             {state.confirmLabel}
           </button>
         </>
@@ -117,6 +127,16 @@ export function ConfirmDialog({
       title={state.title}
     >
       <p>{state.body}</p>
+      {state.rememberChoice && (
+        <label className="confirm-remember-choice">
+          <Checkbox
+            checked={rememberChoice}
+            disabled={isBusy}
+            onCheckedChange={(checked) => setRememberChoice(checked === true)}
+          />
+          <span>{state.rememberChoice.label}</span>
+        </label>
+      )}
     </DialogShell>
   );
 }

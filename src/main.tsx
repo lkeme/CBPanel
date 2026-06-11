@@ -811,6 +811,11 @@ function App() {
     setDrawerMode("settings");
   }
 
+  async function rememberCloseToTrayIfNeeded(rememberChoice: boolean) {
+    if (!rememberChoice || normalizedSettings.desktop.closeToTray) return;
+    await saveSettings({ desktop: { ...normalizedSettings.desktop, closeToTray: true } });
+  }
+
   function runDesktopCommand(command: string) {
     try {
       void invoke(command).catch((error) => console.warn("Tauri desktop command failed", error));
@@ -861,7 +866,26 @@ function App() {
       hideWindowToTray();
       return;
     }
-    runDesktopCommand("cbpanel_window_close");
+    setConfirmDialog({
+      title: t("tray.closeChoiceTitle"),
+      body: t("tray.closeChoiceBody"),
+      confirmLabel: t("tray.hideToTray"),
+      cancelLabel: t("actions.cancel"),
+      dangerLabel: t("tray.quitApp"),
+      busyKey: "settings",
+      rememberChoice: {
+        label: t("tray.rememberCloseToTray"),
+      },
+      onConfirm: async ({ rememberChoice }) => {
+        await rememberCloseToTrayIfNeeded(rememberChoice);
+        hideWindowToTray();
+        setConfirmDialog(null);
+      },
+      onDanger: async () => {
+        quitDesktopApp();
+        setConfirmDialog(null);
+      },
+    });
   }
 
   return (
