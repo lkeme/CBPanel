@@ -19,3 +19,7 @@ tauri-plugin-dialog = "2.7.1"
 tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
 uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38.2"
+windows-core = "0.61.2"

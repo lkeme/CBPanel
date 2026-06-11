@@ -15,6 +15,16 @@ use tauri::{
 };
 
 #[cfg(target_os = "windows")]
+use webview2_com::{
+    take_pwstr, ContextMenuRequestedEventHandler,
+    Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2ContextMenuItem, ICoreWebView2ContextMenuItemCollection, ICoreWebView2_11,
+    },
+};
+#[cfg(target_os = "windows")]
+use windows_core::{Interface, PWSTR};
+
+#[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const WINDOW_STATE_FILE: &str = "window-state.txt";
 const MIN_WINDOW_WIDTH: u32 = 1180;
@@ -213,6 +223,13 @@ pub fn run() {
                 }
             }
 
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = configure_webview_context_menu(&window);
+                }
+            }
+
             let runtime = prepare_runtime(app);
             let _ = setup_tray(app.handle());
             let data_dir = PathBuf::from(runtime.config.data_dir.clone());
@@ -251,6 +268,80 @@ pub fn run() {
                     .stop_sidecar();
             }
         });
+}
+
+#[cfg(target_os = "windows")]
+fn configure_webview_context_menu(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    window.with_webview(|webview| unsafe {
+        let Ok(core) = webview.controller().CoreWebView2() else {
+            return;
+        };
+        let Ok(core_11) = core.cast::<ICoreWebView2_11>() else {
+            return;
+        };
+
+        let handler = ContextMenuRequestedEventHandler::create(Box::new(move |_sender, args| {
+            if let Some(args) = args {
+                if let Ok(items) = args.MenuItems() {
+                    filter_context_menu_items(&items);
+                }
+            }
+            Ok(())
+        }));
+
+        let mut token = 0i64;
+        let _ = core_11.add_ContextMenuRequested(&handler, &mut token);
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn filter_context_menu_items(items: &ICoreWebView2ContextMenuItemCollection) {
+    let mut count = 0u32;
+    if unsafe { items.Count(&mut count) }.is_err() {
+        return;
+    }
+
+    let mut index = 0u32;
+
+    while index < count {
+        let Ok(item) = (unsafe { items.GetValueAtIndex(index) }) else {
+            index += 1;
+            continue;
+        };
+        let name = read_context_menu_name(&item).unwrap_or_default();
+
+        if should_remove_menu_item(&name) {
+            if unsafe { items.RemoveValueAtIndex(index) }.is_ok() {
+                count -= 1;
+                continue;
+            }
+        }
+
+        if let Ok(children) = unsafe { item.Children() } {
+            filter_context_menu_items(&children);
+        }
+        index += 1;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn read_context_menu_name(item: &ICoreWebView2ContextMenuItem) -> windows_core::Result<String> {
+    let mut raw = PWSTR::null();
+    unsafe { item.Name(&mut raw)? };
+    Ok(take_pwstr(raw))
+}
+
+#[cfg(target_os = "windows")]
+fn should_remove_menu_item(name: &str) -> bool {
+    matches!(
+        name,
+        "saveAs"
+            | "print"
+            | "moreTools"
+            | "writingDirection"
+            | "showWritingTools"
+            | "writingDirectionMenu"
+    )
 }
 
 fn restore_existing_window(app: &tauri::AppHandle) {

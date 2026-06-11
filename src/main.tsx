@@ -203,20 +203,6 @@ function App() {
   }, [settings]);
 
   useEffect(() => {
-    if (runtime?.shell !== "desktop") return;
-
-    const preventBrowserContextMenu = (event: MouseEvent) => {
-      if (isEditableContextMenuTarget(event.target)) return;
-      event.preventDefault();
-    };
-
-    window.addEventListener("contextmenu", preventBrowserContextMenu, true);
-    return () => {
-      window.removeEventListener("contextmenu", preventBrowserContextMenu, true);
-    };
-  }, [runtime?.shell]);
-
-  useEffect(() => {
     if (startupBrowserCoreCheckDone.current || !state || !binaryInfo) return;
     if (!normalizeSettings(settings).binary.checkForUpdatesOnStartup) return;
     if (!shouldRunStartupBrowserCoreUpdateCheck(settings.binary.lastUpdateCheck)) return;
@@ -1401,20 +1387,6 @@ function applyAppearance(settings: AppSettings): void {
   root.style.setProperty("--font-size-base", `${normalized.appearance.baseFontSize}px`);
   root.style.setProperty("--font-size-table", `${normalized.appearance.tableFontSize}px`);
   root.style.setProperty("--font-size-code", `${normalized.appearance.codeFontSize}px`);
-}
-
-function isEditableContextMenuTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false;
-  const editable = target.closest("input, textarea, [contenteditable]");
-  if (!editable) return false;
-  if (editable instanceof HTMLInputElement) return isTextEditableInput(editable);
-  if (editable instanceof HTMLTextAreaElement) return !editable.disabled && !editable.readOnly;
-  return editable instanceof HTMLElement && editable.isContentEditable;
-}
-
-function isTextEditableInput(input: HTMLInputElement): boolean {
-  if (input.disabled || input.readOnly) return false;
-  return ["", "email", "number", "password", "search", "tel", "text", "url"].includes(input.type);
 }
 
 function downloadTextFile(content: string, filename: string, type: string): void {
