@@ -63,6 +63,7 @@ export interface TableSettings {
 
 export interface DesktopSettings {
   advancedWebEntry: boolean;
+  closeToTray: boolean;
   platformChrome: PlatformChrome;
   rememberWindowState: boolean;
   sidebarMode: SidebarMode;
@@ -258,6 +259,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   },
   desktop: {
     advancedWebEntry: false,
+    closeToTray: false,
     platformChrome: "native",
     rememberWindowState: true,
     sidebarMode: "expanded",
@@ -335,6 +337,7 @@ export function normalizeSettings(input: Partial<AppSettings> = {}): AppSettings
     },
     desktop: {
       advancedWebEntry: booleanValue(desktop.advancedWebEntry, base.desktop.advancedWebEntry),
+      closeToTray: booleanValue(desktop.closeToTray, base.desktop.closeToTray),
       platformChrome: enumValue(desktop.platformChrome, ["native", "custom"], base.desktop.platformChrome),
       rememberWindowState: booleanValue(desktop.rememberWindowState, base.desktop.rememberWindowState),
       sidebarMode: enumValue(desktop.sidebarMode, ["expanded", "collapsed"], base.desktop.sidebarMode),

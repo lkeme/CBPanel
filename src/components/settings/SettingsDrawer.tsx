@@ -86,6 +86,14 @@ export function SettingsDrawer({
                 onChange={(language) => void saveSettings({ appearance: { ...normalized.appearance, language } })}
               />
             </Field>
+            {runtime?.shell === "desktop" && runtime.platform === "windows" && (
+              <ToggleField
+                label={t("settings.closeToTray")}
+                help={t("settings.closeToTrayHelp")}
+                checked={normalized.desktop.closeToTray}
+                onChange={(closeToTray) => void saveSettings({ desktop: { ...normalized.desktop, closeToTray } })}
+              />
+            )}
           </section>
         </TabsContent>
 

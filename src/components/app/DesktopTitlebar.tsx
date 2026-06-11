@@ -6,19 +6,19 @@ import type { TranslationKey } from "../../i18n";
 import { AppMark } from "./AppMark";
 
 export function DesktopTitlebar({
+  closeWindow,
   runtime,
   t,
 }: {
+  closeWindow: () => void;
   runtime: DesktopRuntimeInfo | null;
   t: (key: TranslationKey) => string;
 }) {
-  function runWindowCommand(action: "minimize" | "toggleMaximize" | "close") {
+  function runWindowCommand(action: "minimize" | "toggleMaximize") {
     const command =
       action === "minimize"
         ? "cbpanel_window_minimize"
-        : action === "toggleMaximize"
-          ? "cbpanel_window_toggle_maximize"
-          : "cbpanel_window_close";
+        : "cbpanel_window_toggle_maximize";
     try {
       void invoke(command).catch((error) => console.warn("Tauri window command failed", error));
     } catch (error) {
@@ -80,7 +80,7 @@ export function DesktopTitlebar({
           onClick={(event) => {
             event.stopPropagation();
             if (event.detail > 1) return;
-            runWindowCommand("close");
+            closeWindow();
           }}
           type="button"
         >

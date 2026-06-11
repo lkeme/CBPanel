@@ -6,13 +6,23 @@ use std::{
     process::{Child, Command, Stdio},
     sync::Mutex,
 };
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::{
+    menu::MenuBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, RunEvent, WindowEvent,
+};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const WINDOW_STATE_FILE: &str = "window-state.txt";
 const MIN_WINDOW_WIDTH: u32 = 1180;
 const MIN_WINDOW_HEIGHT: u32 = 680;
+const TRAY_ID: &str = "cbpanel-main-tray";
+const TRAY_OPEN_ID: &str = "tray-open";
+const TRAY_RUNTIME_CHECK_ID: &str = "tray-runtime-check";
+const TRAY_SETTINGS_ID: &str = "tray-settings";
+const TRAY_QUIT_ID: &str = "tray-quit";
+const TRAY_ACTION_EVENT: &str = "cbpanel-tray-action";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +53,12 @@ struct RuntimeState {
 struct WindowSizeState {
     width: u32,
     height: u32,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrayActionPayload {
+    action: &'static str,
 }
 
 impl RuntimeState {
@@ -115,6 +131,34 @@ fn cbpanel_window_close(
     window.close().map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn cbpanel_window_hide_to_tray(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Mutex<RuntimeState>>,
+) -> Result<(), String> {
+    if let Ok(runtime) = state.lock() {
+        if !runtime.config.data_dir.is_empty() {
+            save_window_size(&window, Path::new(&runtime.config.data_dir));
+        }
+    }
+    window.hide().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cbpanel_window_show(window: tauri::WebviewWindow) -> Result<(), String> {
+    restore_window(&window)
+}
+
+#[tauri::command]
+fn cbpanel_app_quit(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
+#[tauri::command]
+fn cbpanel_update_tray_state(app: tauri::AppHandle, running_count: u32, sidecar_status: String) {
+    update_tray_tooltip(&app, running_count, &sidecar_status);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let runtime_state = Mutex::new(RuntimeState {
@@ -135,8 +179,12 @@ pub fn run() {
         .manage(runtime_state)
         .invoke_handler(tauri::generate_handler![
             cbpanel_runtime_config,
+            cbpanel_app_quit,
+            cbpanel_update_tray_state,
             cbpanel_window_close,
+            cbpanel_window_hide_to_tray,
             cbpanel_window_minimize,
+            cbpanel_window_show,
             cbpanel_window_toggle_maximize
         ])
         .setup(|app| {
@@ -148,6 +196,7 @@ pub fn run() {
             }
 
             let runtime = prepare_runtime(app);
+            let _ = setup_tray(app.handle());
             let data_dir = PathBuf::from(runtime.config.data_dir.clone());
             if let Some(window) = app.get_webview_window("main") {
                 let event_window = window.clone();
@@ -191,9 +240,77 @@ fn restore_existing_window(app: &tauri::AppHandle) {
         return;
     };
 
+    let _ = restore_window(&window);
+}
+
+fn restore_window(window: &tauri::WebviewWindow) -> Result<(), String> {
     let _ = window.show();
     let _ = window.unminimize();
-    let _ = window.set_focus();
+    window.set_focus().map_err(|error| error.to_string())
+}
+
+fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let menu = MenuBuilder::new(app)
+        .text(TRAY_OPEN_ID, "打开 CBPanel")
+        .text(TRAY_RUNTIME_CHECK_ID, "运行前检查")
+        .text(TRAY_SETTINGS_ID, "设置")
+        .separator()
+        .text(TRAY_QUIT_ID, "退出 CBPanel")
+        .build()?;
+
+    let icon = app.default_window_icon().cloned();
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .tooltip("CBPanel")
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_OPEN_ID => {
+                restore_existing_window(app);
+                emit_tray_action(app, "open");
+            }
+            TRAY_RUNTIME_CHECK_ID => {
+                restore_existing_window(app);
+                emit_tray_action(app, "runtimeCheck");
+            }
+            TRAY_SETTINGS_ID => {
+                restore_existing_window(app);
+                emit_tray_action(app, "settings");
+            }
+            TRAY_QUIT_ID => {
+                restore_existing_window(app);
+                emit_tray_action(app, "quit");
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                restore_existing_window(tray.app_handle());
+                emit_tray_action(tray.app_handle(), "open");
+            }
+        });
+
+    if let Some(icon) = icon {
+        builder = builder.icon(icon);
+    }
+
+    builder.build(app)?;
+    Ok(())
+}
+
+fn emit_tray_action(app: &tauri::AppHandle, action: &'static str) {
+    let _ = app.emit(TRAY_ACTION_EVENT, TrayActionPayload { action });
+}
+
+fn update_tray_tooltip(app: &tauri::AppHandle, running_count: u32, sidecar_status: &str) {
+    let tooltip = format!("CBPanel · Sidecar {sidecar_status} · 运行中 {running_count} 个");
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_tooltip(Some(tooltip));
+    }
 }
 
 fn prepare_runtime(app: &mut tauri::App) -> RuntimeState {

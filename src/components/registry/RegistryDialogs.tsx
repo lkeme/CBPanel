@@ -13,9 +13,12 @@ export type ConfirmDialogState = {
   title: string;
   body: string;
   confirmLabel: string;
+  cancelLabel?: string;
+  dangerLabel?: string;
   tone?: "danger" | "warning";
   busyKey?: string;
   onConfirm: () => Promise<void>;
+  onDanger?: () => Promise<void>;
 } | null;
 
 export type TextInputDialogState = {
@@ -94,8 +97,13 @@ export function ConfirmDialog({
       actions={
         <>
           <button className="command subtle" disabled={isBusy} onClick={close} type="button">
-            {t("actions.cancel")}
+            {state.cancelLabel ?? t("actions.cancel")}
           </button>
+          {state.dangerLabel && state.onDanger && (
+            <button className="command danger" disabled={isBusy} onClick={() => void state.onDanger?.()} type="button">
+              {state.dangerLabel}
+            </button>
+          )}
           <button className={`command ${state.tone === "danger" ? "danger" : "primary"}`} disabled={isBusy} onClick={() => void state.onConfirm()} type="button">
             {state.confirmLabel}
           </button>

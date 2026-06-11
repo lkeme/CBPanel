@@ -1,4 +1,5 @@
 import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { type Root, createRoot } from "react-dom/client";
 import {
   Check,
@@ -208,6 +209,50 @@ function App() {
     startupBrowserCoreCheckDone.current = true;
     void checkBrowserCoreUpdate({ silent: true });
   }, [binaryInfo, settings, state]);
+
+  useEffect(() => {
+    if (runtime?.shell !== "desktop") return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<{ action: "open" | "settings" | "runtimeCheck" | "quit" }>("cbpanel-tray-action", (event) => {
+          if (disposed) return;
+          if (event.payload.action === "settings") {
+            openSettings("general");
+            return;
+          }
+          if (event.payload.action === "runtimeCheck") {
+            setDrawerMode(null);
+            setWorkbenchView("runtimeCheck");
+            return;
+          }
+          if (event.payload.action === "quit") {
+            requestDesktopQuit();
+          }
+        }),
+      )
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch((error) => console.warn("Tauri tray listener failed", error));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [runtime?.shell]);
+
+  useEffect(() => {
+    if (runtime?.shell !== "desktop") return;
+    const runningCount = (state?.sessions ?? []).filter((session) =>
+      session.status === "running" || session.status === "launching" || session.status === "stopping"
+    ).length;
+    void invoke("cbpanel_update_tray_state", {
+      runningCount,
+      sidecarStatus: runtime.sidecar.status,
+    }).catch((error) => console.warn("Tauri tray update failed", error));
+  }, [runtime?.shell, runtime?.sidecar.status, state?.sessions]);
 
   useEffect(() => {
     if (draftIsNew) return;
@@ -766,6 +811,59 @@ function App() {
     setDrawerMode("settings");
   }
 
+  function runDesktopCommand(command: string) {
+    try {
+      void invoke(command).catch((error) => console.warn("Tauri desktop command failed", error));
+    } catch (error) {
+      console.warn("Tauri desktop command failed", error);
+    }
+  }
+
+  function hideWindowToTray() {
+    runDesktopCommand("cbpanel_window_hide_to_tray");
+  }
+
+  function quitDesktopApp() {
+    runDesktopCommand("cbpanel_app_quit");
+  }
+
+  function confirmRunningSessionsBeforeExit(): boolean {
+    if (!hasActiveSessions) return false;
+    setConfirmDialog({
+        title: t("tray.closeRunningTitle"),
+        body: t("tray.closeRunningBody"),
+        confirmLabel: t("tray.hideToTray"),
+        cancelLabel: t("actions.cancel"),
+        dangerLabel: t("tray.quitApp"),
+        busyKey: "window-close",
+        onConfirm: async () => {
+          hideWindowToTray();
+          setConfirmDialog(null);
+        },
+        onDanger: async () => {
+          quitDesktopApp();
+          setConfirmDialog(null);
+        },
+    });
+    return true;
+  }
+
+  function requestDesktopQuit() {
+    if (confirmRunningSessionsBeforeExit()) return;
+    quitDesktopApp();
+  }
+
+  function closeDesktopWindow() {
+    if (confirmRunningSessionsBeforeExit()) {
+      return;
+    }
+    if (normalizedSettings.desktop.closeToTray) {
+      hideWindowToTray();
+      return;
+    }
+    runDesktopCommand("cbpanel_window_close");
+  }
+
   return (
     <TooltipProvider delayDuration={180}>
       <main
@@ -773,7 +871,7 @@ function App() {
           sidebarCollapsed ? "sidebar-collapsed" : ""
         }`}
       >
-        {runtimeIsCustomDesktop && <DesktopTitlebar runtime={runtime} t={t} />}
+        {runtimeIsCustomDesktop && <DesktopTitlebar closeWindow={closeDesktopWindow} runtime={runtime} t={t} />}
 
         <AppSidebar
           browserCoreMissing={browserCoreMissing}

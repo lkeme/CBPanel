@@ -25,6 +25,7 @@ test("normalizeSettings returns stable defaults", () => {
   assert.equal(settings.appearance.theme, "system");
   assert.equal(settings.appearance.language, "system");
   assert.equal(settings.appearance.uiFontFamily, FORCED_UI_FONT_FAMILY);
+  assert.equal(settings.desktop.closeToTray, false);
   assert.equal(settings.desktop.sidebarMode, "expanded");
   assert.equal(settings.table.pageSize, 25);
   assert.equal(settings.binary.checkForUpdatesOnStartup, true);
@@ -139,6 +140,7 @@ test("normalizeSettings rejects invalid enums and clamps font sizes", () => {
     },
     desktop: {
       ...DEFAULT_APP_SETTINGS.desktop,
+      closeToTray: true,
       sidebarMode: "hidden" as never,
     },
   });
@@ -153,6 +155,7 @@ test("normalizeSettings rejects invalid enums and clamps font sizes", () => {
     true,
   );
   assert.equal(settings.desktop.sidebarMode, "expanded");
+  assert.equal(settings.desktop.closeToTray, true);
   assert.equal(settings.appearance.baseFontSize, 22);
   assert.equal(settings.appearance.tableFontSize, 11);
   assert.equal(settings.appearance.codeFontSize, 14);
