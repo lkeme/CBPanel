@@ -19,6 +19,7 @@ use webview2_com::{
     take_pwstr, ContextMenuRequestedEventHandler,
     Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND, COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR,
+        COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_RADIO, COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SUBMENU,
         ICoreWebView2ContextMenuItem, ICoreWebView2ContextMenuItemCollection, ICoreWebView2_11,
     },
 };
@@ -309,10 +310,7 @@ fn filter_context_menu_items(items: &ICoreWebView2ContextMenuItemCollection) {
             index += 1;
             continue;
         };
-        let name = read_context_menu_name(&item).unwrap_or_default();
-        let label = read_context_menu_label(&item).unwrap_or_default();
-
-        if should_remove_menu_item(&name, &label) {
+        if should_remove_menu_item(&item) {
             if unsafe { items.RemoveValueAtIndex(index) }.is_ok() {
                 count -= 1;
                 continue;
@@ -330,30 +328,54 @@ fn filter_context_menu_items(items: &ICoreWebView2ContextMenuItemCollection) {
 
 #[cfg(target_os = "windows")]
 fn remove_redundant_context_menu_separators(items: &ICoreWebView2ContextMenuItemCollection) {
-    let Some(mut count) = context_menu_item_count(items) else {
-        return;
-    };
-
-    let mut index = 0u32;
-    let mut previous_is_separator = true;
-
-    while index < count {
-        let Ok(item) = (unsafe { items.GetValueAtIndex(index) }) else {
-            previous_is_separator = false;
-            index += 1;
-            continue;
+    loop {
+        let Some(mut count) = context_menu_item_count(items) else {
+            return;
         };
-        let is_separator = is_context_menu_separator(&item);
+        let mut changed = false;
 
-        if is_separator && (previous_is_separator || index + 1 == count) {
-            if unsafe { items.RemoveValueAtIndex(index) }.is_ok() {
-                count -= 1;
-                continue;
+        while count > 0 && item_at_index_is_separator(items, 0) {
+            if unsafe { items.RemoveValueAtIndex(0) }.is_err() {
+                break;
             }
+            count -= 1;
+            changed = true;
         }
 
-        previous_is_separator = is_separator;
-        index += 1;
+        while count > 0 && item_at_index_is_separator(items, count - 1) {
+            if unsafe { items.RemoveValueAtIndex(count - 1) }.is_err() {
+                break;
+            }
+            count -= 1;
+            changed = true;
+        }
+
+        let mut index = 0u32;
+        let mut previous_is_separator = false;
+
+        while index < count {
+            let Ok(item) = (unsafe { items.GetValueAtIndex(index) }) else {
+                previous_is_separator = false;
+                index += 1;
+                continue;
+            };
+            let is_separator = is_context_menu_separator(&item);
+
+            if is_separator && previous_is_separator {
+                if unsafe { items.RemoveValueAtIndex(index) }.is_ok() {
+                    count -= 1;
+                    changed = true;
+                    continue;
+                }
+            }
+
+            previous_is_separator = is_separator;
+            index += 1;
+        }
+
+        if !changed {
+            return;
+        }
     }
 }
 
@@ -367,7 +389,32 @@ fn context_menu_item_count(items: &ICoreWebView2ContextMenuItemCollection) -> Op
 #[cfg(target_os = "windows")]
 fn is_context_menu_separator(item: &ICoreWebView2ContextMenuItem) -> bool {
     let mut kind = COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND::default();
-    unsafe { item.Kind(&mut kind) }.is_ok() && kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR
+    if unsafe { item.Kind(&mut kind) }.is_ok() && kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR {
+        return true;
+    }
+
+    let name = normalize_context_menu_text(&read_context_menu_name(item).unwrap_or_default());
+    let label = normalize_context_menu_text(&read_context_menu_label(item).unwrap_or_default());
+    label.is_empty() && (name.is_empty() || name == "other")
+}
+
+#[cfg(target_os = "windows")]
+fn item_at_index_is_separator(items: &ICoreWebView2ContextMenuItemCollection, index: u32) -> bool {
+    unsafe { items.GetValueAtIndex(index) }
+        .map(|item| is_context_menu_separator(&item))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn is_context_menu_submenu(item: &ICoreWebView2ContextMenuItem) -> bool {
+    let mut kind = COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND::default();
+    unsafe { item.Kind(&mut kind) }.is_ok() && kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SUBMENU
+}
+
+#[cfg(target_os = "windows")]
+fn is_context_menu_radio(item: &ICoreWebView2ContextMenuItem) -> bool {
+    let mut kind = COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND::default();
+    unsafe { item.Kind(&mut kind) }.is_ok() && kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_RADIO
 }
 
 #[cfg(target_os = "windows")]
@@ -385,40 +432,115 @@ fn read_context_menu_label(item: &ICoreWebView2ContextMenuItem) -> windows_core:
 }
 
 #[cfg(target_os = "windows")]
-fn should_remove_menu_item(name: &str, label: &str) -> bool {
-    should_remove_menu_item_name(name) || should_remove_menu_item_label(label)
+fn should_remove_menu_item(item: &ICoreWebView2ContextMenuItem) -> bool {
+    let name = read_context_menu_name(item).unwrap_or_default();
+    let label = read_context_menu_label(item).unwrap_or_default();
+    should_remove_menu_item_command_id(item)
+        || should_remove_menu_item_name(&name)
+        || should_remove_menu_item_label(&label)
+        || is_writing_direction_submenu(item)
+}
+
+#[cfg(target_os = "windows")]
+fn should_remove_menu_item_command_id(item: &ICoreWebView2ContextMenuItem) -> bool {
+    context_menu_command_id(item)
+        .map(|command_id| matches!(command_id, 35003 | 35004 | 40249 | 41120..=41123))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn context_menu_command_id(item: &ICoreWebView2ContextMenuItem) -> Option<i32> {
+    let mut command_id = 0i32;
+    unsafe { item.CommandId(&mut command_id) }.ok()?;
+    Some(command_id)
 }
 
 #[cfg(target_os = "windows")]
 fn should_remove_menu_item_name(name: &str) -> bool {
-    matches!(
-        name,
-        "saveAs"
-            | "print"
-            | "moreTools"
-            | "writingDirection"
-            | "showWritingTools"
-            | "writingDirectionMenu"
-    )
+    matches!(normalize_context_menu_text(name).as_str(), "saveas" | "print" | "moretools")
+        || normalize_context_menu_text(name).contains("writingdirection")
 }
 
 #[cfg(target_os = "windows")]
 fn should_remove_menu_item_label(label: &str) -> bool {
     matches!(
-        label.trim(),
+        normalize_context_menu_text(label).as_str(),
         "另存为"
             | "另存为..."
             | "另存为…"
             | "打印"
             | "更多工具"
-            | "书写方向"
-            | "Save as"
-            | "Save as..."
-            | "Save as…"
-            | "Print"
-            | "More tools"
-            | "Writing direction"
+            | "saveas"
+            | "saveas..."
+            | "saveas…"
+            | "print"
+            | "moretools"
     )
+        || text_looks_like_writing_direction(&normalize_context_menu_text(label))
+}
+
+#[cfg(target_os = "windows")]
+fn is_writing_direction_submenu(item: &ICoreWebView2ContextMenuItem) -> bool {
+    if !is_context_menu_submenu(item) {
+        return false;
+    }
+
+    let Ok(children) = (unsafe { item.Children() }) else {
+        return false;
+    };
+    let Some(count) = context_menu_item_count(&children) else {
+        return false;
+    };
+
+    let mut has_left_to_right = false;
+    let mut has_right_to_left = false;
+    let mut direction_command_count = 0u32;
+    let mut radio_child_count = 0u32;
+
+    for index in 0..count {
+        let Ok(child) = (unsafe { children.GetValueAtIndex(index) }) else {
+            continue;
+        };
+        let name = normalize_context_menu_text(&read_context_menu_name(&child).unwrap_or_default());
+        let label = normalize_context_menu_text(&read_context_menu_label(&child).unwrap_or_default());
+
+        has_left_to_right |= text_looks_like_left_to_right(&name) || text_looks_like_left_to_right(&label);
+        has_right_to_left |= text_looks_like_right_to_left(&name) || text_looks_like_right_to_left(&label);
+        if context_menu_command_id(&child)
+            .map(|command_id| matches!(command_id, 41121..=41123))
+            .unwrap_or(false)
+        {
+            direction_command_count += 1;
+        }
+        if is_context_menu_radio(&child) {
+            radio_child_count += 1;
+        }
+    }
+
+    (has_left_to_right && has_right_to_left) || direction_command_count >= 2 || (count == 3 && radio_child_count == count)
+}
+
+#[cfg(target_os = "windows")]
+fn text_looks_like_writing_direction(text: &str) -> bool {
+    text.contains("书写方向") || text.contains("writingdirection")
+}
+
+#[cfg(target_os = "windows")]
+fn text_looks_like_left_to_right(text: &str) -> bool {
+    text.contains("lefttoright") || text.contains("左到右") || text.contains("左至右") || text.contains("左向右")
+}
+
+#[cfg(target_os = "windows")]
+fn text_looks_like_right_to_left(text: &str) -> bool {
+    text.contains("righttoleft") || text.contains("右到左") || text.contains("右至左") || text.contains("右向左")
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_context_menu_text(text: &str) -> String {
+    text.chars()
+        .filter(|char| !matches!(char, '&' | '\u{200e}' | '\u{200f}') && !char.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 fn restore_existing_window(app: &tauri::AppHandle) {
