@@ -10,6 +10,7 @@ import {
   type GithubMirrorProviderId,
   type NetworkTraceSettings,
 } from "../../shared/settings";
+import { ChoiceList, ChoiceOption, closeOnFocusLeave } from "../ui/choice-list";
 import { SelectMenu } from "../ui/SelectMenu";
 import { Field, NumberField } from "../ui/form-controls";
 
@@ -188,9 +189,7 @@ function GithubMirrorSelect({
   return (
     <div
       className={`github-mirror-select ${open ? "open" : ""}`}
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
-      }}
+      onBlur={(event) => closeOnFocusLeave(event, () => setOpen(false))}
     >
       <button
         aria-label={t("githubMirror.provider")}
@@ -212,23 +211,21 @@ function GithubMirrorSelect({
         </span>
       </button>
       {open && (
-        <div className="github-mirror-list" role="listbox">
+        <ChoiceList className="github-mirror-list">
           {options.map((option) => {
             const speed = githubMirrorSpeed(option.result?.latencyMs, option.result?.ok, t);
             const selectedOption = option.value === value;
             const isMeasuredMirror = option.value !== "off" && option.value !== "auto-best";
             return (
-              <button
-                aria-selected={selectedOption}
-                className={`github-mirror-option ${selectedOption ? "active" : ""} ${option.value === "auto-best" ? "auto" : ""}`}
+              <ChoiceOption
+                active={selectedOption}
+                className={`github-mirror-option ${option.value === "auto-best" ? "auto" : ""}`}
                 key={option.value}
                 onClick={() => {
                   onChange(option.value);
                   setOpen(false);
                 }}
-                onMouseDown={(event) => event.preventDefault()}
-                role="option"
-                type="button"
+                keepFocus
               >
                 <MirrorIcon kind={option.icon} />
                 <span className="github-mirror-option-main">
@@ -249,10 +246,10 @@ function GithubMirrorSelect({
                     </>
                   )}
                 </span>
-              </button>
+              </ChoiceOption>
             );
           })}
-        </div>
+        </ChoiceList>
       )}
     </div>
   );

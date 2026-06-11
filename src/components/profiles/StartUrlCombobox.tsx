@@ -2,6 +2,7 @@ import { useId, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 import { START_URL_PRESETS } from "../../shared/profile";
+import { ChoiceEmpty, ChoiceList, ChoiceOption, closeOnFocusLeave } from "../ui/choice-list";
 
 export function StartUrlCombobox({
   customLabel,
@@ -37,9 +38,7 @@ export function StartUrlCombobox({
   return (
     <div
       className={`start-url-combobox ${open ? "open" : ""}`}
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) close();
-      }}
+      onBlur={(event) => closeOnFocusLeave(event, close)}
     >
       <div className="start-url-combobox-control">
         <input
@@ -81,25 +80,22 @@ export function StartUrlCombobox({
         </button>
       </div>
       {open && (
-        <div className="start-url-combobox-list" id={listId} role="listbox">
+        <ChoiceList className="start-url-combobox-list" id={listId}>
           {visiblePresets.map((preset) => (
-            <button
-              aria-selected={preset.url === selectedUrl}
-              className={preset.url === selectedUrl ? "active" : ""}
+            <ChoiceOption
+              active={preset.url === selectedUrl}
               key={preset.id}
               onClick={() => {
                 onChange(preset.url);
                 close();
               }}
-              role="option"
-              type="button"
             >
               <strong>{preset.label}</strong>
               <small>{preset.url}</small>
-            </button>
+            </ChoiceOption>
           ))}
-          {showCustomHint && <span className="start-url-combobox-empty">{customLabel}</span>}
-        </div>
+          {showCustomHint && <ChoiceEmpty className="start-url-combobox-empty">{customLabel}</ChoiceEmpty>}
+        </ChoiceList>
       )}
     </div>
   );

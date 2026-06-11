@@ -2961,6 +2961,92 @@ textarea {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.choice-list {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  z-index: 70;
+  display: grid;
+  width: 100%;
+  max-height: 260px;
+  overflow: auto;
+  padding: 5px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sheet);
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.choice-option,
+.choice-empty {
+  min-width: 0;
+  min-height: 34px;
+  padding: 7px 8px;
+  color: var(--foreground);
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+}
+
+.choice-option {
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    transform 150ms ease;
+}
+
+.choice-option:hover,
+.choice-option.active {
+  background: var(--primary-soft);
+  border-color: color-mix(in srgb, var(--primary) 22%, var(--border));
+}
+
+.choice-option:active {
+  transform: translateY(1px);
+}
+
+.choice-empty {
+  color: var(--foreground-muted);
+  font-size: 13px;
+}
+
+.choice-option-main,
+.choice-option-title,
+.choice-option strong,
+.choice-option small,
+.choice-empty {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.choice-option strong,
+.choice-option small,
+.choice-option-title,
+.choice-empty {
+  white-space: nowrap;
+}
+
+.choice-option strong {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.choice-option small {
+  color: var(--foreground-muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.choice-option.create {
+  color: var(--primary-strong);
+  font-weight: 800;
+}
+
 .start-url-combobox {
   position: relative;
   min-width: 0;
@@ -3019,65 +3105,18 @@ textarea {
 }
 
 .start-url-combobox-list {
-  position: absolute;
-  top: calc(100% + 5px);
-  left: 0;
-  z-index: 70;
-  display: grid;
-  width: 100%;
   max-height: 260px;
-  overflow: auto;
-  padding: 5px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-sheet);
-  scrollbar-color: var(--border-strong) transparent;
 }
 
-.start-url-combobox-list button,
+.start-url-combobox-list .choice-option,
 .start-url-combobox-empty {
   display: grid;
-  min-width: 0;
   gap: 2px;
   min-height: 40px;
-  padding: 7px 8px;
-  color: var(--foreground);
-  text-align: left;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-control);
-}
-
-.start-url-combobox-list button:hover,
-.start-url-combobox-list button.active {
-  background: var(--primary-soft);
-  border-color: color-mix(in srgb, var(--primary) 22%, var(--border));
-}
-
-.start-url-combobox-list strong,
-.start-url-combobox-list small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.start-url-combobox-list strong {
-  font-size: 13px;
-  font-weight: 800;
 }
 
 .start-url-combobox-list small {
   color: var(--primary);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.start-url-combobox-empty {
-  color: var(--foreground-muted);
-  font-size: 13px;
 }
 
 .segmented {
@@ -3187,50 +3226,18 @@ textarea {
 }
 
 .select-menu-list {
-  position: absolute;
-  top: calc(100% + 5px);
-  left: 0;
   z-index: 60;
-  display: grid;
-  width: 100%;
   max-height: 240px;
-  overflow: auto;
-  padding: 5px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-sheet);
-  scrollbar-color: var(--border-strong) transparent;
 }
 
-.select-menu-list button {
+.select-menu-list .choice-option {
   display: grid;
-  min-width: 0;
   gap: 2px;
-  min-height: 34px;
-  padding: 7px 8px;
-  color: var(--foreground);
-  text-align: left;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-control);
-}
-
-.select-menu-list button:hover,
-.select-menu-list button.active {
-  background: var(--primary-soft);
-  border-color: color-mix(in srgb, var(--primary) 22%, var(--border));
 }
 
 .select-menu-list small {
-  min-width: 0;
-  overflow: hidden;
   color: var(--primary);
   font-family: var(--font-mono);
-  font-size: 12px;
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .github-mirror-select {
@@ -3301,21 +3308,11 @@ textarea {
 }
 
 .github-mirror-list {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 70;
-  display: grid;
-  width: 100%;
+  top: auto;
+  bottom: calc(100% + 6px);
   min-width: min(100%, 560px);
   max-height: 420px;
-  overflow: auto;
   padding: 6px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-sheet);
-  scrollbar-color: var(--border-strong) transparent;
 }
 
 .github-mirror-option {
@@ -3325,18 +3322,6 @@ textarea {
   align-items: center;
   min-height: 48px;
   padding: 8px 10px;
-  color: var(--foreground);
-  text-align: left;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-control);
-  transition: background 150ms ease, border-color 150ms ease;
-}
-
-.github-mirror-option:hover,
-.github-mirror-option.active {
-  background: var(--primary-soft);
-  border-color: color-mix(in srgb, var(--primary) 24%, var(--border));
 }
 
 .github-mirror-option.auto {
@@ -3507,58 +3492,22 @@ textarea {
 }
 
 .combo-list {
-  position: absolute;
-  top: calc(100% + 5px);
-  left: 0;
-  z-index: 70;
-  display: grid;
-  width: 100%;
   max-height: 260px;
-  overflow: auto;
-  padding: 5px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-sheet);
-  scrollbar-color: var(--border-strong) transparent;
 }
 
-.combo-list button,
+.combo-list .choice-option,
 .combo-empty {
   display: flex;
   align-items: center;
   gap: 7px;
-  min-width: 0;
-  min-height: 34px;
-  padding: 7px 8px;
-  color: var(--foreground);
-  text-align: left;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-control);
 }
 
-.combo-list button:hover,
-.combo-list button.active {
-  background: var(--primary-soft);
-  border-color: color-mix(in srgb, var(--primary) 22%, var(--border));
-}
-
-.combo-list button.create {
+.combo-list .choice-option.create {
   color: var(--primary-strong);
-  font-weight: 800;
 }
 
 .combo-list span {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.combo-empty {
-  color: var(--foreground-muted);
-  font-size: 13px;
 }
 
 .tag-combobox-control {
@@ -4735,56 +4684,26 @@ textarea {
 }
 
 .env-key-combobox-list {
-  position: absolute;
-  top: calc(100% + 5px);
-  left: 0;
   z-index: 80;
-  display: grid;
   width: min(520px, 100%);
-  max-height: 260px;
-  overflow: auto;
-  padding: 5px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-sheet);
 }
 
-.env-key-combobox-list button {
+.env-key-combobox-list .choice-option {
   display: grid;
-  min-width: 0;
   gap: 2px;
   min-height: 38px;
-  padding: 7px 8px;
-  color: var(--foreground);
-  text-align: left;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-control);
 }
 
-.env-key-combobox-list button:hover,
-.env-key-combobox-list button.active,
-.env-key-combobox-list button.create {
-  background: var(--primary-soft);
-  border-color: color-mix(in srgb, var(--primary) 22%, var(--border));
-}
-
-.env-key-combobox-list button.disabled {
+.env-key-combobox-list .choice-option.disabled {
   cursor: not-allowed;
   opacity: 0.56;
 }
 
 .env-key-combobox-list small {
-  min-width: 0;
-  overflow: hidden;
   color: var(--foreground-muted);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.env-key-combobox-list button.create {
+.env-key-combobox-list .choice-option.create {
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
 }

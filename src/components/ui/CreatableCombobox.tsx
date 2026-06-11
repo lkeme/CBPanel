@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { FilePlus2, X } from "lucide-react";
 
+import { ChoiceEmpty, ChoiceList, ChoiceOption, closeOnFocusLeave } from "./choice-list";
+
 export function CreatableCombobox({
   createLabel,
   disabled = false,
@@ -43,9 +45,7 @@ export function CreatableCombobox({
   return (
     <div
       className={`combo-input ${open ? "open" : ""}`}
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
-      }}
+      onBlur={(event) => closeOnFocusLeave(event, () => setOpen(false))}
     >
       <div className="combo-control">
         <input
@@ -70,20 +70,20 @@ export function CreatableCombobox({
         </button>
       </div>
       {open && !disabled && (
-        <div className="combo-list" role="listbox">
+        <ChoiceList className="combo-list">
           {filteredOptions.map((option) => (
-            <button className={option === value ? "active" : ""} key={option} onMouseDown={(event) => event.preventDefault()} onClick={() => commit(option)} type="button">
+            <ChoiceOption active={option === value} keepFocus key={option} onClick={() => commit(option)}>
               <span>{option}</span>
-            </button>
+            </ChoiceOption>
           ))}
           {canCreate && (
-            <button className="create" onMouseDown={(event) => event.preventDefault()} onClick={() => commit(input)} type="button">
+            <ChoiceOption className="create" keepFocus onClick={() => commit(input)}>
               <FilePlus2 size={15} aria-hidden="true" />
               <span>{createLabel.replace("{name}", cleanInput)}</span>
-            </button>
+            </ChoiceOption>
           )}
-          {filteredOptions.length === 0 && !canCreate && <span className="combo-empty">{emptyLabel}</span>}
-        </div>
+          {filteredOptions.length === 0 && !canCreate && <ChoiceEmpty className="combo-empty">{emptyLabel}</ChoiceEmpty>}
+        </ChoiceList>
       )}
     </div>
   );
@@ -130,9 +130,7 @@ export function CreatableTagInput({
   return (
     <div
       className={`tag-combobox ${open ? "open" : ""} ${disabled ? "disabled" : ""}`}
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
-      }}
+      onBlur={(event) => closeOnFocusLeave(event, () => setOpen(false))}
     >
       <div className="tag-combobox-control" onClick={() => !disabled && setOpen(true)}>
         {value.map((tag) => (
@@ -163,20 +161,20 @@ export function CreatableTagInput({
         />
       </div>
       {open && !disabled && (
-        <div className="combo-list" role="listbox">
+        <ChoiceList className="combo-list">
           {filteredOptions.map((option) => (
-            <button key={option} onMouseDown={(event) => event.preventDefault()} onClick={() => commit(option)} type="button">
+            <ChoiceOption keepFocus key={option} onClick={() => commit(option)}>
               <span>{option}</span>
-            </button>
+            </ChoiceOption>
           ))}
           {canCreate && (
-            <button className="create" onMouseDown={(event) => event.preventDefault()} onClick={() => commit(input)} type="button">
+            <ChoiceOption className="create" keepFocus onClick={() => commit(input)}>
               <FilePlus2 size={15} aria-hidden="true" />
               <span>{createLabel.replace("{name}", cleanInput)}</span>
-            </button>
+            </ChoiceOption>
           )}
-          {filteredOptions.length === 0 && !canCreate && <span className="combo-empty">{emptyLabel}</span>}
-        </div>
+          {filteredOptions.length === 0 && !canCreate && <ChoiceEmpty className="combo-empty">{emptyLabel}</ChoiceEmpty>}
+        </ChoiceList>
       )}
     </div>
   );

@@ -1,5 +1,7 @@
 import { useState } from "react";
 
+import { ChoiceList, ChoiceOption, closeOnFocusLeave } from "./choice-list";
+
 export function SelectMenu<T extends string>({
   disabled = false,
   onChange,
@@ -21,9 +23,7 @@ export function SelectMenu<T extends string>({
   return (
     <div
       className={`select-menu ${open ? "open" : ""} ${disabled ? "disabled" : ""}`}
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
-      }}
+      onBlur={(event) => closeOnFocusLeave(event, () => setOpen(false))}
     >
       <button
         aria-expanded={open}
@@ -39,24 +39,21 @@ export function SelectMenu<T extends string>({
         <ChevronDownIcon />
       </button>
       {open && (
-        <div className="select-menu-list" role="listbox">
+        <ChoiceList className="select-menu-list">
           {options.map((option) => (
-            <button
-              className={option.value === value ? "active" : ""}
+            <ChoiceOption
+              active={option.value === value}
               key={option.value}
               onClick={() => {
                 onChange(option.value);
                 setOpen(false);
               }}
-              role="option"
-              type="button"
-              aria-selected={option.value === value}
             >
               <span>{option.label}</span>
               {option.meta && <small>{option.meta}</small>}
-            </button>
+            </ChoiceOption>
           ))}
-        </div>
+        </ChoiceList>
       )}
     </div>
   );
