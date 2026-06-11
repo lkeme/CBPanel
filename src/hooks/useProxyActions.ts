@@ -1,7 +1,7 @@
 import type { Dispatch, SetStateAction } from "react";
 
 import type { TranslationKey } from "../i18n";
-import type { ConfirmDialogState } from "../components/registry/RegistryDialogs";
+import type { ConfirmDialogState } from "../components/ui/ConfirmDialog";
 import { api, errorMessage, referenceErrorMessage } from "../lib/apiClient";
 import type { ProxyEntity } from "../shared/entities";
 import type { PanelState } from "../shared/profile";

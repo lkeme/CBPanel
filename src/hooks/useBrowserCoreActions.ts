@@ -2,7 +2,7 @@ import type { Dispatch, SetStateAction } from "react";
 
 import type { TranslationKey } from "../i18n";
 import type { BrowserCoreImportDialogState } from "../components/browser-core/BrowserCoreImportDialog";
-import type { ConfirmDialogState } from "../components/registry/RegistryDialogs";
+import type { ConfirmDialogState } from "../components/ui/ConfirmDialog";
 import { api } from "../lib/apiClient";
 import type { BrowserCoreImportAnalysis, BrowserCoreUpdateCheck, BinaryInfo } from "../shared/browserCore";
 import type { GithubMirrorProbeResponse } from "../shared/githubMirror";

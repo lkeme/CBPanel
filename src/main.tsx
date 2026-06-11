@@ -29,9 +29,10 @@ import {
   workbenchViewMetaKey,
   workbenchViewTitleKey,
 } from "./components/profiles/profileWorkbenchHelpers";
-import type { ConfirmDialogState, ExtensionImportDialogState, TextInputDialogState } from "./components/registry/RegistryDialogs";
+import type { ExtensionImportDialogState, TextInputDialogState } from "./components/registry/RegistryDialogs";
 import { buildModuleStats, type ModeFilter, type ProxyFilter, type StatusFilter, type WorkbenchView } from "./components/registry/registryStats";
 import { SettingsDrawer, type SettingsTab } from "./components/settings/SettingsDrawer";
+import { ConfirmDialog, type ConfirmDialogState } from "./components/ui/ConfirmDialog";
 import { LoadingSkeleton } from "./components/ui/LoadingSkeleton";
 import { TooltipProvider } from "./components/ui/tooltip";
 import {
@@ -104,9 +105,6 @@ const ExtensionSourceDialog = lazy(() =>
 );
 const ProxyReferenceDialog = lazy(() =>
   import("./components/registry/RegistryDialogs").then((module) => ({ default: module.ProxyReferenceDialog })),
-);
-const ConfirmDialog = lazy(() =>
-  import("./components/registry/RegistryDialogs").then((module) => ({ default: module.ConfirmDialog })),
 );
 const TextInputDialog = lazy(() =>
   import("./components/registry/RegistryDialogs").then((module) => ({ default: module.TextInputDialog })),
@@ -806,9 +804,13 @@ function App() {
     setDrawerMode("settings");
   }
 
-  async function rememberCloseToTrayIfNeeded(rememberChoice: boolean) {
+  async function rememberCloseToTrayIfNeeded(rememberChoice: boolean, options: { wait?: boolean } = {}) {
     if (!rememberChoice || normalizedSettings.desktop.closeToTray) return;
-    await saveSettings({ desktop: { ...normalizedSettings.desktop, closeToTray: true } });
+    const nextDesktop = { ...normalizedSettings.desktop, closeToTray: true };
+    setState((current) => (current ? { ...current, settings: { ...normalizedSettings, desktop: nextDesktop } } : current));
+    const save = saveSettings({ desktop: nextDesktop });
+    if (options.wait) await save;
+    else void save;
   }
 
   function runDesktopCommand(command: string) {
@@ -867,18 +869,18 @@ function App() {
       confirmLabel: t("tray.hideToTray"),
       cancelLabel: t("actions.cancel"),
       dangerLabel: t("tray.quitApp"),
-      busyKey: "settings",
       rememberChoice: {
         label: t("tray.rememberCloseToTray"),
       },
       onConfirm: async ({ rememberChoice }) => {
-        await rememberCloseToTrayIfNeeded(rememberChoice);
+        setConfirmDialog(null);
+        void rememberCloseToTrayIfNeeded(rememberChoice);
         hideWindowToTray();
-        setConfirmDialog(null);
       },
-      onDanger: async () => {
-        quitDesktopApp();
+      onDanger: async ({ rememberChoice }) => {
         setConfirmDialog(null);
+        await rememberCloseToTrayIfNeeded(rememberChoice, { wait: true });
+        quitDesktopApp();
       },
     });
   }
@@ -1276,6 +1278,15 @@ function App() {
         </Suspense>
       )}
 
+      {confirmDialog && (
+        <ConfirmDialog
+          busy={busy}
+          close={() => setConfirmDialog(null)}
+          state={confirmDialog}
+          t={t}
+        />
+      )}
+
       <Suspense fallback={<LazyModalFallback t={t} />}>
         {proxyReference && (
           <ProxyReferenceDialog
@@ -1292,15 +1303,6 @@ function App() {
             type={proxyReference.action}
             unbindAndDelete={unbindProxyReferencesAndDelete}
             unbindReferences={unbindProxyReferences}
-          />
-        )}
-
-        {confirmDialog && (
-          <ConfirmDialog
-            busy={busy}
-            close={() => setConfirmDialog(null)}
-            state={confirmDialog}
-            t={t}
           />
         )}
 

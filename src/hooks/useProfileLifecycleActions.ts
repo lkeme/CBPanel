@@ -4,7 +4,7 @@ import type { TranslationKey } from "../i18n";
 import { preflightToastMessage } from "../components/profiles/ProfileDetails";
 import { networkCheckSummaryText } from "../components/profiles/ProfileTable";
 import { profileNameValidationError, profileStartUrlValidationError, selectedProxyIdForDraft } from "../components/profiles/profileWorkbenchHelpers";
-import type { ConfirmDialogState } from "../components/registry/RegistryDialogs";
+import type { ConfirmDialogState } from "../components/ui/ConfirmDialog";
 import type { WorkbenchView } from "../components/registry/registryStats";
 import { api, errorMessage } from "../lib/apiClient";
 import { omitKeys, withoutIds } from "../lib/collectionState";

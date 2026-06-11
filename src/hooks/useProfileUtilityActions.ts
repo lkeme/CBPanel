@@ -1,7 +1,8 @@
 import type { Dispatch, RefObject, SetStateAction } from "react";
 
 import type { TranslationKey } from "../i18n";
-import type { TextInputDialogState, ConfirmDialogState } from "../components/registry/RegistryDialogs";
+import type { TextInputDialogState } from "../components/registry/RegistryDialogs";
+import type { ConfirmDialogState } from "../components/ui/ConfirmDialog";
 import { api } from "../lib/apiClient";
 import {
   type BrowserProfile,

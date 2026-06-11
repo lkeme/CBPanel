@@ -1,7 +1,8 @@
 import type { Dispatch, SetStateAction } from "react";
 
 import type { TranslationKey } from "../i18n";
-import type { ConfirmDialogState, ExtensionImportDialogState } from "../components/registry/RegistryDialogs";
+import type { ExtensionImportDialogState } from "../components/registry/RegistryDialogs";
+import type { ConfirmDialogState } from "../components/ui/ConfirmDialog";
 import { api, errorMessage, referenceErrorMessage } from "../lib/apiClient";
 import type { ExtensionEntity, ExtensionSourceEntity, ExtensionSourceRefreshResult } from "../shared/entities";
 import type { BrowserProfile } from "../shared/profile";
