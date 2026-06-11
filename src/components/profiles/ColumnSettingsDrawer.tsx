@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Check, GripVertical, RotateCcw } from "lucide-react";
 
 import type { TranslationKey } from "../../i18n";
-import { DEFAULT_PROFILE_COLUMNS, type AppSettings, type ProfileColumnConfig } from "../../shared/settings";
+import { DEFAULT_PROFILE_COLUMNS, type AppSettings, type AppSettingsPatch, type ProfileColumnConfig } from "../../shared/settings";
 import { Drawer } from "../ui/form-controls";
 import { columnLabels, type ProfileColumnId } from "./columns";
 
@@ -14,7 +14,7 @@ export function ColumnSettingsDrawer({
 }: {
   close: () => void;
   settings: AppSettings;
-  saveSettings: (patch: Partial<AppSettings>) => Promise<void>;
+  saveSettings: (patch: AppSettingsPatch) => Promise<void>;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }) {
   const [dragState, setDragState] = useState<{ draggedId: string; overId: string } | null>(null);

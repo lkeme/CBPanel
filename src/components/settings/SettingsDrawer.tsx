@@ -4,6 +4,8 @@ import type { GithubMirrorProbeResponse } from "../../shared/githubMirror";
 import {
   ADVANCED_WEB_ENTRY_CODE,
   type AppSettings,
+  type AppSettingsPatch,
+  type DesktopCloseBehavior,
   type DesktopRuntimeInfo,
   normalizeSettings,
 } from "../../shared/settings";
@@ -46,7 +48,7 @@ export function SettingsDrawer({
   requestAdvancedWebEntry: () => void;
   runtime: DesktopRuntimeInfo | null;
   settings: AppSettings;
-  saveSettings: (patch: Partial<AppSettings>) => Promise<void>;
+  saveSettings: (patch: AppSettingsPatch) => Promise<void>;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
   updateBinary: () => Promise<void>;
 }) {
@@ -87,12 +89,21 @@ export function SettingsDrawer({
               />
             </Field>
             {runtime?.shell === "desktop" && runtime.platform === "windows" && (
-              <ToggleField
-                label={t("settings.closeToTray")}
-                help={t("settings.closeToTrayHelp")}
-                checked={normalized.desktop.closeToTray}
-                onChange={(closeToTray) => void saveSettings({ desktop: { ...normalized.desktop, closeToTray } })}
-              />
+              <Field label={t("settings.closeBehavior")} help={t("settings.closeBehaviorHelp")}>
+                <Segmented<DesktopCloseBehavior>
+                  value={normalized.desktop.closeBehavior}
+                  options={[
+                    { value: "ask", label: t("settings.closeBehavior.ask") },
+                    { value: "tray", label: t("settings.closeBehavior.tray") },
+                    { value: "quit", label: t("settings.closeBehavior.quit") },
+                  ]}
+                  onChange={(closeBehavior) =>
+                    void saveSettings({
+                      desktop: { ...normalized.desktop, closeBehavior, closeToTray: closeBehavior === "tray" },
+                    })
+                  }
+                />
+              </Field>
             )}
           </section>
         </TabsContent>

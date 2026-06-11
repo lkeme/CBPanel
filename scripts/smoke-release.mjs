@@ -73,11 +73,11 @@ try {
     },
     body: JSON.stringify({ desktop: { closeToTray: true } }),
   });
-  if (savedSettings.desktop?.closeToTray !== true) {
+  if (savedSettings.desktop?.closeBehavior !== "tray" || savedSettings.desktop?.closeToTray !== true) {
     throw new Error(`Settings API did not persist close-to-tray: ${JSON.stringify(savedSettings.desktop)}`);
   }
   const persistedState = await fetchJson(`http://127.0.0.1:${port}/api/state`, token);
-  if (persistedState.settings?.desktop?.closeToTray !== true) {
+  if (persistedState.settings?.desktop?.closeBehavior !== "tray" || persistedState.settings?.desktop?.closeToTray !== true) {
     throw new Error(`State API did not return persisted close-to-tray: ${JSON.stringify(persistedState.settings?.desktop)}`);
   }
 

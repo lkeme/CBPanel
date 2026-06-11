@@ -7,6 +7,7 @@ import {
   BUILTIN_GITHUB_MIRROR_PROVIDERS,
   BUILTIN_NETWORK_TRACE_PROVIDERS,
   type AppSettings,
+  type AppSettingsPatch,
   type GithubMirrorProviderId,
   type NetworkTraceSettings,
 } from "../../shared/settings";
@@ -21,7 +22,7 @@ export function NetworkSettingsPanel({
   t,
 }: {
   checkGithubMirrors: (customGithubMirrorPrefix: string) => Promise<GithubMirrorProbeResponse>;
-  saveSettings: (patch: Partial<AppSettings>) => Promise<void>;
+  saveSettings: (patch: AppSettingsPatch) => Promise<void>;
   settings: AppSettings;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }) {

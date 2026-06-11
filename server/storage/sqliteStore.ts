@@ -28,6 +28,7 @@ import type {
 } from "../../src/shared/entities";
 import {
   type AppSettings,
+  type AppSettingsPatch,
   type StorageInfo,
   DEFAULT_APP_SETTINGS,
   mergeSettings,
@@ -821,7 +822,7 @@ export class SqlitePanelRepository implements PanelRepository {
     return settings;
   }
 
-  async saveSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
+  async saveSettings(patch: AppSettingsPatch): Promise<AppSettings> {
     await this.initialize();
     const current = await this.getSettings();
     const next = mergeSettings(current, patch);

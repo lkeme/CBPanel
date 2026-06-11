@@ -9,6 +9,7 @@ import {
   CLOAKBROWSER_ENV_SUGGESTION_KEYS,
   OPTIONAL_CLOAKBROWSER_ENV_KEYS,
   type AppSettings,
+  type AppSettingsPatch,
   type BinarySettings,
   type BrowserCoreEnvValueKind,
   type BrowserCoreEnvVarSetting,
@@ -60,7 +61,7 @@ export function BrowserCoreSettingsPanel({
   importBrowserCoreZip: (filePath: string) => void;
   installBinary: () => Promise<void>;
   openRuntimeCheck: () => void;
-  saveSettings: (patch: Partial<AppSettings>) => Promise<void>;
+  saveSettings: (patch: AppSettingsPatch) => Promise<void>;
   settings: AppSettings;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
   updateBinary: () => Promise<void>;

@@ -63,6 +63,8 @@ import {
 } from "./shared/browserCore";
 import {
   type AppSettings,
+  type AppSettingsPatch,
+  type DesktopCloseBehavior,
   type DesktopRuntimeInfo,
   type ProfileColumnConfig,
   ADVANCED_WEB_ENTRY_CODE,
@@ -477,7 +479,7 @@ function App() {
     await deleteProfileAction(closeDrawer);
   }
 
-  async function saveSettings(patch: Partial<AppSettings>) {
+  async function saveSettings(patch: AppSettingsPatch) {
     const baseSettings = optimisticSettingsRef.current ?? confirmedSettingsRef.current ?? normalizeSettings(settings);
     const nextSettings = mergeSettings(baseSettings, patch);
     const saveSeq = settingsSaveSeqRef.current + 1;
@@ -838,9 +840,9 @@ function App() {
     setDrawerMode("settings");
   }
 
-  async function ensureCloseToTrayPreference(options: { wait?: boolean } = {}) {
-    if (normalizedSettings.desktop.closeToTray) return;
-    const nextDesktop = { ...normalizedSettings.desktop, closeToTray: true };
+  async function saveDesktopCloseBehavior(closeBehavior: DesktopCloseBehavior, options: { wait?: boolean } = {}) {
+    if (normalizedSettings.desktop.closeBehavior === closeBehavior) return;
+    const nextDesktop = { ...normalizedSettings.desktop, closeBehavior, closeToTray: closeBehavior === "tray" };
     const save = saveSettings({ desktop: nextDesktop });
     if (options.wait) await save;
     else void save;
@@ -897,8 +899,12 @@ function App() {
     if (confirmRunningSessionsBeforeExit()) {
       return;
     }
-    if (normalizedSettings.desktop.closeToTray) {
+    if (normalizedSettings.desktop.closeBehavior === "tray") {
       void hideWindowToTrayAfterSettingsSaved();
+      return;
+    }
+    if (normalizedSettings.desktop.closeBehavior === "quit") {
+      quitDesktopApp();
       return;
     }
     setConfirmDialog({
@@ -927,10 +933,11 @@ function App() {
       onConfirm: async ({ choice }) => {
         setConfirmDialog(null);
         if (choice === "quit") {
+          await saveDesktopCloseBehavior("quit", { wait: true });
           quitDesktopApp();
           return;
         }
-        await ensureCloseToTrayPreference({ wait: true });
+        await saveDesktopCloseBehavior("tray", { wait: true });
         hideWindowToTray();
       },
     });
@@ -1381,7 +1388,7 @@ function App() {
   );
 }
 
-function settingsPatchFromNext(patch: Partial<AppSettings>, nextSettings: AppSettings): Partial<AppSettings> {
+function settingsPatchFromNext(patch: AppSettingsPatch, nextSettings: AppSettings): AppSettingsPatch {
   return {
     ...(patch.appearance !== undefined ? { appearance: nextSettings.appearance } : {}),
     ...(patch.table !== undefined ? { table: nextSettings.table } : {}),

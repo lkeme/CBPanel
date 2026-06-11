@@ -9,7 +9,7 @@ import type {
   TagEntity,
   TrashEnvironment,
 } from "../../src/shared/entities";
-import type { AppSettings, StorageInfo } from "../../src/shared/settings";
+import type { AppSettings, AppSettingsPatch, StorageInfo } from "../../src/shared/settings";
 
 export interface ProfileRepository {
   listProfiles(): Promise<BrowserProfile[]>;
@@ -24,7 +24,7 @@ export interface ProfileRepository {
 
 export interface SettingsRepository {
   getSettings(): Promise<AppSettings>;
-  saveSettings(patch: Partial<AppSettings>): Promise<AppSettings>;
+  saveSettings(patch: AppSettingsPatch): Promise<AppSettings>;
 }
 
 export interface StorageRepository {

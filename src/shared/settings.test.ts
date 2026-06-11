@@ -25,6 +25,7 @@ test("normalizeSettings returns stable defaults", () => {
   assert.equal(settings.appearance.theme, "system");
   assert.equal(settings.appearance.language, "system");
   assert.equal(settings.appearance.uiFontFamily, FORCED_UI_FONT_FAMILY);
+  assert.equal(settings.desktop.closeBehavior, "ask");
   assert.equal(settings.desktop.closeToTray, false);
   assert.equal(settings.desktop.sidebarMode, "expanded");
   assert.equal(settings.table.pageSize, 25);
@@ -139,7 +140,6 @@ test("normalizeSettings rejects invalid enums and clamps font sizes", () => {
       pageSize: 10,
     },
     desktop: {
-      ...DEFAULT_APP_SETTINGS.desktop,
       closeToTray: true,
       sidebarMode: "hidden" as never,
     },
@@ -155,11 +155,55 @@ test("normalizeSettings rejects invalid enums and clamps font sizes", () => {
     true,
   );
   assert.equal(settings.desktop.sidebarMode, "expanded");
+  assert.equal(settings.desktop.closeBehavior, "tray");
   assert.equal(settings.desktop.closeToTray, true);
   assert.equal(settings.appearance.baseFontSize, 22);
   assert.equal(settings.appearance.tableFontSize, 11);
   assert.equal(settings.appearance.codeFontSize, 14);
   assert.equal(settings.table.pageSize, 25);
+});
+
+test("normalizeSettings preserves explicit desktop close behavior", () => {
+  const settings = normalizeSettings({
+    desktop: {
+      ...DEFAULT_APP_SETTINGS.desktop,
+      closeBehavior: "quit",
+      closeToTray: true,
+    },
+  });
+
+  assert.equal(settings.desktop.closeBehavior, "quit");
+  assert.equal(settings.desktop.closeToTray, false);
+});
+
+test("mergeSettings migrates legacy close-to-tray patches to close behavior", () => {
+  const traySettings = mergeSettings(DEFAULT_APP_SETTINGS, {
+    desktop: {
+      closeToTray: true,
+    },
+  });
+  assert.equal(traySettings.desktop.closeBehavior, "tray");
+  assert.equal(traySettings.desktop.closeToTray, true);
+
+  const askSettings = mergeSettings(traySettings, {
+    desktop: {
+      closeToTray: false,
+    },
+  });
+  assert.equal(askSettings.desktop.closeBehavior, "ask");
+  assert.equal(askSettings.desktop.closeToTray, false);
+});
+
+test("mergeSettings keeps explicit close behavior ahead of legacy close-to-tray", () => {
+  const settings = mergeSettings(DEFAULT_APP_SETTINGS, {
+    desktop: {
+      closeBehavior: "quit",
+      closeToTray: true,
+    },
+  });
+
+  assert.equal(settings.desktop.closeBehavior, "quit");
+  assert.equal(settings.desktop.closeToTray, false);
 });
 
 test("normalizeSettings normalizes browser core settings and custom CloakBrowser env vars", () => {

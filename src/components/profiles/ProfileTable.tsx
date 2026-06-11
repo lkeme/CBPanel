@@ -22,7 +22,7 @@ import {
   buildProxyUrl,
   maskProxyUrlForDisplay,
 } from "../../shared/profile";
-import { DEFAULT_PROFILE_COLUMNS, type AppSettings, type ProfileColumnConfig } from "../../shared/settings";
+import { DEFAULT_PROFILE_COLUMNS, type AppSettings, type AppSettingsPatch, type ProfileColumnConfig } from "../../shared/settings";
 import { columnLabels, type ProfileColumnId } from "./columns";
 
 type Environment = NonNullable<PanelState["environments"]>[number];
@@ -162,7 +162,7 @@ export function ProfilePagination({
   pageEnd: number;
   pageSize: number;
   pageStart: number;
-  saveSettings: (patch: Partial<AppSettings>) => Promise<void>;
+  saveSettings: (patch: AppSettingsPatch) => Promise<void>;
   selectedCount: number;
   setProfilePage: Dispatch<SetStateAction<number>>;
   settings: AppSettings;

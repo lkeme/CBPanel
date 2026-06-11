@@ -19,6 +19,7 @@ import {
 } from "../../src/shared/browserCore";
 import {
   type AppSettings,
+  type AppSettingsPatch,
   normalizeSettings,
 } from "../../src/shared/settings";
 import { applyGithubMirrorFetch } from "./githubMirrorFetch";
@@ -50,7 +51,7 @@ export type BinaryServiceOptions = {
   dataDir: string;
   portable: boolean;
   readSettings: () => Promise<AppSettings>;
-  saveSettings?: (patch: Partial<AppSettings>) => Promise<AppSettings>;
+  saveSettings?: (patch: AppSettingsPatch) => Promise<AppSettings>;
   fetchImpl?: typeof fetch;
   loadCloakBrowser?: () => Promise<CloakBrowserModule>;
 };

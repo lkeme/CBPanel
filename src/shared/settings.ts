@@ -8,6 +8,7 @@ export type LanguageMode = "system" | "zh-CN" | "en-US";
 export type TableDensity = "compact" | "comfortable";
 export type SidebarMode = "expanded" | "collapsed";
 export type SortDirection = "asc" | "desc";
+export type DesktopCloseBehavior = "ask" | "tray" | "quit";
 export type BrowserCoreCacheDirMode = "auto" | "custom";
 export type BrowserCoreDownloadSourceMode = "official" | "custom";
 export type BrowserCoreChecksumPolicy = "strict" | "skip";
@@ -30,6 +31,10 @@ export interface AppSettings {
   binary: BinarySettings;
   networkTrace: NetworkTraceSettings;
 }
+
+export type AppSettingsPatch = {
+  [Key in keyof AppSettings]?: Partial<AppSettings[Key]>;
+};
 
 export interface AppearanceSettings {
   theme: ThemeMode;
@@ -63,6 +68,7 @@ export interface TableSettings {
 
 export interface DesktopSettings {
   advancedWebEntry: boolean;
+  closeBehavior: DesktopCloseBehavior;
   closeToTray: boolean;
   platformChrome: PlatformChrome;
   rememberWindowState: boolean;
@@ -259,6 +265,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   },
   desktop: {
     advancedWebEntry: false,
+    closeBehavior: "ask",
     closeToTray: false,
     platformChrome: "native",
     rememberWindowState: true,
@@ -303,7 +310,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   },
 };
 
-export function normalizeSettings(input: Partial<AppSettings> = {}): AppSettings {
+export function normalizeSettings(input: AppSettingsPatch = {}): AppSettings {
   const base = DEFAULT_APP_SETTINGS;
   const appearance: Partial<AppearanceSettings> = input.appearance ?? {};
   const table: Partial<TableSettings> = input.table ?? {};
@@ -311,6 +318,11 @@ export function normalizeSettings(input: Partial<AppSettings> = {}): AppSettings
   const storage: Partial<StorageSettings> = input.storage ?? {};
   const binary: Partial<BinarySettings> = input.binary ?? {};
   const networkTrace: Partial<NetworkTraceSettings> = input.networkTrace ?? {};
+  const closeBehavior = normalizeDesktopCloseBehavior(
+    desktop.closeBehavior,
+    desktop.closeToTray,
+    base.desktop.closeBehavior,
+  );
   const envSettingsVersion = normalizeEnvSettingsVersion(binary.envSettingsVersion);
   const customEnvVars = normalizeBrowserCoreEnvVars(
     binary.customEnvVars === undefined ? base.binary.customEnvVars : binary.customEnvVars,
@@ -337,7 +349,8 @@ export function normalizeSettings(input: Partial<AppSettings> = {}): AppSettings
     },
     desktop: {
       advancedWebEntry: booleanValue(desktop.advancedWebEntry, base.desktop.advancedWebEntry),
-      closeToTray: booleanValue(desktop.closeToTray, base.desktop.closeToTray),
+      closeBehavior,
+      closeToTray: closeBehavior === "tray",
       platformChrome: enumValue(desktop.platformChrome, ["native", "custom"], base.desktop.platformChrome),
       rememberWindowState: booleanValue(desktop.rememberWindowState, base.desktop.rememberWindowState),
       sidebarMode: enumValue(desktop.sidebarMode, ["expanded", "collapsed"], base.desktop.sidebarMode),
@@ -369,11 +382,22 @@ export function normalizeSettings(input: Partial<AppSettings> = {}): AppSettings
   };
 }
 
-export function mergeSettings(current: AppSettings, patch: Partial<AppSettings>): AppSettings {
+export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): AppSettings {
+  const desktopPatch: Partial<DesktopSettings> = patch.desktop ?? {};
+  const nextCloseBehavior =
+    desktopPatch.closeBehavior
+    ?? (desktopPatch.closeToTray !== undefined ? (desktopPatch.closeToTray ? "tray" : "ask") : current.desktop.closeBehavior);
+  const desktop: DesktopSettings = {
+    ...current.desktop,
+    ...desktopPatch,
+    closeBehavior: nextCloseBehavior,
+    closeToTray: nextCloseBehavior === "tray",
+  };
+
   return normalizeSettings({
     appearance: { ...current.appearance, ...(patch.appearance ?? {}) },
     table: { ...current.table, ...(patch.table ?? {}) },
-    desktop: { ...current.desktop, ...(patch.desktop ?? {}) },
+    desktop,
     storage: { ...current.storage, ...(patch.storage ?? {}) },
     binary: { ...current.binary, ...(patch.binary ?? {}) },
     networkTrace: { ...current.networkTrace, ...(patch.networkTrace ?? {}) },
@@ -571,6 +595,17 @@ function normalizeNumber(value: unknown, fallback: number, min: number, max: num
 
 function enumValue<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
   return typeof value === "string" && allowed.includes(value as T) ? (value as T) : fallback;
+}
+
+function normalizeDesktopCloseBehavior(
+  closeBehavior: unknown,
+  legacyCloseToTray: unknown,
+  fallback: DesktopCloseBehavior,
+): DesktopCloseBehavior {
+  if (closeBehavior === "ask" || closeBehavior === "tray" || closeBehavior === "quit") return closeBehavior;
+  if (legacyCloseToTray === true) return "tray";
+  if (legacyCloseToTray === false) return "ask";
+  return fallback;
 }
 
 function stringValue(value: unknown, fallback: string): string {
