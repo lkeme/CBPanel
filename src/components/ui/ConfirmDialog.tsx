@@ -1,11 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import type { TranslationKey } from "../../i18n";
-import { Checkbox } from "./checkbox";
 import { DialogShell } from "./DialogShell";
 
 type ConfirmDialogContext = {
-  rememberChoice: boolean;
+  choice?: string;
+};
+
+type ConfirmDialogChoice = {
+  value: string;
+  label: string;
+  description?: string;
 };
 
 export type ConfirmDialogState = {
@@ -14,13 +19,16 @@ export type ConfirmDialogState = {
   confirmLabel: string;
   cancelLabel?: string;
   dangerLabel?: string;
+  hideCancel?: boolean;
+  showCloseButton?: boolean;
   tone?: "danger" | "warning";
   busyKey?: string;
   onConfirm: (context: ConfirmDialogContext) => Promise<void>;
   onDanger?: (context: ConfirmDialogContext) => Promise<void>;
-  rememberChoice?: {
-    label: string;
-    defaultChecked?: boolean;
+  choice?: {
+    defaultValue: string;
+    footerNote?: string;
+    options: ConfirmDialogChoice[];
   };
 } | null;
 
@@ -36,21 +44,31 @@ export function ConfirmDialog({
   t: (key: TranslationKey) => string;
 }) {
   const isBusy = Boolean(state.busyKey && busy === state.busyKey);
-  const [rememberChoice, setRememberChoice] = useState(state.rememberChoice?.defaultChecked ?? false);
+  const defaultChoice = state.choice?.defaultValue ?? state.choice?.options[0]?.value ?? "";
+  const [selectedChoice, setSelectedChoice] = useState(defaultChoice);
+
+  useEffect(() => {
+    setSelectedChoice(defaultChoice);
+  }, [defaultChoice, state]);
+
+  const context = { choice: selectedChoice || undefined };
 
   return (
     <DialogShell
       actions={
         <>
-          <button className="command subtle" disabled={isBusy} onClick={close} type="button">
-            {state.cancelLabel ?? t("actions.cancel")}
-          </button>
+          {state.choice?.footerNote && <span className="confirm-footer-note">{state.choice.footerNote}</span>}
+          {!state.hideCancel && (
+            <button className="command subtle" disabled={isBusy} onClick={close} type="button">
+              {state.cancelLabel ?? t("actions.cancel")}
+            </button>
+          )}
           {state.dangerLabel && state.onDanger && (
-            <button className="command danger" disabled={isBusy} onClick={() => void state.onDanger?.({ rememberChoice })} type="button">
+            <button className="command danger" disabled={isBusy} onClick={() => void state.onDanger?.(context)} type="button">
               {state.dangerLabel}
             </button>
           )}
-          <button className={`command ${state.tone === "danger" ? "danger" : "primary"}`} disabled={isBusy} onClick={() => void state.onConfirm({ rememberChoice })} type="button">
+          <button className={`command ${state.tone === "danger" ? "danger" : "primary"}`} disabled={isBusy} onClick={() => void state.onConfirm(context)} type="button">
             {state.confirmLabel}
           </button>
         </>
@@ -58,20 +76,35 @@ export function ConfirmDialog({
       close={close}
       closeDisabled={isBusy}
       labelledBy="confirm-dialog-title"
-      panelClassName="confirm-panel"
+      panelClassName={`confirm-panel ${state.choice ? "confirm-choice-panel" : ""}`}
+      showCloseButton={state.showCloseButton}
       t={t}
       title={state.title}
     >
       <p>{state.body}</p>
-      {state.rememberChoice && (
-        <label className="confirm-remember-choice">
-          <Checkbox
-            checked={rememberChoice}
-            disabled={isBusy}
-            onCheckedChange={(checked) => setRememberChoice(checked === true)}
-          />
-          <span>{state.rememberChoice.label}</span>
-        </label>
+      {state.choice && (
+        <fieldset className="confirm-choice-group">
+          {state.choice.options.map((option) => (
+            <label
+              className={`confirm-choice ${selectedChoice === option.value ? "active" : ""}`}
+              key={option.value}
+            >
+              <input
+                checked={selectedChoice === option.value}
+                disabled={isBusy}
+                name="confirm-choice"
+                onChange={() => setSelectedChoice(option.value)}
+                type="radio"
+                value={option.value}
+              />
+              <span className="confirm-choice-mark" aria-hidden="true" />
+              <span className="confirm-choice-text">
+                <span>{option.label}</span>
+                {option.description && <small>{option.description}</small>}
+              </span>
+            </label>
+          ))}
+        </fieldset>
       )}
     </DialogShell>
   );

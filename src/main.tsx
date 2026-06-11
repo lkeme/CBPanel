@@ -838,8 +838,8 @@ function App() {
     setDrawerMode("settings");
   }
 
-  async function rememberCloseToTrayIfNeeded(rememberChoice: boolean, options: { wait?: boolean } = {}) {
-    if (!rememberChoice || normalizedSettings.desktop.closeToTray) return;
+  async function ensureCloseToTrayPreference(options: { wait?: boolean } = {}) {
+    if (normalizedSettings.desktop.closeToTray) return;
     const nextDesktop = { ...normalizedSettings.desktop, closeToTray: true };
     const save = saveSettings({ desktop: nextDesktop });
     if (options.wait) await save;
@@ -904,22 +904,34 @@ function App() {
     setConfirmDialog({
       title: t("tray.closeChoiceTitle"),
       body: t("tray.closeChoiceBody"),
-      confirmLabel: t("tray.hideToTray"),
-      cancelLabel: t("actions.cancel"),
-      dangerLabel: t("tray.quitApp"),
+      confirmLabel: t("actions.confirm"),
+      hideCancel: true,
+      showCloseButton: true,
       busyKey: "settings",
-      rememberChoice: {
-        label: t("tray.rememberCloseToTray"),
+      choice: {
+        defaultValue: "tray",
+        footerNote: t("tray.closeChoiceFootnote"),
+        options: [
+          {
+            value: "tray",
+            label: t("tray.hideToTray"),
+            description: t("tray.hideToTrayChoiceDescription"),
+          },
+          {
+            value: "quit",
+            label: t("tray.quitApp"),
+            description: t("tray.quitAppChoiceDescription"),
+          },
+        ],
       },
-      onConfirm: async ({ rememberChoice }) => {
-        await rememberCloseToTrayIfNeeded(rememberChoice, { wait: true });
+      onConfirm: async ({ choice }) => {
         setConfirmDialog(null);
+        if (choice === "quit") {
+          quitDesktopApp();
+          return;
+        }
+        await ensureCloseToTrayPreference({ wait: true });
         hideWindowToTray();
-      },
-      onDanger: async ({ rememberChoice }) => {
-        await rememberCloseToTrayIfNeeded(rememberChoice, { wait: true });
-        setConfirmDialog(null);
-        quitDesktopApp();
       },
     });
   }

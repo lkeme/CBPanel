@@ -1,4 +1,5 @@
 import type React from "react";
+import { X } from "lucide-react";
 
 import type { TranslationKey } from "../../i18n";
 
@@ -11,6 +12,7 @@ export function DialogShell({
   description,
   labelledBy,
   panelClassName = "",
+  showCloseButton = false,
   t,
   title,
   asForm = false,
@@ -24,6 +26,7 @@ export function DialogShell({
   description?: React.ReactNode;
   labelledBy: string;
   panelClassName?: string;
+  showCloseButton?: boolean;
   t: (key: TranslationKey) => string;
   title: React.ReactNode;
   asForm?: boolean;
@@ -33,9 +36,23 @@ export function DialogShell({
   const bodyClasses = bodyClassName ?? "modal-body";
   const panel = (
     <>
-      <header className="modal-header">
-        <h2 id={labelledBy}>{title}</h2>
-        {description && <p>{description}</p>}
+      <header className={`modal-header ${showCloseButton ? "with-close" : ""}`}>
+        <div className="modal-title-block">
+          <h2 id={labelledBy}>{title}</h2>
+          {description && <p>{description}</p>}
+        </div>
+        {showCloseButton && (
+          <button
+            className="icon-button modal-close-button"
+            disabled={closeDisabled}
+            aria-label={t("actions.close")}
+            title={t("actions.close")}
+            onClick={closeDisabled ? undefined : close}
+            type="button"
+          >
+            <X size={16} aria-hidden="true" />
+          </button>
+        )}
       </header>
       <div className={bodyClasses}>{children}</div>
       {actions && <footer className="modal-footer">{actions}</footer>}
