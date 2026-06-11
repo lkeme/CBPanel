@@ -82,8 +82,10 @@ export function ProfileEditorRuntimeTab({
       <FormSection title={t("editor.section.runtime")} description={t("tips.launcher")}>
         <Field label={t("table.startUrl")} wide help={t("tips.startUrl")}>
           <div className="start-url-control">
+            <input value={draft.startUrl} onChange={(event) => setDraft({ ...draft, startUrl: event.target.value })} placeholder={t("placeholder.startUrl")} />
             <SelectMenu<StartUrlPresetValue>
               placeholder={t("form.startUrlPreset")}
+              showTriggerMeta={false}
               value={selectedStartUrlPreset(draft.startUrl)}
               options={[
                 ...START_URL_PRESETS.map((preset) => ({
@@ -99,7 +101,6 @@ export function ProfileEditorRuntimeTab({
                 if (preset) setDraft({ ...draft, startUrl: preset.url });
               }}
             />
-            <input value={draft.startUrl} onChange={(event) => setDraft({ ...draft, startUrl: event.target.value })} placeholder={t("placeholder.startUrl")} />
           </div>
         </Field>
         <Field label={t("table.launcher")} wide help={t("tips.launcher")}>

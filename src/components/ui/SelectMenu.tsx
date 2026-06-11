@@ -5,18 +5,20 @@ export function SelectMenu<T extends string>({
   onChange,
   options,
   placeholder,
+  showTriggerMeta = true,
   value,
 }: {
   disabled?: boolean;
   onChange: (value: T) => void;
   options: Array<{ value: T; label: string; meta?: string }>;
   placeholder: string;
+  showTriggerMeta?: boolean;
   value: T;
 }) {
   const [open, setOpen] = useState(false);
   const selected = options.find((option) => option.value === value);
   const label = selected?.label ?? placeholder;
-  const meta = selected?.meta;
+  const meta = showTriggerMeta ? selected?.meta : undefined;
 
   return (
     <div
