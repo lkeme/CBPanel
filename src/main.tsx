@@ -12,13 +12,12 @@ import { AppSidebar } from "./components/app/AppSidebar";
 import { DesktopTitlebar } from "./components/app/DesktopTitlebar";
 import type { BrowserCoreImportDialogState } from "./components/browser-core/BrowserCoreImportDialog";
 import { browserCoreOperationActive, isBrowserCoreBusy } from "./components/browser-core/BrowserCoreStatusPanels";
-import { ColumnSettingsDrawer } from "./components/profiles/ColumnSettingsDrawer";
 import {
   DetailsDrawer,
   ProfileInspectorAside,
   firstPreflightFailure,
 } from "./components/profiles/ProfileDetails";
-import { ProfileEditorDrawer, type ProfileEditorTab } from "./components/profiles/ProfileEditorDrawer";
+import type { ProfileEditorTab } from "./components/profiles/ProfileEditorDrawer";
 import { ProfileWorkbenchControls } from "./components/profiles/ProfileWorkbenchControls";
 import { ProfilePagination, ProfileTable, statusText } from "./components/profiles/ProfileTable";
 import {
@@ -31,8 +30,8 @@ import {
 } from "./components/profiles/profileWorkbenchHelpers";
 import type { ExtensionImportDialogState, TextInputDialogState } from "./components/registry/RegistryDialogs";
 import { buildModuleStats, type ModeFilter, type ProxyFilter, type StatusFilter, type WorkbenchView } from "./components/registry/registryStats";
-import { SettingsDrawer, type SettingsTab } from "./components/settings/SettingsDrawer";
-import { ConfirmDialog, type ConfirmDialogState } from "./components/ui/ConfirmDialog";
+import type { SettingsTab } from "./components/settings/SettingsDrawer";
+import type { ConfirmDialogState } from "./components/ui/ConfirmDialog";
 import { LoadingSkeleton } from "./components/ui/LoadingSkeleton";
 import { TooltipProvider } from "./components/ui/tooltip";
 import {
@@ -90,6 +89,18 @@ const RegistryModuleView = lazy(() =>
 );
 const BrowserCoreImportDialog = lazy(() =>
   import("./components/browser-core/BrowserCoreImportDialog").then((module) => ({ default: module.BrowserCoreImportDialog })),
+);
+const ProfileEditorDrawer = lazy(() =>
+  import("./components/profiles/ProfileEditorDrawer").then((module) => ({ default: module.ProfileEditorDrawer })),
+);
+const SettingsDrawer = lazy(() =>
+  import("./components/settings/SettingsDrawer").then((module) => ({ default: module.SettingsDrawer })),
+);
+const ColumnSettingsDrawer = lazy(() =>
+  import("./components/profiles/ColumnSettingsDrawer").then((module) => ({ default: module.ColumnSettingsDrawer })),
+);
+const ConfirmDialog = lazy(() =>
+  import("./components/ui/ConfirmDialog").then((module) => ({ default: module.ConfirmDialog })),
 );
 const ProxyEditorDialog = lazy(() =>
   import("./components/registry/RegistryDialogs").then((module) => ({ default: module.ProxyEditorDialog })),
@@ -1158,79 +1169,85 @@ function App() {
         </section>
 
       {drawerMode === "edit" && draft && (
-        <ProfileEditorDrawer
-          activeTab={activeTab}
-          busy={busy}
-          checkPreflight={checkPreflight}
-          checkProxy={checkProxy}
-          close={closeDrawer}
-          deleteProfile={deleteProfile}
-          draftIsNew={draftIsNew}
-          draft={draft}
-          duplicateProfile={duplicateProfile}
-          environments={state?.environments ?? []}
-          extensions={state?.extensions ?? []}
-          groups={state?.groups ?? []}
-          localProxyDraftIds={localProxyDraftIds}
-          nameError={profileNameError}
-          tags={state?.tags ?? []}
-          boundExtensionIds={state?.environments?.find((environment) => environment.id === draft.id)?.extensionIds ?? []}
-          proxies={state?.proxies ?? []}
-          proxyCheck={proxyCheck}
-          proxyLibraryDraftIds={draftProxyLibraryIds}
-          browserCoreMissing={browserCoreMissing}
-          running={draftRunning}
-          saveDraft={saveDraft}
-          saveDraftProxyToLibrary={saveDraftProxyToLibrary}
-          setActiveTab={setActiveTab}
-          setDraftProxyLibraryId={(draftId, proxyId) => {
-            setLocalProxyDraftIds((current) => withoutIds(current, [draftId]));
-            setDraftProxyLibraryIds((current) => ({ ...current, [draftId]: proxyId }));
-          }}
-          setDraftExtensionBinding={setDraftExtensionBinding}
-          setDraft={updateDraft}
-          setDraftProxyLocal={(draftId) => {
-            setLocalProxyDraftIds((current) => new Set(current).add(draftId));
-            setDraftProxyLibraryIds((current) => omitKeys(current, [draftId]));
-          }}
-          stopProfile={() => stopProfile()}
-          copyManagedProxyToLocal={copyManagedProxyToLocal}
-          launchProfile={() => launchProfile()}
-          t={t}
-        />
+        <Suspense fallback={<LazyDrawerFallback close={closeDrawer} title={t("actions.edit")} t={t} />}>
+          <ProfileEditorDrawer
+            activeTab={activeTab}
+            busy={busy}
+            checkPreflight={checkPreflight}
+            checkProxy={checkProxy}
+            close={closeDrawer}
+            deleteProfile={deleteProfile}
+            draftIsNew={draftIsNew}
+            draft={draft}
+            duplicateProfile={duplicateProfile}
+            environments={state?.environments ?? []}
+            extensions={state?.extensions ?? []}
+            groups={state?.groups ?? []}
+            localProxyDraftIds={localProxyDraftIds}
+            nameError={profileNameError}
+            tags={state?.tags ?? []}
+            boundExtensionIds={state?.environments?.find((environment) => environment.id === draft.id)?.extensionIds ?? []}
+            proxies={state?.proxies ?? []}
+            proxyCheck={proxyCheck}
+            proxyLibraryDraftIds={draftProxyLibraryIds}
+            browserCoreMissing={browserCoreMissing}
+            running={draftRunning}
+            saveDraft={saveDraft}
+            saveDraftProxyToLibrary={saveDraftProxyToLibrary}
+            setActiveTab={setActiveTab}
+            setDraftProxyLibraryId={(draftId, proxyId) => {
+              setLocalProxyDraftIds((current) => withoutIds(current, [draftId]));
+              setDraftProxyLibraryIds((current) => ({ ...current, [draftId]: proxyId }));
+            }}
+            setDraftExtensionBinding={setDraftExtensionBinding}
+            setDraft={updateDraft}
+            setDraftProxyLocal={(draftId) => {
+              setLocalProxyDraftIds((current) => new Set(current).add(draftId));
+              setDraftProxyLibraryIds((current) => omitKeys(current, [draftId]));
+            }}
+            stopProfile={() => stopProfile()}
+            copyManagedProxyToLocal={copyManagedProxyToLocal}
+            launchProfile={() => launchProfile()}
+            t={t}
+          />
+        </Suspense>
       )}
 
       {drawerMode === "settings" && (
-        <SettingsDrawer
-          binaryInfo={binaryInfo}
-          busy={busy}
-          checkBrowserCoreUpdate={checkBrowserCoreUpdate}
-          checkGithubMirrors={checkGithubMirrors}
-          close={closeDrawer}
-          importBrowserCoreZip={(filePath) => setBrowserCoreImport({ filePath })}
-          installBinary={installBinary}
-          initialTab={settingsInitialTab}
-          openRuntimeCheck={() => {
-            setDrawerMode(null);
-            setWorkbenchView("runtimeCheck");
-          }}
-          requestAdvancedWebEntry={() => requestAdvancedWebEntry(normalizedSettings)}
-          runtime={runtime}
-          settings={settings}
-          saveSettings={saveSettings}
-          t={t}
-          updateBinary={updateBinary}
-          clearBinaryCache={clearBinaryCache}
-        />
+        <Suspense fallback={<LazyDrawerFallback close={closeDrawer} title={t("nav.settings")} t={t} />}>
+          <SettingsDrawer
+            binaryInfo={binaryInfo}
+            busy={busy}
+            checkBrowserCoreUpdate={checkBrowserCoreUpdate}
+            checkGithubMirrors={checkGithubMirrors}
+            close={closeDrawer}
+            importBrowserCoreZip={(filePath) => setBrowserCoreImport({ filePath })}
+            installBinary={installBinary}
+            initialTab={settingsInitialTab}
+            openRuntimeCheck={() => {
+              setDrawerMode(null);
+              setWorkbenchView("runtimeCheck");
+            }}
+            requestAdvancedWebEntry={() => requestAdvancedWebEntry(normalizedSettings)}
+            runtime={runtime}
+            settings={settings}
+            saveSettings={saveSettings}
+            t={t}
+            updateBinary={updateBinary}
+            clearBinaryCache={clearBinaryCache}
+          />
+        </Suspense>
       )}
 
       {drawerMode === "columns" && (
-        <ColumnSettingsDrawer
-          close={closeDrawer}
-          settings={settings}
-          saveSettings={saveSettings}
-          t={t}
-        />
+        <Suspense fallback={<LazyDrawerFallback close={closeDrawer} title={t("table.columnSettings")} t={t} />}>
+          <ColumnSettingsDrawer
+            close={closeDrawer}
+            settings={settings}
+            saveSettings={saveSettings}
+            t={t}
+          />
+        </Suspense>
       )}
 
       {drawerMode === "details" && draft && (
@@ -1335,12 +1352,14 @@ function App() {
       )}
 
       {confirmDialog && (
-        <ConfirmDialog
-          busy={busy}
-          close={() => setConfirmDialog(null)}
-          state={confirmDialog}
-          t={t}
-        />
+        <Suspense fallback={<LazyModalFallback t={t} />}>
+          <ConfirmDialog
+            busy={busy}
+            close={() => setConfirmDialog(null)}
+            state={confirmDialog}
+            t={t}
+          />
+        </Suspense>
       )}
 
       <Suspense fallback={<LazyModalFallback t={t} />}>
