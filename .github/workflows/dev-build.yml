@@ -29,10 +29,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 25
           cache: npm
@@ -47,7 +47,7 @@ jobs:
         run: npm run release:windows
 
       - name: Upload Windows dev artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cbpanel-dev-windows-${{ github.sha }}
           path: |
@@ -62,10 +62,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 25
           cache: npm
@@ -96,7 +96,7 @@ jobs:
         run: npm run release:linux
 
       - name: Upload Linux dev artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cbpanel-dev-linux-x64-${{ github.sha }}
           path: |
@@ -110,10 +110,10 @@ jobs:
     runs-on: macos-15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 25
           cache: npm
@@ -128,7 +128,7 @@ jobs:
         run: npm run release:mac
 
       - name: Upload macOS dev artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cbpanel-dev-macos-${{ github.sha }}
           path: |
