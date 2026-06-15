@@ -85,3 +85,34 @@ jobs:
             release/CBPanel-linux-x64.AppImage
             release/app-update-manifest.json
           if-no-files-found: error
+
+  macos:
+    name: macOS DMG
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 25
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS release
+        run: npm run release:mac
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cbpanel-macos
+          path: |
+            release/CBPanel-macos-*.dmg
+            release/app-update-manifest.json
+          if-no-files-found: error

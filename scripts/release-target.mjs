@@ -33,8 +33,19 @@ export function isLinuxRustTarget(rustTarget) {
   return rustTarget === "x86_64-unknown-linux-gnu";
 }
 
+export function isMacRustTarget(rustTarget) {
+  return rustTarget === "x86_64-apple-darwin" || rustTarget === "aarch64-apple-darwin";
+}
+
+export function macArtifactArchForRustTarget(rustTarget) {
+  if (rustTarget === "x86_64-apple-darwin") return "x64";
+  if (rustTarget === "aarch64-apple-darwin") return "arm64";
+  throw new Error(`Unsupported macOS release target: ${rustTarget}`);
+}
+
 export function releasePlatformForRustTarget(rustTarget) {
   if (isWindowsRustTarget(rustTarget)) return "windows";
   if (isLinuxRustTarget(rustTarget)) return "linux";
+  if (isMacRustTarget(rustTarget)) return "macos";
   throw new Error(`Unsupported release platform for Rust target: ${rustTarget}`);
 }

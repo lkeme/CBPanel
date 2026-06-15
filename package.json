@@ -19,6 +19,7 @@
     "sidecar:build": "node scripts/build-sidecar.mjs",
     "release:windows": "node scripts/release-windows.mjs",
     "release:linux": "node scripts/release-linux.mjs",
+    "release:mac": "node scripts/release-mac.mjs",
     "release:smoke": "node scripts/smoke-release.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/**/*.test.ts server/**/*.test.ts",

@@ -9,9 +9,14 @@ const releaseDir = path.join(root, "release");
 const installerPath = path.join(root, "src-tauri", "target", "release", "bundle", "nsis", `CBPanel_${packageJson.version}_x64-setup.exe`);
 const portablePath = path.join(releaseDir, "CBPanel-win-portable.zip");
 const linuxAppImagePath = path.join(releaseDir, "CBPanel-linux-x64.AppImage");
+const macDmgPaths = [
+  path.join(releaseDir, "CBPanel-macos-arm64.dmg"),
+  path.join(releaseDir, "CBPanel-macos-x64.dmg"),
+];
 const manifestPath = path.join(releaseDir, "app-update-manifest.json");
 const publishBaseUrl = process.env.CBPANEL_RELEASE_BASE_URL ?? "https://example.invalid/cbpanel/releases";
 const platformScope = parsePlatformScope(process.argv.slice(2));
+const macArchScope = parseMacArchScope(process.argv.slice(2));
 
 const artifactSpecs = [
   {
@@ -32,6 +37,12 @@ const artifactSpecs = [
     filePath: linuxAppImagePath,
     url: `${publishBaseUrl}/CBPanel-linux-x64.AppImage`,
   },
+  ...macDmgPaths.filter((filePath) => macArchScope.has(macArchFromDmgPath(filePath))).map((filePath) => ({
+    platform: "macos",
+    kind: "macos-dmg",
+    filePath,
+    url: `${publishBaseUrl}/${path.basename(filePath)}`,
+  })),
 ];
 
 const artifacts = [];
@@ -90,7 +101,22 @@ async function optionalArtifactInfo(kind, filePath, url) {
 function parsePlatformScope(args) {
   const platformArg = args.find((arg) => arg.startsWith("--platform="));
   const value = platformArg?.slice("--platform=".length) ?? "all";
-  if (value === "all") return new Set(["windows", "linux"]);
-  if (value === "windows" || value === "linux") return new Set([value]);
+  if (value === "all") return new Set(["windows", "linux", "macos"]);
+  if (value === "windows" || value === "linux" || value === "macos") return new Set([value]);
   throw new Error(`Unsupported update manifest platform scope: ${value}`);
+}
+
+function parseMacArchScope(args) {
+  const archArg = args.find((arg) => arg.startsWith("--mac-arch="));
+  const value = archArg?.slice("--mac-arch=".length) ?? "all";
+  if (value === "all") return new Set(["arm64", "x64"]);
+  if (value === "arm64" || value === "x64") return new Set([value]);
+  throw new Error(`Unsupported macOS artifact arch scope: ${value}`);
+}
+
+function macArchFromDmgPath(filePath) {
+  const fileName = path.basename(filePath);
+  if (fileName.includes("-arm64.")) return "arm64";
+  if (fileName.includes("-x64.")) return "x64";
+  throw new Error(`Unsupported macOS DMG artifact name: ${fileName}`);
 }
