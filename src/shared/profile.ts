@@ -416,7 +416,7 @@ export function nowIso(): string {
 
 export function defaultProfile(input: Partial<BrowserProfile> = {}): BrowserProfile {
   const now = nowIso();
-  const id = input.id ?? createId();
+  const id = typeof input.id === "string" && input.id.trim() ? input.id.trim() : createId();
   const base: BrowserProfile = {
     id,
     name: "新浏览器配置",
@@ -486,7 +486,7 @@ export function defaultProfile(input: Partial<BrowserProfile> = {}): BrowserProf
     },
   };
 
-  return mergeProfile(base, input);
+  return { ...mergeProfile(base, input), id };
 }
 
 export function mergeProfile(base: BrowserProfile, input: Partial<BrowserProfile>): BrowserProfile {

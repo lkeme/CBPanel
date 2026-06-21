@@ -132,7 +132,7 @@ export function useRegistryActions({
       if (mode === "create") {
         await api<GroupEntity>("/api/groups", {
           method: "POST",
-          body: JSON.stringify(input),
+          body: JSON.stringify(createRegistryPayload(input)),
         });
         toast("success", t("toast.groupCreated"));
       } else if (group) {
@@ -231,7 +231,7 @@ export function useRegistryActions({
       if (mode === "create") {
         await api<TagEntity>("/api/tags", {
           method: "POST",
-          body: JSON.stringify(input),
+          body: JSON.stringify(createRegistryPayload(input)),
         });
         toast("success", t("toast.tagCreated"));
       } else if (tag) {
@@ -325,4 +325,9 @@ export function useRegistryActions({
 
 function activeEnvironments(environments: BrowserEnvironment[] | undefined): BrowserEnvironment[] {
   return (environments ?? []).filter((environment) => !environment.deletedAt);
+}
+
+function createRegistryPayload<T extends { id?: string; createdAt?: string; updatedAt?: string }>(input: Partial<T>): Partial<T> {
+  const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...payload } = input;
+  return payload as Partial<T>;
 }

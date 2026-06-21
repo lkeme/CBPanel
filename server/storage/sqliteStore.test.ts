@@ -299,6 +299,156 @@ test("proxy registry rejects unsupported proxy schemes", async () => {
   repository.close();
 });
 
+test("registry create methods ignore blank ids instead of overwriting existing rows", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+
+  const firstProfile = await repository.createProfile({ id: "", name: "Profile A" });
+  const secondProfile = await repository.createProfile({ id: "", name: "Profile B" });
+  const profiles = await repository.listProfiles();
+  assert.notEqual(firstProfile.id, "");
+  assert.notEqual(secondProfile.id, "");
+  assert.notEqual(firstProfile.id, secondProfile.id);
+  assert.equal(profiles.some((profile) => profile.name === "Profile A"), true);
+  assert.equal(profiles.some((profile) => profile.name === "Profile B"), true);
+
+  const firstGroup = await repository.createGroup({ id: "", name: "Group A" });
+  const secondGroup = await repository.createGroup({ id: "", name: "Group B" });
+  const groups = await repository.listGroups();
+  assert.notEqual(firstGroup.id, "");
+  assert.notEqual(secondGroup.id, "");
+  assert.notEqual(firstGroup.id, secondGroup.id);
+  assert.equal(groups.some((group) => group.name === "Group A"), true);
+  assert.equal(groups.some((group) => group.name === "Group B"), true);
+
+  const firstTag = await repository.createTag({ id: "   ", name: "Tag A" });
+  const secondTag = await repository.createTag({ id: "   ", name: "Tag B" });
+  const tags = await repository.listTags();
+  assert.notEqual(firstTag.id, secondTag.id);
+  assert.equal(tags.some((tag) => tag.name === "Tag A"), true);
+  assert.equal(tags.some((tag) => tag.name === "Tag B"), true);
+
+  const firstProxy = await repository.createProxy({
+    id: "",
+    name: "Proxy A",
+    scheme: "http",
+    host: "proxy-a.example.test",
+    port: "8080",
+  });
+  const secondProxy = await repository.createProxy({
+    id: "",
+    name: "Proxy B",
+    scheme: "http",
+    host: "proxy-b.example.test",
+    port: "8081",
+  });
+  const proxies = await repository.listProxies({ includeSecrets: true });
+  assert.notEqual(firstProxy.id, secondProxy.id);
+  assert.equal(proxies.some((proxy) => proxy.name === "Proxy A"), true);
+  assert.equal(proxies.some((proxy) => proxy.name === "Proxy B"), true);
+
+  const firstExtension = await repository.createExtension({
+    id: "",
+    name: "Extension A",
+    sourceKind: "local-directory",
+    sourceUrl: path.join(directory, "extension-a"),
+  });
+  const secondExtension = await repository.createExtension({
+    id: "",
+    name: "Extension B",
+    sourceKind: "local-directory",
+    sourceUrl: path.join(directory, "extension-b"),
+  });
+  const extensions = await repository.listExtensions();
+  assert.notEqual(firstExtension.id, secondExtension.id);
+  assert.equal(extensions.some((extension) => extension.name === "Extension A"), true);
+  assert.equal(extensions.some((extension) => extension.name === "Extension B"), true);
+
+  const firstSource = await repository.createExtensionSource({
+    id: "",
+    name: "Source A",
+    url: "https://extensions-a.example.test/index.json",
+  });
+  const secondSource = await repository.createExtensionSource({
+    id: "",
+    name: "Source B",
+    url: "https://extensions-b.example.test/index.json",
+  });
+  const sources = await repository.listExtensionSources();
+  assert.notEqual(firstSource.id, secondSource.id);
+  assert.equal(sources.some((source) => source.name === "Source A"), true);
+  assert.equal(sources.some((source) => source.name === "Source B"), true);
+
+  repository.close();
+});
+
+test("registry create methods reject duplicate ids instead of upserting existing rows", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+
+  const profile = await repository.createProfile({ id: "profile-duplicate", name: "Profile A" });
+  await assertDuplicateId(repository.createProfile({ id: profile.id, name: "Profile B" }));
+  assert.equal((await repository.getProfile(profile.id))?.name, "Profile A");
+
+  const group = await repository.createGroup({ id: "group-duplicate", name: "Group A" });
+  await assertDuplicateId(repository.createGroup({ id: group.id, name: "Group B" }));
+  assert.equal((await repository.listGroups()).find((item) => item.id === group.id)?.name, "Group A");
+
+  const tag = await repository.createTag({ id: "tag-duplicate", name: "Tag A" });
+  await assertDuplicateId(repository.createTag({ id: tag.id, name: "Tag B" }));
+  assert.equal((await repository.listTags()).find((item) => item.id === tag.id)?.name, "Tag A");
+
+  const proxy = await repository.createProxy({
+    id: "proxy-duplicate",
+    name: "Proxy A",
+    scheme: "http",
+    host: "proxy-a.example.test",
+    port: "8080",
+  });
+  await assertDuplicateId(
+    repository.createProxy({
+      id: proxy.id,
+      name: "Proxy B",
+      scheme: "http",
+      host: "proxy-b.example.test",
+      port: "8081",
+    }),
+  );
+  assert.equal((await repository.listProxies({ includeSecrets: true })).find((item) => item.id === proxy.id)?.name, "Proxy A");
+
+  const extension = await repository.createExtension({
+    id: "extension-duplicate",
+    name: "Extension A",
+    sourceKind: "local-directory",
+    sourceUrl: path.join(directory, "extension-a"),
+  });
+  await assertDuplicateId(
+    repository.createExtension({
+      id: extension.id,
+      name: "Extension B",
+      sourceKind: "local-directory",
+      sourceUrl: path.join(directory, "extension-b"),
+    }),
+  );
+  assert.equal((await repository.listExtensions()).find((item) => item.id === extension.id)?.name, "Extension A");
+
+  const source = await repository.createExtensionSource({
+    id: "extension-source-duplicate",
+    name: "Source A",
+    url: "https://extensions-a.example.test/index.json",
+  });
+  await assertDuplicateId(
+    repository.createExtensionSource({
+      id: source.id,
+      name: "Source B",
+      url: "https://extensions-b.example.test/index.json",
+    }),
+  );
+  assert.equal((await repository.listExtensionSources()).find((item) => item.id === source.id)?.name, "Source A");
+
+  repository.close();
+});
+
 test("referenced group and proxy deletes return reference conflicts", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
@@ -474,6 +624,14 @@ test("extension registry protects referenced deletes and projects installed path
 
 async function makeTempDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-sqlite-"));
+}
+
+async function assertDuplicateId(operation: Promise<unknown>): Promise<void> {
+  await assert.rejects(operation, (error) => {
+    assert.equal((error as { status?: number }).status, 409);
+    assert.equal((error as { code?: string }).code, "ENTITY_ID_DUPLICATE");
+    return true;
+  });
 }
 
 async function fileExists(inputPath: string): Promise<boolean> {

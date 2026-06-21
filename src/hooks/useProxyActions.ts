@@ -77,7 +77,7 @@ export function useProxyActions({
       if (mode === "create") {
         await api<ProxyEntity>("/api/proxies", {
           method: "POST",
-          body: JSON.stringify(input),
+          body: JSON.stringify(createProxyPayload(input)),
         });
         toast("success", t("toast.proxyCreated"));
       } else if (proxy) {
@@ -245,4 +245,9 @@ export function useProxyActions({
     unbindProxyReferencesAndDelete,
     updateProxy,
   };
+}
+
+function createProxyPayload(input: Partial<ProxyEntity>): Partial<ProxyEntity> {
+  const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...payload } = input;
+  return payload;
 }

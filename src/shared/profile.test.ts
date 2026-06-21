@@ -78,6 +78,16 @@ test("normalizeProfile does not let undefined overwrite generated identity", () 
   assert.ok(profile.updatedAt);
 });
 
+test("normalizeProfile treats blank ids as missing identity", () => {
+  const profile = normalizeProfile({
+    id: "   ",
+    name: "Blank ID",
+  });
+
+  assert.equal(profile.name, "Blank ID");
+  assert.match(profile.id, /^profile-/);
+});
+
 test("normalizeProfile trims and deduplicates tags", () => {
   const profile = normalizeProfile({
     tags: [" qa ", "client-a", "", "qa", " client-a "],

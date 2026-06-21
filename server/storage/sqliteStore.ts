@@ -151,6 +151,8 @@ type IdRow = {
   id: string;
 };
 
+type IdentityTable = "profiles" | "groups" | "tags" | "proxies" | "extensions" | "extension_sources";
+
 type SettingsRow = {
   settings_json: string;
 };
@@ -211,6 +213,7 @@ export class SqlitePanelRepository implements PanelRepository {
   async createProfile(profile: Partial<BrowserProfile>): Promise<BrowserProfile> {
     await this.initialize();
     const normalized = normalizeProfile(defaultProfile(profile));
+    this.assertUnusedId("profiles", normalized.id);
     this.assertUniqueProfileName(normalized.name, normalized.id);
     this.insertProfile(normalized);
     this.markProfilesModified();
@@ -407,7 +410,7 @@ export class SqlitePanelRepository implements PanelRepository {
     const timestamp = nowIso();
     const name = cleanRequiredName(input.name, "分组名称不能为空");
     const group: GroupEntity = {
-      id: input.id ?? createId("group"),
+      id: createEntityId(input.id, "group"),
       name,
       color: cleanColor(input.color, colorForName(name)),
       description: input.description?.trim() ?? "",
@@ -417,6 +420,7 @@ export class SqlitePanelRepository implements PanelRepository {
       createdAt: timestamp,
       updatedAt: timestamp,
     };
+    this.assertUnusedId("groups", group.id);
     this.insertGroup(group);
     return group;
   }
@@ -483,7 +487,7 @@ export class SqlitePanelRepository implements PanelRepository {
     const timestamp = nowIso();
     const name = cleanRequiredName(input.name, "标签名称不能为空");
     const tag: TagEntity = {
-      id: input.id ?? createId("tag"),
+      id: createEntityId(input.id, "tag"),
       name,
       color: cleanColor(input.color, colorForName(name)),
       description: input.description?.trim() ?? "",
@@ -492,6 +496,7 @@ export class SqlitePanelRepository implements PanelRepository {
       createdAt: timestamp,
       updatedAt: timestamp,
     };
+    this.assertUnusedId("tags", tag.id);
     this.insertTag(tag);
     return tag;
   }
@@ -602,10 +607,11 @@ export class SqlitePanelRepository implements PanelRepository {
     const timestamp = nowIso();
     const proxy = normalizeProxyEntity({
       ...input,
-      id: input.id ?? createId("proxy"),
+      id: createEntityId(input.id, "proxy"),
       createdAt: timestamp,
       updatedAt: timestamp,
     });
+    this.assertUnusedId("proxies", proxy.id);
     this.insertProxy(proxy);
     return proxy;
   }
@@ -688,10 +694,11 @@ export class SqlitePanelRepository implements PanelRepository {
     const timestamp = nowIso();
     const extension = normalizeExtensionEntity({
       ...input,
-      id: input.id ?? createId("extension"),
+      id: createEntityId(input.id, "extension"),
       createdAt: timestamp,
       updatedAt: timestamp,
     });
+    this.assertUnusedId("extensions", extension.id);
     this.insertExtension(extension);
     return extension;
   }
@@ -778,10 +785,11 @@ export class SqlitePanelRepository implements PanelRepository {
     const timestamp = nowIso();
     const source = normalizeExtensionSourceEntity({
       ...input,
-      id: input.id ?? createId("extension-source"),
+      id: createEntityId(input.id, "extension-source"),
       createdAt: timestamp,
       updatedAt: timestamp,
     });
+    this.assertUnusedId("extension_sources", source.id);
     this.insertExtensionSource(source);
     return source;
   }
@@ -1173,6 +1181,18 @@ export class SqlitePanelRepository implements PanelRepository {
         code: "PROFILE_NAME_DUPLICATE",
       });
       throw error;
+    }
+  }
+
+  private assertUnusedId(table: IdentityTable, id: string): void {
+    const duplicate = this.database()
+      .prepare(`SELECT id FROM ${table} WHERE id = ? LIMIT 1`)
+      .get(id) as IdRow | undefined;
+    if (duplicate) {
+      throw Object.assign(new Error("Entity id already exists"), {
+        status: 409,
+        code: "ENTITY_ID_DUPLICATE",
+      });
     }
   }
 
@@ -1829,7 +1849,7 @@ function parseProxyParts(profile: BrowserProfile): {
 
 function normalizeProxyEntity(input: Partial<ProxyEntity>): ProxyEntity {
   const now = nowIso();
-  const id = typeof input.id === "string" && input.id.trim() ? input.id.trim() : createId("proxy");
+  const id = createEntityId(input.id, "proxy");
   const scheme = typeof input.scheme === "string" ? normalizeProxyScheme(input.scheme) : "http";
   if (!scheme) throw Object.assign(new Error("代理协议不受支持"), { status: 400 });
   const host = typeof input.host === "string" ? input.host.trim() : "";
@@ -1854,7 +1874,7 @@ function normalizeProxyEntity(input: Partial<ProxyEntity>): ProxyEntity {
 
 function normalizeExtensionEntity(input: Partial<ExtensionEntity>): ExtensionEntity {
   const now = nowIso();
-  const id = typeof input.id === "string" && input.id.trim() ? input.id.trim() : createId("extension");
+  const id = createEntityId(input.id, "extension");
   const name = typeof input.name === "string" && input.name.trim() ? input.name.trim() : "Extension";
   const sourceKind = isExtensionSourceKind(input.sourceKind) ? input.sourceKind : "local-directory";
   const version = typeof input.version === "string" && input.version.trim() ? input.version.trim() : "0.0.0";
@@ -1887,7 +1907,7 @@ function normalizeExtensionEntity(input: Partial<ExtensionEntity>): ExtensionEnt
 
 function normalizeExtensionSourceEntity(input: Partial<ExtensionSourceEntity>): ExtensionSourceEntity {
   const now = nowIso();
-  const id = typeof input.id === "string" && input.id.trim() ? input.id.trim() : createId("extension-source");
+  const id = createEntityId(input.id, "extension-source");
   const name = typeof input.name === "string" && input.name.trim() ? input.name.trim() : "Extension Source";
   const url = typeof input.url === "string" ? input.url.trim() : "";
   if (!url) throw Object.assign(new Error("Extension source URL cannot be empty"), { status: 400 });
@@ -1954,6 +1974,10 @@ function cleanRequiredName(value: unknown, message: string): string {
     throw Object.assign(new Error(message), { status: 400 });
   }
   return value.trim();
+}
+
+function createEntityId(value: unknown, prefix: string): string {
+  return typeof value === "string" && value.trim() ? value.trim() : createId(prefix);
 }
 
 function cleanColor(value: unknown, fallback: string): string {
