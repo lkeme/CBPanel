@@ -5,6 +5,9 @@ import path from "node:path";
 import { unzipSync } from "fflate";
 import {
   type BrowserEnvironment,
+  type ExtensionDirectoryCandidate,
+  type ExtensionDirectoryImportResult,
+  type ExtensionDirectoryPreviewResult,
   type ExtensionEntity,
   type ExtensionPermissionRisk,
   type ExtensionSourceEntity,
@@ -78,6 +81,47 @@ export class ExtensionService {
       installState: "installed",
       lastInstalledAt: nowIso(),
     });
+  }
+
+  async previewDirectory(directory: string): Promise<ExtensionDirectoryPreviewResult> {
+    if (!directory.trim()) {
+      throw Object.assign(new Error("Extension directory path cannot be empty"), { status: 400 });
+    }
+    const rootPath = path.resolve(directory.trim());
+    const direct = await readDirectManifestCandidate(rootPath);
+    if (direct) {
+      return { rootPath, direct, candidates: [] };
+    }
+
+    const candidates = await discoverChromeExtensionCandidates(rootPath);
+    if (candidates.length === 0) {
+      throw Object.assign(new Error(`Extension directory must directly contain manifest.json or Chrome extension version folders: ${rootPath}`), { status: 400 });
+    }
+    return { rootPath, candidates };
+  }
+
+  async importDirectories(paths: string[]): Promise<ExtensionDirectoryImportResult> {
+    const requestedPaths = paths.filter((input) => typeof input === "string" && input.trim());
+    const uniquePaths = uniqueResolvedPaths(requestedPaths);
+    if (uniquePaths.length === 0) {
+      throw Object.assign(new Error("No extension directories selected"), { status: 400 });
+    }
+    const imported: ExtensionEntity[] = [];
+    const failed: ExtensionDirectoryImportResult["failed"] = [];
+
+    for (const directory of uniquePaths) {
+      try {
+        imported.push(await this.importDirectory(directory));
+      } catch (error) {
+        failed.push({ path: directory, error: (error as Error).message });
+      }
+    }
+
+    return {
+      imported,
+      failed,
+      skipped: requestedPaths.length - uniquePaths.length,
+    };
   }
 
   async importZip(filePath: string): Promise<ExtensionEntity> {
@@ -544,6 +588,97 @@ function extensionFieldsFromManifest(manifest: ExtensionManifest): Pick<
     hostPermissions,
     permissionRisks: analyzePermissionRisks(permissions, hostPermissions),
   };
+}
+
+async function discoverChromeExtensionCandidates(rootPath: string): Promise<ExtensionDirectoryCandidate[]> {
+  const extensionDirectories = await listDirectories(rootPath);
+  const byPath = new Map<string, ExtensionDirectoryCandidate>();
+
+  for (const extensionDirectory of extensionDirectories) {
+    const extensionId = path.basename(extensionDirectory);
+    const versionDirectories = await listDirectories(extensionDirectory);
+    for (const versionDirectory of versionDirectories) {
+      const candidate = await readManifestCandidate(versionDirectory, extensionId);
+      if (candidate) byPath.set(candidate.path, candidate);
+    }
+  }
+
+  return [...byPath.values()].sort((left, right) =>
+    left.name.localeCompare(right.name) ||
+    left.version.localeCompare(right.version) ||
+    left.extensionId.localeCompare(right.extensionId) ||
+    left.path.localeCompare(right.path),
+  );
+}
+
+async function readDirectManifestCandidate(directory: string): Promise<ExtensionDirectoryCandidate | undefined> {
+  if (!(await manifestFileExists(directory))) return undefined;
+  const manifest = await readManifestFromDirectory(directory);
+  return manifestCandidateFromManifest(directory, inferExtensionId(directory), manifest);
+}
+
+async function readManifestCandidate(directory: string, extensionId: string): Promise<ExtensionDirectoryCandidate | undefined> {
+  try {
+    const manifest = await readManifestFromDirectory(directory);
+    return manifestCandidateFromManifest(directory, extensionId, manifest);
+  } catch {
+    return undefined;
+  }
+}
+
+function manifestCandidateFromManifest(directory: string, extensionId: string, manifest: ExtensionManifest): ExtensionDirectoryCandidate {
+  const fields = extensionFieldsFromManifest(manifest);
+  const resolvedPath = path.resolve(directory);
+  return {
+    id: sha256Hex(Buffer.from(resolvedPath, "utf8")).slice(0, 16),
+    extensionId,
+    name: fields.name,
+    version: fields.version,
+    manifestVersion: fields.manifestVersion,
+    path: resolvedPath,
+    permissionRisks: fields.permissionRisks,
+  };
+}
+
+async function manifestFileExists(directory: string): Promise<boolean> {
+  try {
+    await fs.access(path.join(path.resolve(directory), "manifest.json"), fsConstants.R_OK);
+    return true;
+  } catch (error) {
+    if (isMissingManifestError(error)) return false;
+    throw Object.assign(new Error(`Cannot read extension manifest: ${(error as Error).message}`), { status: 400 });
+  }
+}
+
+async function listDirectories(directory: string): Promise<string[]> {
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await fs.readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (isMissingManifestError(error)) return [];
+    throw Object.assign(new Error(`Cannot read extension directory: ${(error as Error).message}`), { status: 400 });
+  }
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(directory, entry.name));
+}
+
+function inferExtensionId(directory: string): string {
+  return path.basename(path.resolve(directory));
+}
+
+function uniqueResolvedPaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const uniquePaths: string[] = [];
+  for (const input of paths) {
+    if (typeof input !== "string" || !input.trim()) continue;
+    const resolved = path.resolve(input.trim());
+    const comparable = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    if (seen.has(comparable)) continue;
+    seen.add(comparable);
+    uniquePaths.push(resolved);
+  }
+  return uniquePaths;
 }
 
 function stringArray(value: unknown): string[] {

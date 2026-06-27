@@ -944,6 +944,23 @@ async function createApp(): Promise<express.Express> {
     }
   });
 
+  app.post("/api/extensions/import-directory/preview", async (request, response) => {
+    try {
+      response.json(await extensionService.previewDirectory(String(request.body?.path ?? "")));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.post("/api/extensions/import-directories", async (request, response) => {
+    try {
+      const paths = Array.isArray(request.body?.paths) ? request.body.paths.map((item: unknown) => String(item)) : [];
+      response.status(201).json(await extensionService.importDirectories(paths));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
   app.post("/api/extensions/import-zip", async (request, response) => {
     try {
       response.status(201).json(await extensionService.importZip(String(request.body?.path ?? "")));

@@ -3071,6 +3071,132 @@ textarea {
   white-space: nowrap;
 }
 
+.extension-import-preview {
+  display: grid;
+  gap: 10px;
+}
+
+.extension-import-preview-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.extension-import-preview-header strong {
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.extension-import-preview-header span {
+  color: var(--foreground-muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.extension-import-candidates {
+  display: grid;
+  max-height: min(360px, 42vh);
+  gap: 8px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.extension-import-candidate {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.extension-import-candidate input {
+  margin-top: 2px;
+}
+
+.extension-import-candidate-main {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.extension-import-candidate-title {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.extension-import-candidate-title strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.extension-import-candidate-title small {
+  color: var(--foreground-muted);
+  font-size: 12px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.extension-import-candidate-meta {
+  display: grid;
+  gap: 4px;
+  color: var(--foreground-muted);
+  font-size: 12px;
+}
+
+.extension-import-candidate-meta .mono-cell {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.extension-import-failures {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+}
+
+.extension-import-failures > strong {
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.extension-import-failure-list {
+  display: grid;
+  gap: 6px;
+}
+
+.extension-import-failure {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.extension-import-failure .mono-cell {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.extension-import-failure small {
+  color: var(--foreground-muted);
+  font-size: 12px;
+}
+
 .field > span,
 .toggle-field > span,
 .field-label {

@@ -2,7 +2,15 @@ import React, { useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
 import type { TranslationKey } from "../../i18n";
-import type { ExtensionSourceEntity, GroupEntity, ProxyEntity, TagEntity } from "../../shared/entities";
+import type {
+  ExtensionDirectoryCandidate,
+  ExtensionDirectoryImportResult,
+  ExtensionDirectoryPreviewResult,
+  ExtensionSourceEntity,
+  GroupEntity,
+  ProxyEntity,
+  TagEntity,
+} from "../../shared/entities";
 import { type ProxyScheme, nowIso, parseProxyUrlInput, proxyUrlFromParts } from "../../shared/profile";
 import { DialogShell } from "../ui/DialogShell";
 import { Field, Segmented, ToggleField } from "../ui/form-controls";
@@ -334,7 +342,9 @@ export function ExtensionImportDialog({
   busy,
   close,
   importArchive,
+  importDirectories,
   importDirectory,
+  previewDirectory,
   state,
   t,
 }: {
@@ -342,12 +352,17 @@ export function ExtensionImportDialog({
   busy: string;
   close: () => void;
   importArchive: (kind: "zip" | "crx", filePath: string) => Promise<void>;
+  importDirectories: (paths: string[]) => Promise<ExtensionDirectoryImportResult | null>;
   importDirectory: (directory: string) => Promise<void>;
+  previewDirectory: (directory: string) => Promise<ExtensionDirectoryPreviewResult | null>;
   state: NonNullable<ExtensionImportDialogState>;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }) {
   const [pathValue, setPathValue] = useState("");
   const [pathError, setPathError] = useState("");
+  const [directoryPreview, setDirectoryPreview] = useState<ExtensionDirectoryPreviewResult | null>(null);
+  const [directoryImportResult, setDirectoryImportResult] = useState<ExtensionDirectoryImportResult | null>(null);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string>>(() => new Set());
   const [sourceUrl, setSourceUrl] = useState("");
   const [sha256, setSha256] = useState("");
   const title =
@@ -363,7 +378,14 @@ export function ExtensionImportDialog({
         ? "extension-import-directory"
         : `extension-import-${state.kind}`;
   const isBusy = busy === busyKey;
-  const canSubmit = state.kind === "remote" ? Boolean(sourceUrl.trim() && sha256.trim()) : Boolean(pathValue.trim());
+  const selectedCandidates = directoryPreview?.candidates.filter((candidate) => selectedCandidateIds.has(candidate.id)) ?? [];
+  const hasDirectoryPreview = state.kind === "directory" && Boolean(directoryPreview?.candidates.length);
+  const canSubmit =
+    state.kind === "remote"
+      ? Boolean(sourceUrl.trim() && sha256.trim())
+      : hasDirectoryPreview
+        ? selectedCandidates.length > 0
+        : Boolean(pathValue.trim());
 
   async function pickDirectory() {
     if (!isTauri()) return;
@@ -372,10 +394,58 @@ export function ExtensionImportDialog({
       if (directory) {
         setPathValue(directory);
         setPathError("");
+        setDirectoryPreview(null);
+        setDirectoryImportResult(null);
+        setSelectedCandidateIds(new Set());
       }
     } catch (error) {
       setPathError(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  async function submit() {
+    if (state.kind === "remote") {
+      await addRemoteExtension({ sourceUrl, sha256 });
+      return;
+    }
+    if (state.kind !== "directory") {
+      await importArchive(state.kind, pathValue);
+      return;
+    }
+    if (hasDirectoryPreview) {
+      const result = await importDirectories(selectedCandidates.map((candidate) => candidate.path));
+      setDirectoryImportResult(result);
+      if (result?.failed.length) {
+        const failedPaths = new Set(result.failed.map((item) => item.path));
+        setSelectedCandidateIds(new Set(directoryPreview?.candidates.filter((candidate) => failedPaths.has(candidate.path)).map((candidate) => candidate.id)));
+      }
+      return;
+    }
+
+    setDirectoryImportResult(null);
+    const preview = await previewDirectory(pathValue);
+    if (!preview) return;
+    if (preview.direct) {
+      await importDirectory(preview.direct.path);
+      return;
+    }
+    setDirectoryPreview(preview);
+    setSelectedCandidateIds(new Set());
+  }
+
+  function toggleCandidate(candidateId: string, selected: boolean) {
+    setSelectedCandidateIds((current) => {
+      const next = new Set(current);
+      if (selected) next.add(candidateId);
+      else next.delete(candidateId);
+      return next;
+    });
+  }
+
+  function resetDirectoryPreview() {
+    setDirectoryPreview(null);
+    setDirectoryImportResult(null);
+    setSelectedCandidateIds(new Set());
   }
 
   return (
@@ -389,13 +459,15 @@ export function ExtensionImportDialog({
             className="command primary"
             disabled={!canSubmit || isBusy}
             onClick={() => {
-              if (state.kind === "remote") void addRemoteExtension({ sourceUrl, sha256 });
-              else if (state.kind === "directory") void importDirectory(pathValue);
-              else void importArchive(state.kind, pathValue);
+              void submit();
             }}
             type="button"
           >
-            {state.kind === "remote" ? t("actions.addRemoteExtension") : t("actions.import")}
+            {state.kind === "remote"
+              ? t("actions.addRemoteExtension")
+              : hasDirectoryPreview
+                ? t("extension.import.importSelected")
+                : t("actions.import")}
           </button>
         </>
       }
@@ -425,6 +497,8 @@ export function ExtensionImportDialog({
                 onChange={(event) => {
                   setPathValue(event.target.value);
                   if (pathError) setPathError("");
+                  if (directoryPreview) resetDirectoryPreview();
+                  else if (directoryImportResult) setDirectoryImportResult(null);
                 }}
                 placeholder={t(state.kind === "directory" ? "extension.import.directoryPlaceholder" : "extension.import.filePlaceholder")}
               />
@@ -447,8 +521,85 @@ export function ExtensionImportDialog({
           )}
         </div>
       )}
+      {state.kind === "directory" && directoryPreview && directoryPreview.candidates.length > 0 && (
+        <ExtensionDirectoryCandidatePreview
+          candidates={directoryPreview.candidates}
+          selectedIds={selectedCandidateIds}
+          t={t}
+          toggleCandidate={toggleCandidate}
+        />
+      )}
+      {state.kind === "directory" && directoryImportResult?.failed.length ? (
+        <ExtensionDirectoryImportFailures failed={directoryImportResult.failed} t={t} />
+      ) : null}
       <div className="preflight-empty">{t("extension.import.webPathNote")}</div>
     </DialogShell>
+  );
+}
+
+function ExtensionDirectoryCandidatePreview({
+  candidates,
+  selectedIds,
+  t,
+  toggleCandidate,
+}: {
+  candidates: ExtensionDirectoryCandidate[];
+  selectedIds: Set<string>;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  toggleCandidate: (candidateId: string, selected: boolean) => void;
+}) {
+  const selectedCount = candidates.filter((candidate) => selectedIds.has(candidate.id)).length;
+
+  return (
+    <div className="extension-import-preview">
+      <div className="extension-import-preview-header">
+        <strong>{t("extension.import.previewTitle")}</strong>
+        <span>{t("extension.import.selectedCount", { selected: selectedCount, total: candidates.length })}</span>
+      </div>
+      <div className="extension-import-candidates">
+        {candidates.map((candidate) => (
+          <label className="extension-import-candidate" key={candidate.id}>
+            <input
+              checked={selectedIds.has(candidate.id)}
+              onChange={(event) => toggleCandidate(candidate.id, event.currentTarget.checked)}
+              type="checkbox"
+            />
+            <span className="extension-import-candidate-main">
+              <span className="extension-import-candidate-title">
+                <strong>{candidate.name}</strong>
+                <small>{candidate.version}</small>
+              </span>
+              <span className="extension-import-candidate-meta">
+                <span className="mono-cell">{candidate.extensionId}</span>
+                <span className="mono-cell">{candidate.path}</span>
+              </span>
+            </span>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ExtensionDirectoryImportFailures({
+  failed,
+  t,
+}: {
+  failed: ExtensionDirectoryImportResult["failed"];
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  return (
+    <div className="extension-import-failures">
+      <strong>{t("extension.import.failedTitle", { count: failed.length })}</strong>
+      <div className="extension-import-failure-list">
+        {failed.map((item) => (
+          <div className="extension-import-failure" key={item.path}>
+            <span className="mono-cell">{item.path}</span>
+            <small>{item.error}</small>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

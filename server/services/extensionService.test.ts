@@ -44,6 +44,123 @@ test("local directory import rejects directories without a manifest", async () =
   repository.close();
 });
 
+test("directory preview returns a direct unpacked extension candidate", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const service = new ExtensionService({ repository, extensionCacheDir: path.join(directory, "extensions") });
+  const extensionDir = await writeExtensionDirectory(directory, "direct-extension", { name: "Direct Extension" });
+
+  const preview = await service.previewDirectory(extensionDir);
+
+  assert.equal(preview.rootPath, extensionDir);
+  assert.equal(preview.direct?.name, "Direct Extension");
+  assert.equal(preview.direct?.path, extensionDir);
+  assert.deepEqual(preview.candidates, []);
+
+  repository.close();
+});
+
+test("directory preview scans Chrome top-level Extensions folders", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const service = new ExtensionService({ repository, extensionCacheDir: path.join(directory, "extensions") });
+  const chromeRoot = path.join(directory, "Chrome", "User Data", "Default", "Extensions");
+  const first = await writeChromeExtensionVersionDirectory(chromeRoot, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "1.0.0_0", {
+    name: "Alpha Extension",
+    version: "1.0.0",
+  });
+  const second = await writeChromeExtensionVersionDirectory(chromeRoot, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "2.0.0", {
+    name: "Beta Extension",
+    version: "2.0.0",
+    permissions: ["cookies"],
+  });
+
+  const preview = await service.previewDirectory(chromeRoot);
+
+  assert.equal(preview.rootPath, chromeRoot);
+  assert.equal(preview.direct, undefined);
+  assert.deepEqual(preview.candidates.map((candidate) => candidate.path), [first, second]);
+  assert.deepEqual(preview.candidates.map((candidate) => candidate.extensionId), [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  ]);
+  assert.deepEqual(preview.candidates.map((candidate) => candidate.name), ["Alpha Extension", "Beta Extension"]);
+  assert.deepEqual(preview.candidates[1]?.permissionRisks.map((risk) => risk.permission), ["cookies"]);
+
+  repository.close();
+});
+
+test("selected directory import imports candidates and skips duplicate paths", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const service = new ExtensionService({ repository, extensionCacheDir: path.join(directory, "extensions") });
+  const chromeRoot = path.join(directory, "Extensions");
+  const first = await writeChromeExtensionVersionDirectory(chromeRoot, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "1.0.0_0", {
+    name: "Alpha Extension",
+    version: "1.0.0",
+  });
+  const second = await writeChromeExtensionVersionDirectory(chromeRoot, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "2.0.0", {
+    name: "Beta Extension",
+    version: "2.0.0",
+  });
+
+  const result = await service.importDirectories([first, first, second]);
+
+  assert.equal(result.imported.length, 2);
+  assert.equal(result.failed.length, 0);
+  assert.equal(result.skipped, 1);
+  assert.deepEqual(result.imported.map((extension) => extension.localPath), [first, second]);
+  assert.deepEqual((await repository.listExtensions()).map((extension) => extension.name).sort(), ["Alpha Extension", "Beta Extension"]);
+
+  repository.close();
+});
+
+test("selected directory import keeps successes when one candidate fails", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const service = new ExtensionService({ repository, extensionCacheDir: path.join(directory, "extensions") });
+  const good = await writeExtensionDirectory(directory, "good-extension", { name: "Good Extension" });
+  const bad = path.join(directory, "missing-extension");
+
+  const result = await service.importDirectories([good, bad]);
+
+  assert.equal(result.imported.length, 1);
+  assert.equal(result.imported[0]?.name, "Good Extension");
+  assert.equal(result.failed.length, 1);
+  assert.equal(result.failed[0]?.path, bad);
+  assert.match(result.failed[0]?.error ?? "", /must directly contain manifest\.json/);
+
+  repository.close();
+});
+
+test("directory preview rejects parent directories without extension candidates", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const service = new ExtensionService({ repository, extensionCacheDir: path.join(directory, "extensions") });
+  const parentDirectory = path.join(directory, "Extensions");
+  await fs.mkdir(path.join(parentDirectory, "not-an-extension", "empty"), { recursive: true });
+
+  await assert.rejects(
+    service.previewDirectory(parentDirectory),
+    /directly contain manifest\.json or Chrome extension version folders/,
+  );
+
+  repository.close();
+});
+
+test("directory preview rejects empty paths instead of scanning the process directory", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const service = new ExtensionService({ repository, extensionCacheDir: path.join(directory, "extensions") });
+
+  await assert.rejects(
+    service.previewDirectory(" "),
+    /path cannot be empty/,
+  );
+
+  repository.close();
+});
+
 test("local ZIP import unpacks into extension cache and reads manifest", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
@@ -318,6 +435,22 @@ async function writeExtensionDirectory(
   manifestPatch: Record<string, unknown> = {},
 ): Promise<string> {
   const directory = path.join(root, name);
+  await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(
+    path.join(directory, "manifest.json"),
+    `${JSON.stringify({ ...extensionManifest(), ...manifestPatch }, null, 2)}\n`,
+    "utf8",
+  );
+  return directory;
+}
+
+async function writeChromeExtensionVersionDirectory(
+  root: string,
+  extensionId: string,
+  versionDirectoryName: string,
+  manifestPatch: Record<string, unknown> = {},
+): Promise<string> {
+  const directory = path.join(root, extensionId, versionDirectoryName);
   await fs.mkdir(directory, { recursive: true });
   await fs.writeFile(
     path.join(directory, "manifest.json"),

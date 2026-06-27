@@ -789,8 +789,10 @@ function App() {
     deleteExtension,
     deleteExtensionSource,
     importExtensionArchivePath,
+    importExtensionDirectoryPaths,
     importExtensionDirectoryPath,
     installExtension,
+    previewExtensionDirectoryPath,
     refreshExtensionSource,
     reinstallExtension,
     saveExtensionSourceDraft,
@@ -1409,7 +1411,9 @@ function App() {
             busy={busy}
             close={() => setExtensionImport(null)}
             importArchive={importExtensionArchivePath}
+            importDirectories={importExtensionDirectoryPaths}
             importDirectory={importExtensionDirectoryPath}
+            previewDirectory={previewExtensionDirectoryPath}
             state={extensionImport}
             t={t}
           />

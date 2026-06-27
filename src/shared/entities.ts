@@ -160,6 +160,33 @@ export interface ExtensionSourceRefreshResult {
   extensions: ExtensionEntity[];
 }
 
+export interface ExtensionDirectoryCandidate {
+  id: string;
+  extensionId: string;
+  name: string;
+  version: string;
+  manifestVersion?: number;
+  path: string;
+  permissionRisks: ExtensionPermissionRisk[];
+}
+
+export interface ExtensionDirectoryPreviewResult {
+  rootPath: string;
+  direct?: ExtensionDirectoryCandidate;
+  candidates: ExtensionDirectoryCandidate[];
+}
+
+export interface ExtensionDirectoryImportFailure {
+  path: string;
+  error: string;
+}
+
+export interface ExtensionDirectoryImportResult {
+  imported: ExtensionEntity[];
+  failed: ExtensionDirectoryImportFailure[];
+  skipped: number;
+}
+
 export interface BrowserEnvironment {
   id: string;
   name: string;

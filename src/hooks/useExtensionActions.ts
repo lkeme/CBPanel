@@ -4,7 +4,13 @@ import type { TranslationKey } from "../i18n";
 import type { ExtensionImportDialogState } from "../components/registry/RegistryDialogs";
 import type { ConfirmDialogState } from "../components/ui/ConfirmDialog";
 import { api, errorMessage, referenceErrorMessage } from "../lib/apiClient";
-import type { ExtensionEntity, ExtensionSourceEntity, ExtensionSourceRefreshResult } from "../shared/entities";
+import type {
+  ExtensionDirectoryImportResult,
+  ExtensionDirectoryPreviewResult,
+  ExtensionEntity,
+  ExtensionSourceEntity,
+  ExtensionSourceRefreshResult,
+} from "../shared/entities";
 import type { BrowserProfile } from "../shared/profile";
 
 type ExtensionSourceEditorState =
@@ -48,6 +54,43 @@ export function useExtensionActions({
       toast("success", t("toast.extensionImported"));
     } catch (error) {
       toast("error", errorMessage(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function previewExtensionDirectoryPath(directory: string): Promise<ExtensionDirectoryPreviewResult | null> {
+    if (!directory.trim()) return null;
+    setBusy("extension-import-directory");
+    try {
+      return await api<ExtensionDirectoryPreviewResult>("/api/extensions/import-directory/preview", {
+        method: "POST",
+        body: JSON.stringify({ path: directory.trim() }),
+      });
+    } catch (error) {
+      toast("error", errorMessage(error));
+      return null;
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function importExtensionDirectoryPaths(paths: string[]): Promise<ExtensionDirectoryImportResult | null> {
+    if (paths.length === 0) return null;
+    setBusy("extension-import-directory");
+    try {
+      const result = await api<ExtensionDirectoryImportResult>("/api/extensions/import-directories", {
+        method: "POST",
+        body: JSON.stringify({ paths }),
+      });
+      await loadState();
+      const params = { imported: result.imported.length, failed: result.failed.length, skipped: result.skipped };
+      toast(result.failed.length ? "info" : "success", t(result.failed.length ? "toast.extensionImportPartial" : "toast.extensionImportBatchDone", params));
+      if (result.failed.length === 0) setExtensionImport(null);
+      return result;
+    } catch (error) {
+      toast("error", errorMessage(error));
+      return null;
     } finally {
       setBusy("");
     }
@@ -366,8 +409,10 @@ export function useExtensionActions({
     deleteExtension,
     deleteExtensionSource,
     importExtensionArchivePath,
+    importExtensionDirectoryPaths,
     importExtensionDirectoryPath,
     installExtension,
+    previewExtensionDirectoryPath,
     refreshExtensionSource,
     reinstallExtension,
     saveExtensionSourceDraft,
