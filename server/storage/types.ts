@@ -11,6 +11,25 @@ import type {
 } from "../../src/shared/entities";
 import type { AppSettings, AppSettingsPatch, StorageInfo } from "../../src/shared/settings";
 
+export type EnvironmentPackageImportInput = {
+  environments: BrowserEnvironment[];
+  groups: GroupEntity[];
+  extensions: ExtensionEntity[];
+  environmentIdMap?: Record<string, string>;
+  extensionIdMap?: Record<string, string>;
+  extensionLocalPaths?: Record<string, string>;
+};
+
+export type EnvironmentPackageImportResult = {
+  imported: number;
+  environments: BrowserEnvironment[];
+  idMap: {
+    environments: Record<string, string>;
+    groups: Record<string, string>;
+    extensions: Record<string, string>;
+  };
+};
+
 export interface ProfileRepository {
   listProfiles(): Promise<BrowserProfile[]>;
   getProfile(id: string): Promise<BrowserProfile | undefined>;
@@ -44,6 +63,7 @@ export interface EnvironmentRepository {
   restoreEnvironment(id: string): Promise<BrowserEnvironment>;
   permanentlyDeleteEnvironment(id: string): Promise<void>;
   clearTrashEnvironments(): Promise<{ deleted: number }>;
+  importEnvironmentPackage(input: EnvironmentPackageImportInput): Promise<EnvironmentPackageImportResult>;
 }
 
 export interface RegistryRepository {

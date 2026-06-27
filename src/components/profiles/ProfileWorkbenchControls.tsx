@@ -32,11 +32,12 @@ type ProfileWorkbenchControlsProps = {
   modeFilter: ModeFilter;
   tagFilters: string[];
   batchDelete: () => Promise<void>;
-  batchExport: () => void;
+  batchExport: () => Promise<void>;
   batchGroupOrTag: () => Promise<void>;
   batchLaunch: () => Promise<void>;
   batchStop: () => Promise<void>;
   exportProfiles: () => Promise<void>;
+  importEnvironmentPackage: () => Promise<void>;
   importProfiles: (file: File) => Promise<void>;
   loadState: () => Promise<void>;
   openColumns: () => void;
@@ -71,6 +72,7 @@ export function ProfileWorkbenchControls({
   batchLaunch,
   batchStop,
   exportProfiles,
+  importEnvironmentPackage,
   importProfiles,
   loadState,
   openColumns,
@@ -129,7 +131,7 @@ export function ProfileWorkbenchControls({
               if (file) void importProfiles(file);
             }}
           />
-          <button className="icon-button" aria-label={t("actions.import")} title={t("actions.import")} onClick={() => importInput.current?.click()} type="button">
+          <button className="icon-button" aria-label={t("actions.import")} title={t("actions.import")} onClick={() => void importEnvironmentPackage()} type="button">
             <FileInput size={17} aria-hidden="true" />
           </button>
           <button className="icon-button" aria-label={t("actions.export")} title={t("actions.export")} onClick={() => void exportProfiles()} type="button">
@@ -221,7 +223,7 @@ export function ProfileWorkbenchControls({
             <Layers3 size={17} />
             {t("batch.group")}
           </button>
-          <button className="command" onClick={batchExport} type="button">
+          <button className="command" onClick={() => void batchExport()} type="button">
             <Download size={17} />
             {t("batch.export")}
           </button>

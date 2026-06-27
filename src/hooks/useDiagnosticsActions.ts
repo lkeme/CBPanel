@@ -12,7 +12,7 @@ export function useDiagnosticsActions({
   t,
   toast,
 }: {
-  downloadTextFile: (content: string, filename: string, type: string) => void;
+  downloadTextFile: (content: string, filename: string, type: string) => Promise<boolean>;
   diagnostics: SystemDiagnostics | null;
   setBusy: Dispatch<SetStateAction<string>>;
   setDiagnostics: Dispatch<SetStateAction<SystemDiagnostics | null>>;
@@ -55,10 +55,14 @@ export function useDiagnosticsActions({
     }
   }
 
-  function exportDiagnostics() {
+  async function exportDiagnostics() {
     if (!diagnostics) return;
-    downloadTextFile(`${JSON.stringify(diagnostics, null, 2)}\n`, "cbpanel-diagnostics.json", "application/json");
-    toast("success", t("toast.exported"));
+    try {
+      const saved = await downloadTextFile(`${JSON.stringify(diagnostics, null, 2)}\n`, "cbpanel-diagnostics.json", "application/json");
+      if (saved) toast("success", t("toast.exported"));
+    } catch (error) {
+      toast("error", (error as Error).message);
+    }
   }
 
   return {

@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { type Root, createRoot } from "react-dom/client";
 import {
   Check,
@@ -12,6 +12,7 @@ import { AppSidebar } from "./components/app/AppSidebar";
 import { DesktopTitlebar } from "./components/app/DesktopTitlebar";
 import type { BrowserCoreImportDialogState } from "./components/browser-core/BrowserCoreImportDialog";
 import { browserCoreOperationActive, isBrowserCoreBusy } from "./components/browser-core/BrowserCoreStatusPanels";
+import { EnvironmentPackageOperationDialog } from "./components/profiles/EnvironmentPackageOperationDialog";
 import {
   DetailsDrawer,
   ProfileInspectorAside,
@@ -60,6 +61,7 @@ import {
   type BinaryInfo,
   shouldRunStartupBrowserCoreUpdateCheck,
 } from "./shared/browserCore";
+import type { EnvironmentPackageOperation } from "./shared/environmentPackage";
 import {
   type AppSettings,
   type AppSettingsPatch,
@@ -191,6 +193,7 @@ function App() {
   const [extensionImport, setExtensionImport] = useState<ExtensionImportDialogState>(null);
   const [extensionSourceEditor, setExtensionSourceEditor] = useState<ExtensionSourceEditorState>(null);
   const [browserCoreImport, setBrowserCoreImport] = useState<BrowserCoreImportDialogState>(null);
+  const [environmentPackageOperation, setEnvironmentPackageOperation] = useState<EnvironmentPackageOperation | null>(null);
   const [proxyCheck, setProxyCheck] = useState("");
   const [binaryInfo, setBinaryInfo] = useState<BinaryInfo | null>(null);
   const [preflight, setPreflight] = useState<ProfilePreflightReport | null>(null);
@@ -810,6 +813,7 @@ function App() {
     copySnapshotMarkdown,
     downloadSnapshot,
     exportProfiles,
+    importEnvironmentPackage,
     importProfiles,
   } = useProfileUtilityActions({
     batchLaunch: launchSelectedProfiles,
@@ -824,6 +828,7 @@ function App() {
     setConfirmDialog,
     setSelectedIds,
     setState,
+    setEnvironmentPackageOperation,
     setTextInputDialog,
     t,
     toast,
@@ -1030,6 +1035,7 @@ function App() {
                 batchLaunch={batchLaunch}
                 batchStop={batchStop}
                 exportProfiles={exportProfiles}
+                importEnvironmentPackage={importEnvironmentPackage}
                 importProfiles={importProfiles}
                 loadState={loadState}
                 openColumns={() => setDrawerMode("columns")}
@@ -1362,6 +1368,13 @@ function App() {
         </Suspense>
       )}
 
+      {environmentPackageOperation && (
+        <EnvironmentPackageOperationDialog
+          operation={environmentPackageOperation}
+          t={t}
+        />
+      )}
+
       <Suspense fallback={<LazyModalFallback t={t} />}>
         {proxyReference && (
           <ProxyReferenceDialog
@@ -1477,14 +1490,22 @@ function applyAppearance(settings: AppSettings): void {
   root.style.setProperty("--font-size-code", `${normalized.appearance.codeFontSize}px`);
 }
 
-function downloadTextFile(content: string, filename: string, type: string): void {
+async function downloadTextFile(content: string, filename: string, type: string): Promise<boolean> {
+  if (isTauri()) {
+    return await invoke<boolean>("cbpanel_save_text_file", { filename, content, contentType: type });
+  }
+
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
+  link.style.display = "none";
+  document.body.append(link);
   link.click();
-  URL.revokeObjectURL(url);
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  return true;
 }
 
 const rootElement = document.getElementById("root") as (HTMLElement & { __cbpanelRoot?: Root }) | null;

@@ -35,7 +35,7 @@ import {
   normalizeSettings,
 } from "../../src/shared/settings";
 import { seedProfiles } from "./seedProfiles";
-import type { PanelRepository } from "./types";
+import type { EnvironmentPackageImportInput, EnvironmentPackageImportResult, PanelRepository } from "./types";
 
 type SqliteStoreOptions = {
   dataDir: string;
@@ -151,7 +151,7 @@ type IdRow = {
   id: string;
 };
 
-type IdentityTable = "profiles" | "groups" | "tags" | "proxies" | "extensions" | "extension_sources";
+type IdentityTable = "profiles" | "browser_environments" | "groups" | "tags" | "proxies" | "extensions" | "extension_sources";
 
 type SettingsRow = {
   settings_json: string;
@@ -395,6 +395,55 @@ export class SqlitePanelRepository implements PanelRepository {
       throw error;
     }
     return { deleted: trashIds.length };
+  }
+
+  async importEnvironmentPackage(input: EnvironmentPackageImportInput): Promise<EnvironmentPackageImportResult> {
+    await this.initialize();
+    const db = this.database();
+    const groupIdMap: Record<string, string> = {};
+    const extensionIdMap: Record<string, string> = {};
+    const environmentIdMap: Record<string, string> = {};
+    const importedIds: string[] = [];
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const group of input.groups) {
+        const localGroup = this.ensurePackageGroup(group);
+        groupIdMap[group.id] = localGroup.id;
+      }
+
+      for (const extension of input.extensions) {
+        const localExtension = this.ensurePackageExtension(
+          extension,
+          input.extensionIdMap?.[extension.id],
+          input.extensionLocalPaths?.[extension.id],
+        );
+        extensionIdMap[extension.id] = localExtension.id;
+      }
+
+      for (const environment of input.environments) {
+        const requestedId = input.environmentIdMap?.[environment.id];
+        const imported = this.insertImportedEnvironment(environment, groupIdMap, extensionIdMap, requestedId);
+        environmentIdMap[environment.id] = imported.id;
+        importedIds.push(imported.id);
+      }
+
+      this.markProfilesModified();
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    return {
+      imported: importedIds.length,
+      environments: importedIds.map((id) => this.getEnvironmentOrThrow(id)),
+      idMap: {
+        environments: environmentIdMap,
+        groups: groupIdMap,
+        extensions: extensionIdMap,
+      },
+    };
   }
 
   async listGroups(): Promise<GroupEntity[]> {
@@ -1218,6 +1267,137 @@ export class SqlitePanelRepository implements PanelRepository {
       .prepare(`SELECT * FROM browser_environments ${where} ORDER BY updated_at DESC`)
       .all()
       .map((row) => this.environmentFromRow(row as EnvironmentRow));
+  }
+
+  private ensurePackageGroup(group: GroupEntity): GroupEntity {
+    const cleanName = group.name.trim() || "默认";
+    const existing = this.database()
+      .prepare("SELECT * FROM groups WHERE name = ?")
+      .get(cleanName) as GroupRow | undefined;
+    if (existing) return groupFromRow(existing);
+
+    const timestamp = nowIso();
+    const importedGroup: GroupEntity = {
+      ...group,
+      id: createId("group"),
+      name: cleanName,
+      color: cleanColor(group.color, colorForName(cleanName)),
+      order: Number.isFinite(group.order) ? Number(group.order) : this.nextSortOrder("groups"),
+      status: group.status === "disabled" ? "disabled" : "enabled",
+      isDefault: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    this.insertGroup(importedGroup);
+    return importedGroup;
+  }
+
+  private ensurePackageExtension(extension: ExtensionEntity, requestedId: string | undefined, localPath: string | undefined): ExtensionEntity {
+    const cleanRequestedId = requestedId?.trim();
+    if (cleanRequestedId) {
+      const existing = this.database()
+        .prepare("SELECT * FROM extensions WHERE id = ? LIMIT 1")
+        .get(cleanRequestedId) as ExtensionRow | undefined;
+      if (existing) return extensionFromRow(existing);
+    }
+
+    const timestamp = nowIso();
+    const restoredFiles = Boolean(localPath);
+    const missingInstalledFiles = !restoredFiles && extension.installState === "installed";
+    const importedExtension = normalizeExtensionEntity({
+      ...extension,
+      id: cleanRequestedId,
+      sourceKind: "local-directory",
+      sourceUrl: localPath ?? extension.sourceUrl,
+      sourceId: undefined,
+      localPath,
+      installState: missingInstalledFiles ? "local-missing" : restoredFiles ? "installed" : extension.installState,
+      lastInstalledAt: restoredFiles ? timestamp : undefined,
+      lastCheckedAt: undefined,
+      lastError: restoredFiles ? undefined : missingInstalledFiles ? "Extension files missing from imported package." : extension.lastError,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    this.assertUnusedId("extensions", importedExtension.id);
+    this.insertExtension(importedExtension);
+    return importedExtension;
+  }
+
+  private insertImportedEnvironment(
+    environment: BrowserEnvironment,
+    groupIdMap: Record<string, string>,
+    extensionIdMap: Record<string, string>,
+    requestedId: string | undefined,
+  ): BrowserEnvironment {
+    const timestamp = nowIso();
+    const id = requestedId?.trim() || createId();
+    this.assertUnusedId("profiles", id);
+    this.assertUnusedId("browser_environments", id);
+
+    const groupId = groupIdMap[environment.groupId] ?? this.ensureGroup(environment.runtimeProfile.group, timestamp).id;
+    const group = this.getGroupOrThrow(groupId);
+    const extensionIds = uniqueStrings(environment.extensionIds.map((extensionId) => extensionIdMap[extensionId]).filter(Boolean));
+    const extensionPaths = extensionIds
+      .map((extensionId) => this.getExtensionOrThrow(extensionId))
+      .filter((extension) => extension.status === "enabled" && extension.installState === "installed" && extension.localPath)
+      .map((extension) => extension.localPath as string);
+    const profileName = this.nextImportedProfileName(environment.name || environment.runtimeProfile.name);
+    const runtimeProfile = normalizeProfile({
+      ...environment.runtimeProfile,
+      id,
+      name: profileName,
+      group: group.name,
+      tags: [...environment.runtimeProfile.tags],
+      runtime: {
+        ...environment.runtimeProfile.runtime,
+        extensionPaths,
+      },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    this.ensureTags(runtimeProfile.tags, timestamp);
+    this.upsertProfileRow(runtimeProfile);
+    this.database()
+      .prepare(`
+        INSERT INTO browser_environments (
+          id, name, notes, mode, start_url, group_id, proxy_id, runtime_profile_json, last_network_check_json,
+          created_at, updated_at, deleted_at, delete_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL)
+      `)
+      .run(
+        id,
+        runtimeProfile.name,
+        environment.notes,
+        runtimeProfile.mode,
+        runtimeProfile.startUrl,
+        groupId,
+        JSON.stringify(runtimeProfile),
+        environment.lastNetworkCheck ? JSON.stringify(environment.lastNetworkCheck) : null,
+        timestamp,
+        timestamp,
+      );
+    this.replaceEnvironmentTags(id, runtimeProfile.tags);
+    for (const extensionId of extensionIds) {
+      this.database()
+        .prepare("INSERT OR IGNORE INTO environment_extensions (environment_id, extension_id) VALUES (?, ?)")
+        .run(id, extensionId);
+    }
+    this.upsertProfileRow(this.profileFromEnvironment(this.getEnvironmentOrThrow(id)));
+    return this.getEnvironmentOrThrow(id);
+  }
+
+  private nextImportedProfileName(baseName: string): string {
+    const cleanBase = baseName.trim() || "Imported Environment";
+    const names = new Set(this.readAllProfileRows().map((profile) => normalizeProfileNameKey(profile.name)));
+    if (!names.has(normalizeProfileNameKey(cleanBase))) return cleanBase;
+    const first = `${cleanBase} import`;
+    if (!names.has(normalizeProfileNameKey(first))) return first;
+    for (let index = 2; index < 10_000; index += 1) {
+      const candidate = `${first} ${index}`;
+      if (!names.has(normalizeProfileNameKey(candidate))) return candidate;
+    }
+    return `${first} ${Date.now()}`;
   }
 
   private upsertEnvironmentFromProfile(profile: BrowserProfile): void {

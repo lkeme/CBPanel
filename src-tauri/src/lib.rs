@@ -13,6 +13,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, RunEvent, WindowEvent,
 };
+use tauri_plugin_dialog::DialogExt;
 
 #[cfg(target_os = "windows")]
 use webview2_com::{
@@ -36,6 +37,10 @@ const TRAY_OPEN_ID: &str = "tray-open";
 const TRAY_SETTINGS_ID: &str = "tray-settings";
 const TRAY_QUIT_ID: &str = "tray-quit";
 const TRAY_ACTION_EVENT: &str = "cbpanel-tray-action";
+const JSON_EXPORT_EXTENSIONS: &[&str] = &["json"];
+const MARKDOWN_EXPORT_EXTENSIONS: &[&str] = &["md", "markdown"];
+const TEXT_EXPORT_EXTENSIONS: &[&str] = &["txt"];
+const ENVIRONMENT_PACKAGE_EXTENSIONS: &[&str] = &["cbpe"];
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -187,6 +192,133 @@ fn cbpanel_update_tray_state(app: tauri::AppHandle, running_count: u32, sidecar_
     update_tray_tooltip(&app, running_count, &sidecar_status);
 }
 
+#[tauri::command]
+async fn cbpanel_save_text_file(
+    app: tauri::AppHandle,
+    filename: String,
+    content: String,
+    content_type: String,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_text_file_with_dialog(app, filename, content, content_type)
+    })
+    .await
+    .map_err(|error| format!("Export task failed: {error}."))?
+}
+
+fn save_text_file_with_dialog(
+    app: tauri::AppHandle,
+    filename: String,
+    content: String,
+    content_type: String,
+) -> Result<bool, String> {
+    let filename = sanitize_export_filename(&filename);
+    let (filter_name, extensions) = export_file_filter(&filename, &content_type);
+    let Some(file_path) = app
+        .dialog()
+        .file()
+        .set_title("Save export file")
+        .set_file_name(filename)
+        .add_filter(filter_name, extensions)
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+
+    let path = file_path
+        .into_path()
+        .map_err(|error| format!("Invalid export path: {error}."))?;
+    std::fs::write(&path, content)
+        .map_err(|error| format!("Could not write export file {}: {error}.", path.display()))?;
+    Ok(true)
+}
+
+fn sanitize_export_filename(filename: &str) -> String {
+    let trimmed = filename.trim();
+    let basename = Path::new(trimmed)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(trimmed)
+        .trim();
+    let safe = basename
+        .chars()
+        .map(|char| match char {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
+            _ => char,
+        })
+        .collect::<String>();
+    let safe = safe.trim().trim_matches('.').to_string();
+    if safe.is_empty() {
+        "cbpanel-export.json".into()
+    } else {
+        safe
+    }
+}
+
+fn export_file_filter(filename: &str, content_type: &str) -> (&'static str, &'static [&'static str]) {
+    let filename = filename.to_ascii_lowercase();
+    let content_type = content_type.to_ascii_lowercase();
+    if filename.ends_with(".json") || content_type.contains("json") {
+        ("JSON", JSON_EXPORT_EXTENSIONS)
+    } else if filename.ends_with(".md")
+        || filename.ends_with(".markdown")
+        || content_type.contains("markdown")
+    {
+        ("Markdown", MARKDOWN_EXPORT_EXTENSIONS)
+    } else {
+        ("Text", TEXT_EXPORT_EXTENSIONS)
+    }
+}
+
+#[tauri::command]
+async fn cbpanel_select_environment_package_save_path(
+    app: tauri::AppHandle,
+    filename: String,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let filename = sanitize_export_filename(&filename);
+        let Some(file_path) = app
+            .dialog()
+            .file()
+            .set_title("Save environment package")
+            .set_file_name(filename)
+            .add_filter("CBPanel Environment Package", ENVIRONMENT_PACKAGE_EXTENSIONS)
+            .blocking_save_file()
+        else {
+            return Ok(None);
+        };
+        let path = file_path
+            .into_path()
+            .map_err(|error| format!("Invalid package path: {error}."))?;
+        Ok(Some(path.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|error| format!("Package picker task failed: {error}."))?
+}
+
+#[tauri::command]
+async fn cbpanel_select_environment_package_open_path(
+    app: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(file_path) = app
+            .dialog()
+            .file()
+            .set_title("Open environment package")
+            .add_filter("CBPanel Environment Package", ENVIRONMENT_PACKAGE_EXTENSIONS)
+            .blocking_pick_file()
+        else {
+            return Ok(None);
+        };
+        let path = file_path
+            .into_path()
+            .map_err(|error| format!("Invalid package path: {error}."))?;
+        Ok(Some(path.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|error| format!("Package picker task failed: {error}."))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let runtime_state = Mutex::new(RuntimeState {
@@ -210,6 +342,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             cbpanel_runtime_config,
             cbpanel_app_quit,
+            cbpanel_save_text_file,
+            cbpanel_select_environment_package_save_path,
+            cbpanel_select_environment_package_open_path,
             cbpanel_update_tray_state,
             cbpanel_window_close,
             cbpanel_window_hide_to_tray,

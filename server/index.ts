@@ -15,6 +15,7 @@ import { resolveNetworkTraceProvider } from "../src/shared/settings";
 import { BinaryService } from "./services/binaryService";
 import { DesktopRuntimeService } from "./services/desktopRuntimeService";
 import { ExtensionService } from "./services/extensionService";
+import { EnvironmentPackageService } from "./services/environmentPackageService";
 import { GithubMirrorProbeService } from "./services/githubMirrorProbeService";
 import { ProxyService } from "./services/proxyService";
 import { SessionService } from "./services/sessionService";
@@ -63,6 +64,14 @@ const sessionService = new SessionService({
   readSettings: () => repository.getSettings(),
 });
 const proxyService = new ProxyService();
+const environmentPackageService = new EnvironmentPackageService({
+  repository,
+  browserDataDir: BROWSER_DATA_DIR,
+  extensionCacheDir: path.join(DATA_DIR, "extensions"),
+  activeEnvironmentIds: () => new Set(sessionService.listSessions()
+    .filter((session) => session.status === "running" || session.status === "launching" || session.status === "stopping")
+    .map((session) => session.profileId)),
+});
 const githubMirrorProbeService = new GithubMirrorProbeService();
 const desktopRuntimeService = new DesktopRuntimeService({
   shellMode: SHELL_MODE,
@@ -539,6 +548,40 @@ async function createApp(): Promise<express.Express> {
     } catch (error) {
       sendError(response, error);
     }
+  });
+
+  app.post("/api/environment-packages/export", (request, response) => {
+    try {
+      const outputPath = typeof request.body?.outputPath === "string" ? request.body.outputPath.trim() : "";
+      if (!outputPath) throw Object.assign(new Error("Environment package output path is required."), { status: 400 });
+      const environmentIds = Array.isArray(request.body?.environmentIds)
+        ? request.body.environmentIds.map((id: unknown) => String(id)).filter(Boolean)
+        : undefined;
+      const operation = environmentPackageService.startExport({ environmentIds, outputPath });
+      response.status(202).json({ operationId: operation.id, operation });
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.post("/api/environment-packages/import", (request, response) => {
+    try {
+      const inputPath = typeof request.body?.inputPath === "string" ? request.body.inputPath.trim() : "";
+      if (!inputPath) throw Object.assign(new Error("Environment package input path is required."), { status: 400 });
+      const operation = environmentPackageService.startImport({ inputPath });
+      response.status(202).json({ operationId: operation.id, operation });
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.get("/api/environment-packages/operations/:id", (request, response) => {
+    const operation = environmentPackageService.getOperation(request.params.id);
+    if (!operation) {
+      response.status(404).json({ error: "Environment package operation does not exist." });
+      return;
+    }
+    response.json(operation);
   });
 
   app.get("/api/environments/:id", async (request, response) => {
