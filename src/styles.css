@@ -3059,6 +3059,18 @@ textarea {
   grid-column: 1 / -1;
 }
 
+.path-picker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.path-picker-row .command {
+  min-height: 38px;
+  white-space: nowrap;
+}
+
 .field > span,
 .toggle-field > span,
 .field-label {

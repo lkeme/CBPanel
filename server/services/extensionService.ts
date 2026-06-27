@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { unzipSync } from "fflate";
 import {
@@ -491,8 +492,12 @@ export async function readManifestFromDirectory(directory: string): Promise<Exte
   const manifestPath = path.join(path.resolve(directory), "manifest.json");
   let manifest: unknown;
   try {
+    await fs.access(manifestPath, fsConstants.R_OK);
     manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   } catch (error) {
+    if (isMissingManifestError(error)) {
+      throw Object.assign(new Error(`Extension directory must directly contain manifest.json: ${path.resolve(directory)}`), { status: 400 });
+    }
     throw Object.assign(new Error(`Invalid extension manifest: ${(error as Error).message}`), { status: 400 });
   }
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
@@ -503,6 +508,12 @@ export async function readManifestFromDirectory(directory: string): Promise<Exte
     throw Object.assign(new Error("Extension manifest must include name, version, and manifest_version"), { status: 400 });
   }
   return candidate;
+}
+
+function isMissingManifestError(error: unknown): boolean {
+  if (!(error instanceof Error) || !("code" in error)) return false;
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR";
 }
 
 export function analyzePermissionRisks(permissions: string[], hostPermissions: string[]): ExtensionPermissionRisk[] {

@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
 import type { TranslationKey } from "../../i18n";
 import type { ExtensionSourceEntity, GroupEntity, ProxyEntity, TagEntity } from "../../shared/entities";
@@ -346,6 +347,7 @@ export function ExtensionImportDialog({
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }) {
   const [pathValue, setPathValue] = useState("");
+  const [pathError, setPathError] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
   const [sha256, setSha256] = useState("");
   const title =
@@ -362,6 +364,19 @@ export function ExtensionImportDialog({
         : `extension-import-${state.kind}`;
   const isBusy = busy === busyKey;
   const canSubmit = state.kind === "remote" ? Boolean(sourceUrl.trim() && sha256.trim()) : Boolean(pathValue.trim());
+
+  async function pickDirectory() {
+    if (!isTauri()) return;
+    try {
+      const directory = await invoke<string | null>("cbpanel_select_extension_directory");
+      if (directory) {
+        setPathValue(directory);
+        setPathError("");
+      }
+    } catch (error) {
+      setPathError(error instanceof Error ? error.message : String(error));
+    }
+  }
 
   return (
     <DialogShell
@@ -404,7 +419,22 @@ export function ExtensionImportDialog({
       ) : (
         <div className="form-grid two compact-section">
           <Field label={t("form.path")} wide>
-            <input value={pathValue} onChange={(event) => setPathValue(event.target.value)} placeholder={t(state.kind === "directory" ? "extension.import.directoryPlaceholder" : "extension.import.filePlaceholder")} />
+            <div className="path-picker-row">
+              <input
+                value={pathValue}
+                onChange={(event) => {
+                  setPathValue(event.target.value);
+                  if (pathError) setPathError("");
+                }}
+                placeholder={t(state.kind === "directory" ? "extension.import.directoryPlaceholder" : "extension.import.filePlaceholder")}
+              />
+              {state.kind === "directory" && isTauri() && (
+                <button className="command subtle" disabled={isBusy} onClick={() => void pickDirectory()} type="button">
+                  {t("extension.import.pickDirectory")}
+                </button>
+              )}
+            </div>
+            {pathError && <div className="result-line danger">{pathError}</div>}
           </Field>
           {(state.kind === "zip" || state.kind === "crx") && (
             <Field label={t("extension.import.pickFile")} wide>

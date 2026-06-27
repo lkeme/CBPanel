@@ -369,6 +369,26 @@ async fn cbpanel_select_app_backup_open_path(
     .map_err(|error| format!("Backup picker task failed: {error}."))?
 }
 
+#[tauri::command]
+async fn cbpanel_select_extension_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(file_path) = app
+            .dialog()
+            .file()
+            .set_title("Select extension directory")
+            .blocking_pick_folder()
+        else {
+            return Ok(None);
+        };
+        let path = file_path
+            .into_path()
+            .map_err(|error| format!("Invalid extension directory: {error}."))?;
+        Ok(Some(path.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|error| format!("Extension directory picker task failed: {error}."))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let runtime_state = Mutex::new(RuntimeState {
@@ -397,6 +417,7 @@ pub fn run() {
             cbpanel_select_app_backup_open_path,
             cbpanel_select_environment_package_save_path,
             cbpanel_select_environment_package_open_path,
+            cbpanel_select_extension_directory,
             cbpanel_update_tray_state,
             cbpanel_window_close,
             cbpanel_window_hide_to_tray,

@@ -29,6 +29,21 @@ test("local directory import reads manifest and permission risks", async () => {
   repository.close();
 });
 
+test("local directory import rejects directories without a manifest", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const service = new ExtensionService({ repository, extensionCacheDir: path.join(directory, "extensions") });
+  const parentDirectory = path.join(directory, "Extensions");
+  await fs.mkdir(parentDirectory, { recursive: true });
+
+  await assert.rejects(
+    service.importDirectory(parentDirectory),
+    /must directly contain manifest\.json/,
+  );
+
+  repository.close();
+});
+
 test("local ZIP import unpacks into extension cache and reads manifest", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
