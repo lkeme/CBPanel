@@ -86,7 +86,6 @@ export function useExtensionActions({
       await loadState();
       const params = { imported: result.imported.length, failed: result.failed.length, skipped: result.skipped };
       toast(result.failed.length ? "info" : "success", t(result.failed.length ? "toast.extensionImportPartial" : "toast.extensionImportBatchDone", params));
-      if (result.failed.length === 0) setExtensionImport(null);
       return result;
     } catch (error) {
       toast("error", errorMessage(error));

@@ -414,6 +414,10 @@ export function ExtensionImportDialog({
     }
     if (hasDirectoryPreview) {
       const result = await importDirectories(selectedCandidates.map((candidate) => candidate.path));
+      if (result && result.failed.length === 0) {
+        close();
+        return;
+      }
       setDirectoryImportResult(result);
       if (result?.failed.length) {
         const failedPaths = new Set(result.failed.map((item) => item.path));
