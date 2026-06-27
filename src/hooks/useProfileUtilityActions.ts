@@ -301,12 +301,17 @@ export function useProfileUtilityActions({
   }
 
   async function pollEnvironmentPackageOperation(operationId: string): Promise<EnvironmentPackageOperation> {
-    for (;;) {
-      const operation = await api<EnvironmentPackageOperation>(`/api/environment-packages/operations/${operationId}`);
-      setEnvironmentPackageOperation(operation.status === "succeeded" || operation.status === "failed" ? null : operation);
-      if (operation.status === "succeeded") return operation;
-      if (operation.status === "failed") throw new Error(operation.error ?? operation.message);
-      await delay(700);
+    try {
+      for (;;) {
+        const operation = await api<EnvironmentPackageOperation>(`/api/environment-packages/operations/${operationId}`);
+        setEnvironmentPackageOperation(operation.status === "succeeded" || operation.status === "failed" ? null : operation);
+        if (operation.status === "succeeded") return operation;
+        if (operation.status === "failed") throw new Error(operation.error ?? operation.message);
+        await delay(700);
+      }
+    } catch (error) {
+      setEnvironmentPackageOperation(null);
+      throw error;
     }
   }
 
