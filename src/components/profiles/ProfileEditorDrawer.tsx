@@ -1,6 +1,8 @@
 import { type ComponentType } from "react";
 import {
   CircleStop,
+  ClipboardPaste,
+  Copy,
   Fingerprint,
   Layers3,
   ListChecks,
@@ -61,6 +63,8 @@ export function ProfileEditorDrawer(props: {
   stopProfile: () => Promise<void>;
   copyManagedProxyToLocal: () => void;
   launchProfile: () => Promise<void>;
+  importConfigFromClipboard: () => Promise<void>;
+  shareConfigToClipboard: () => Promise<void>;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }) {
   const { activeTab, close, draft, draftIsNew, running, saveDraft, setActiveTab, t } = props;
@@ -76,6 +80,14 @@ export function ProfileEditorDrawer(props: {
           <button className="command primary" disabled={props.busy === "save"} onClick={() => void saveDraft()} type="button">
             <Save size={15} />
             {t("actions.save")}
+          </button>
+          <button className="command subtle" onClick={() => void props.shareConfigToClipboard()} type="button">
+            <Copy size={15} />
+            {t("actions.shareConfig")}
+          </button>
+          <button className="command subtle" onClick={() => void props.importConfigFromClipboard()} type="button">
+            <ClipboardPaste size={15} />
+            {t("actions.importConfig")}
           </button>
           <button className="command" disabled={props.browserCoreMissing || props.busy === "preflight"} onClick={() => void props.checkPreflight()} title={props.browserCoreMissing ? t("browserCore.missingAction") : undefined} type="button">
             <ListChecks size={15} />

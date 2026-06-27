@@ -120,6 +120,29 @@ export interface BrowserProfile {
   verification: VerificationSettings;
 }
 
+export interface ProfileConfigShare {
+  kind: typeof PROFILE_CONFIG_SHARE_KIND;
+  schemaVersion: typeof PROFILE_CONFIG_SHARE_SCHEMA_VERSION;
+  exportedAt: string;
+  profile: ProfileConfigShareData;
+}
+
+export type ProfileConfigShareData = Pick<
+  BrowserProfile,
+  | "name"
+  | "group"
+  | "tags"
+  | "notes"
+  | "mode"
+  | "startUrl"
+  | "proxy"
+  | "fingerprint"
+  | "runtime"
+  | "viewport"
+  | "advanced"
+  | "verification"
+>;
+
 export type SessionEventLevel = "info" | "warn" | "error";
 
 export interface SessionEvent {
@@ -286,6 +309,9 @@ export interface PanelState {
 }
 
 export const DEFAULT_START_URL = "https://abrahamjuliot.github.io/creepjs/";
+export const PROFILE_CONFIG_SHARE_KIND = "cbpanel.profileConfig";
+export const PROFILE_CONFIG_SHARE_SCHEMA_VERSION = 1;
+export const PROFILE_CONFIG_SHARE_PREFIX = "CBPANEL_PROFILE_CONFIG_V1.";
 
 export const DETECTION_TARGETS = [
   "https://browserleaks.com/canvas",
@@ -532,6 +558,86 @@ export function normalizeProfile(input: Partial<BrowserProfile>): BrowserProfile
     updatedAt: profile.updatedAt || nowIso(),
     verification: {
       detectionChecks: normalizeDetectionChecks(profile.verification.detectionChecks),
+    },
+  };
+}
+
+export function createProfileConfigShareString(profile: BrowserProfile, exportedAt = nowIso()): string {
+  const payload: ProfileConfigShare = {
+    kind: PROFILE_CONFIG_SHARE_KIND,
+    schemaVersion: PROFILE_CONFIG_SHARE_SCHEMA_VERSION,
+    exportedAt,
+    profile: profileConfigShareData(profile),
+  };
+  return `${PROFILE_CONFIG_SHARE_PREFIX}${encodeBase64Url(JSON.stringify(payload))}`;
+}
+
+export function parseProfileConfigShareString(value: string): ProfileConfigShare {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith(PROFILE_CONFIG_SHARE_PREFIX)) {
+    throw new Error("Clipboard does not contain a CBPanel profile config string.");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decodeBase64Url(trimmed.slice(PROFILE_CONFIG_SHARE_PREFIX.length)));
+  } catch (error) {
+    throw new Error(`Invalid CBPanel profile config string: ${(error as Error).message}`);
+  }
+
+  if (!isRecord(parsed)) {
+    throw new Error("CBPanel profile config payload must be an object.");
+  }
+  if (parsed.kind !== PROFILE_CONFIG_SHARE_KIND) {
+    throw new Error("Unsupported CBPanel profile config kind.");
+  }
+  if (parsed.schemaVersion !== PROFILE_CONFIG_SHARE_SCHEMA_VERSION) {
+    throw new Error("Unsupported CBPanel profile config version.");
+  }
+  if (typeof parsed.exportedAt !== "string" || !parsed.exportedAt.trim()) {
+    throw new Error("CBPanel profile config is missing exportedAt.");
+  }
+  if (!isRecord(parsed.profile)) {
+    throw new Error("CBPanel profile config is missing profile data.");
+  }
+
+  return {
+    kind: PROFILE_CONFIG_SHARE_KIND,
+    schemaVersion: PROFILE_CONFIG_SHARE_SCHEMA_VERSION,
+    exportedAt: parsed.exportedAt,
+    profile: profileConfigShareData(normalizeProfile(parsed.profile)),
+  };
+}
+
+export function applyProfileConfigShare(current: BrowserProfile, share: ProfileConfigShare): BrowserProfile {
+  return normalizeProfile({
+    ...share.profile,
+    id: current.id,
+    createdAt: current.createdAt,
+    updatedAt: nowIso(),
+  });
+}
+
+function profileConfigShareData(profile: BrowserProfile): ProfileConfigShareData {
+  const normalized = normalizeProfile(profile);
+  return {
+    name: normalized.name,
+    group: normalized.group,
+    tags: [...normalized.tags],
+    notes: normalized.notes,
+    mode: normalized.mode,
+    startUrl: normalized.startUrl,
+    proxy: { ...normalized.proxy },
+    fingerprint: { ...normalized.fingerprint },
+    runtime: {
+      ...normalized.runtime,
+      extensionPaths: [],
+      extraArgs: [...normalized.runtime.extraArgs],
+    },
+    viewport: { ...normalized.viewport },
+    advanced: { ...normalized.advanced },
+    verification: {
+      detectionChecks: normalized.verification.detectionChecks.map((check) => ({ ...check })),
     },
   };
 }
@@ -1641,6 +1747,30 @@ function pruneUndefined(value: Record<string, unknown>): Record<string, unknown>
 
 function omitUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as Partial<T>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function encodeBase64Url(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function decodeBase64Url(value: string): string {
+  const normalized = value
+    .replace(/-/g, "+")
+    .replace(/_/g, "/")
+    .padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(normalized);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
 }
 
 function maskLaunchPreview(preview: LaunchPreview): LaunchPreview {

@@ -41,11 +41,14 @@ import {
   type ProfilePreflightAction,
   type ProfilePreflightReport,
   type ProxyScheme,
+  applyProfileConfigShare,
   buildProxyUrl,
+  createProfileConfigShareString,
   defaultProfile,
   maskProxyUrl,
   maskProxyUrlForDisplay,
   nowIso,
+  parseProfileConfigShareString,
   proxyUrlFromParts,
 } from "./shared/profile";
 import {
@@ -442,6 +445,43 @@ function App() {
   function updateDraft(next: BrowserProfile) {
     setDraft(next);
     setPreflight((current) => (current?.profileId === next.id ? null : current));
+  }
+
+  async function shareDraftConfigToClipboard() {
+    if (!draft) return;
+    try {
+      await navigator.clipboard.writeText(createProfileConfigShareString(draft));
+      toast("success", t("toast.profileConfigShared"));
+    } catch (error) {
+      toast("error", errorMessage(error));
+    }
+  }
+
+  async function importDraftConfigFromClipboard() {
+    if (!draft) return;
+    try {
+      const share = parseProfileConfigShareString(await navigator.clipboard.readText());
+      setConfirmDialog({
+        title: t("profileConfig.importTitle"),
+        body: t("profileConfig.importBody", { name: share.profile.name }),
+        confirmLabel: t("actions.importConfig"),
+        busyKey: "profile-config-import",
+        onConfirm: async () => {
+          setBusy("profile-config-import");
+          try {
+            updateDraft(applyProfileConfigShare(draft, share));
+            setLocalProxyDraftIds((current) => new Set(current).add(draft.id));
+            setDraftProxyLibraryIds((current) => omitKeys(current, [draft.id]));
+            setConfirmDialog(null);
+            toast("success", t("toast.profileConfigImported"));
+          } finally {
+            setBusy("");
+          }
+        },
+      });
+    } catch (error) {
+      toast("error", errorMessage(error));
+    }
   }
 
   function closeDrawer() {
@@ -1214,6 +1254,8 @@ function App() {
             stopProfile={() => stopProfile()}
             copyManagedProxyToLocal={copyManagedProxyToLocal}
             launchProfile={() => launchProfile()}
+            importConfigFromClipboard={importDraftConfigFromClipboard}
+            shareConfigToClipboard={shareDraftConfigToClipboard}
             t={t}
           />
         </Suspense>

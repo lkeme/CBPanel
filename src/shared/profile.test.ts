@@ -11,6 +11,8 @@ import {
   buildPlaywrightContextOptions,
   buildLaunchPreview,
   buildSessionLaunchPlan,
+  applyProfileConfigShare,
+  createProfileConfigShareString,
   createProfileSnapshot,
   defaultProfile,
   effectiveWebrtcIpMode,
@@ -20,6 +22,7 @@ import {
   maskProxyUrl,
   maskProxyUrlForDisplay,
   normalizeProfile,
+  parseProfileConfigShareString,
   parseProxyUrlInput,
   parseOptionalJsonObject,
   preflightProfile,
@@ -86,6 +89,77 @@ test("normalizeProfile treats blank ids as missing identity", () => {
 
   assert.equal(profile.name, "Blank ID");
   assert.match(profile.id, /^profile-/);
+});
+
+test("profile config share string round-trips portable config without identity or extension paths", () => {
+  const profile = defaultProfile({
+    id: "profile-source",
+    name: "Shared Template",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-02T00:00:00.000Z",
+    runtime: {
+      ...defaultProfile().runtime,
+      extensionPaths: ["D:/extensions/local-only"],
+      extraArgs: ["--disable-http2"],
+    },
+    proxy: {
+      ...defaultProfile().proxy,
+      enabled: true,
+      host: "proxy.example.test",
+      port: "8080",
+      username: "alice",
+      password: "secret",
+    },
+  });
+
+  const shareString = createProfileConfigShareString(profile, "2026-06-27T00:00:00.000Z");
+  assert.match(shareString, /^CBPANEL_PROFILE_CONFIG_V1\./);
+
+  const parsed = parseProfileConfigShareString(shareString);
+  const serialized = JSON.stringify(parsed);
+  assert.equal(parsed.kind, "cbpanel.profileConfig");
+  assert.equal(parsed.schemaVersion, 1);
+  assert.equal(parsed.exportedAt, "2026-06-27T00:00:00.000Z");
+  assert.equal(parsed.profile.name, "Shared Template");
+  assert.equal(parsed.profile.proxy.password, "secret");
+  assert.deepEqual(parsed.profile.runtime.extensionPaths, []);
+  assert.deepEqual(parsed.profile.runtime.extraArgs, ["--disable-http2"]);
+  assert.equal(serialized.includes("profile-source"), false);
+  assert.equal(serialized.includes("2026-01-01T00:00:00.000Z"), false);
+});
+
+test("profile config share apply keeps current draft identity", () => {
+  const current = defaultProfile({
+    id: "profile-current",
+    name: "Current",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-02T00:00:00.000Z",
+  });
+  const incoming = parseProfileConfigShareString(createProfileConfigShareString(defaultProfile({
+    id: "profile-template",
+    name: "Imported Template",
+    createdAt: "2025-01-01T00:00:00.000Z",
+    group: "Templates",
+  })));
+
+  const applied = applyProfileConfigShare(current, incoming);
+
+  assert.equal(applied.id, "profile-current");
+  assert.equal(applied.createdAt, "2026-01-01T00:00:00.000Z");
+  assert.equal(applied.name, "Imported Template");
+  assert.equal(applied.group, "Templates");
+  assert.notEqual(applied.updatedAt, "2026-01-02T00:00:00.000Z");
+});
+
+test("profile config share parser rejects invalid clipboard strings", () => {
+  assert.throws(
+    () => parseProfileConfigShareString("not a cbpanel config"),
+    /does not contain a CBPanel profile config string/,
+  );
+  assert.throws(
+    () => parseProfileConfigShareString("CBPANEL_PROFILE_CONFIG_V1.not-base64"),
+    /Invalid CBPanel profile config string/,
+  );
 });
 
 test("normalizeProfile trims and deduplicates tags", () => {
