@@ -26,7 +26,7 @@ export function useProxyActions({
   t,
   toast,
 }: {
-  loadState: () => Promise<void>;
+  loadState: () => Promise<unknown>;
   setBusy: Dispatch<SetStateAction<string>>;
   setConfirmDialog: Dispatch<SetStateAction<ConfirmDialogState>>;
   setProxyEditor: Dispatch<SetStateAction<ProxyEditorState>>;

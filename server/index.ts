@@ -13,6 +13,7 @@ import {
 import type { NetworkCheckResult, SystemDiagnostics } from "../src/shared/entities";
 import { resolveNetworkTraceProvider } from "../src/shared/settings";
 import { BinaryService } from "./services/binaryService";
+import { AppBackupService } from "./services/appBackupService";
 import { DesktopRuntimeService } from "./services/desktopRuntimeService";
 import { ExtensionService } from "./services/extensionService";
 import { EnvironmentPackageService } from "./services/environmentPackageService";
@@ -65,6 +66,14 @@ const sessionService = new SessionService({
 });
 const proxyService = new ProxyService();
 const environmentPackageService = new EnvironmentPackageService({
+  repository,
+  browserDataDir: BROWSER_DATA_DIR,
+  extensionCacheDir: path.join(DATA_DIR, "extensions"),
+  activeEnvironmentIds: () => new Set(sessionService.listSessions()
+    .filter((session) => session.status === "running" || session.status === "launching" || session.status === "stopping")
+    .map((session) => session.profileId)),
+});
+const appBackupService = new AppBackupService({
   repository,
   browserDataDir: BROWSER_DATA_DIR,
   extensionCacheDir: path.join(DATA_DIR, "extensions"),
@@ -579,6 +588,37 @@ async function createApp(): Promise<express.Express> {
     const operation = environmentPackageService.getOperation(request.params.id);
     if (!operation) {
       response.status(404).json({ error: "Environment package operation does not exist." });
+      return;
+    }
+    response.json(operation);
+  });
+
+  app.post("/api/app-backups/export", (request, response) => {
+    try {
+      const outputPath = typeof request.body?.outputPath === "string" ? request.body.outputPath.trim() : "";
+      if (!outputPath) throw Object.assign(new Error("App backup output path is required."), { status: 400 });
+      const operation = appBackupService.startExport({ outputPath });
+      response.status(202).json({ operationId: operation.id, operation });
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.post("/api/app-backups/restore", (request, response) => {
+    try {
+      const inputPath = typeof request.body?.inputPath === "string" ? request.body.inputPath.trim() : "";
+      if (!inputPath) throw Object.assign(new Error("App backup input path is required."), { status: 400 });
+      const operation = appBackupService.startRestore({ inputPath });
+      response.status(202).json({ operationId: operation.id, operation });
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.get("/api/app-backups/operations/:id", (request, response) => {
+    const operation = appBackupService.getOperation(request.params.id);
+    if (!operation) {
+      response.status(404).json({ error: "App backup operation does not exist." });
       return;
     }
     response.json(operation);

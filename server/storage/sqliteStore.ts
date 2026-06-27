@@ -34,6 +34,7 @@ import {
   mergeSettings,
   normalizeSettings,
 } from "../../src/shared/settings";
+import { APP_BACKUP_SCHEMA_VERSION, type AppBackupData } from "../../src/shared/appBackup";
 import { seedProfiles } from "./seedProfiles";
 import type { EnvironmentPackageImportInput, EnvironmentPackageImportResult, PanelRepository } from "./types";
 
@@ -903,6 +904,45 @@ export class SqlitePanelRepository implements PanelRepository {
     return this.storageInfo();
   }
 
+  async exportFullBackupData(): Promise<AppBackupData> {
+    await this.initialize();
+    return {
+      schemaVersion: APP_BACKUP_SCHEMA_VERSION,
+      settings: await this.getSettings(),
+      profiles: this.readAllProfileRows(),
+      environments: this.readEnvironments({ includeDeleted: true }),
+      groups: await this.listGroups(),
+      tags: await this.listTags(),
+      proxies: await this.listProxies({ includeSecrets: true }),
+      extensions: await this.listExtensions(),
+      extensionSources: await this.listExtensionSources(),
+    };
+  }
+
+  async restoreFullBackupData(data: AppBackupData): Promise<void> {
+    await this.initialize();
+    const normalized = normalizeFullBackupData(data);
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      this.clearUserDataTables();
+      for (const group of normalized.groups) this.insertGroupExact(group);
+      for (const tag of normalized.tags) this.insertTagExact(tag);
+      for (const proxy of normalized.proxies) this.insertProxyExact(proxy);
+      for (const source of normalized.extensionSources) this.insertExtensionSourceExact(source);
+      for (const extension of normalized.extensions) this.insertExtensionExact(extension);
+      for (const profile of normalized.profiles) this.upsertProfileRow(profile);
+      for (const environment of normalized.environments) this.insertEnvironmentExact(environment);
+      this.writeSettings(normalized.settings);
+      this.setMetadata("profiles_user_modified", "true");
+      this.setMetadata("restored_from_backup_at", nowIso());
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   close(): void {
     this.db?.close();
     this.db = undefined;
@@ -1153,6 +1193,20 @@ export class SqlitePanelRepository implements PanelRepository {
       db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  private clearUserDataTables(): void {
+    this.database().exec(`
+      DELETE FROM environment_extensions;
+      DELETE FROM environment_tags;
+      DELETE FROM browser_environments;
+      DELETE FROM profiles;
+      DELETE FROM extensions;
+      DELETE FROM extension_sources;
+      DELETE FROM proxies;
+      DELETE FROM tags;
+      DELETE FROM groups;
+    `);
   }
 
   private insertProfile(profile: BrowserProfile): void {
@@ -1503,6 +1557,25 @@ export class SqlitePanelRepository implements PanelRepository {
       );
   }
 
+  private insertGroupExact(group: GroupEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO groups (id, name, color, description, sort_order, status, is_default, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        group.id,
+        group.name,
+        group.color,
+        group.description,
+        group.order,
+        group.status,
+        group.isDefault ? 1 : 0,
+        group.createdAt,
+        group.updatedAt,
+      );
+  }
+
   private getGroupOrThrow(id: string): GroupEntity {
     const row = this.database().prepare("SELECT * FROM groups WHERE id = ?").get(id) as GroupRow | undefined;
     if (!row) throw Object.assign(new Error("分组不存在"), { status: 404 });
@@ -1556,6 +1629,15 @@ export class SqlitePanelRepository implements PanelRepository {
       .run(tag.id, tag.name, tag.color, tag.description, tag.order, tag.status, tag.createdAt, tag.updatedAt);
   }
 
+  private insertTagExact(tag: TagEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO tags (id, name, color, description, sort_order, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(tag.id, tag.name, tag.color, tag.description, tag.order, tag.status, tag.createdAt, tag.updatedAt);
+  }
+
   private getTagOrThrow(id: string): TagEntity {
     const row = this.database().prepare("SELECT * FROM tags WHERE id = ?").get(id) as TagRow | undefined;
     if (!row) throw Object.assign(new Error("标签不存在"), { status: 404 });
@@ -1581,6 +1663,31 @@ export class SqlitePanelRepository implements PanelRepository {
           status = excluded.status,
           last_check_json = excluded.last_check_json,
           updated_at = excluded.updated_at
+      `)
+      .run(
+        proxy.id,
+        proxy.name,
+        proxy.scheme,
+        proxy.host,
+        proxy.port,
+        proxy.username,
+        proxy.password,
+        proxy.bypass,
+        proxy.notes,
+        proxy.status,
+        proxy.lastCheck ? JSON.stringify(proxy.lastCheck) : null,
+        proxy.createdAt,
+        proxy.updatedAt,
+      );
+  }
+
+  private insertProxyExact(proxy: ProxyEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO proxies (
+          id, name, scheme, host, port, username, password, bypass, notes, status,
+          last_check_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         proxy.id,
@@ -1664,6 +1771,43 @@ export class SqlitePanelRepository implements PanelRepository {
       );
   }
 
+  private insertExtensionExact(extension: ExtensionEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO extensions (
+          id, name, description, source_kind, source_url, source_id, store_id, store_url,
+          version, manifest_version, permissions_json, host_permissions_json, permission_risks_json,
+          install_state, update_policy, sha256, local_path, last_installed_at, last_checked_at,
+          last_error, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        extension.id,
+        extension.name,
+        extension.description,
+        extension.sourceKind,
+        extension.sourceUrl,
+        extension.sourceId ?? null,
+        extension.storeId ?? null,
+        extension.storeUrl ?? null,
+        extension.version,
+        extension.manifestVersion ?? null,
+        JSON.stringify(extension.permissions),
+        JSON.stringify(extension.hostPermissions),
+        JSON.stringify(extension.permissionRisks),
+        extension.installState,
+        extension.updatePolicy,
+        extension.sha256 ?? null,
+        extension.localPath ?? null,
+        extension.lastInstalledAt ?? null,
+        extension.lastCheckedAt ?? null,
+        extension.lastError ?? null,
+        extension.status,
+        extension.createdAt,
+        extension.updatedAt,
+      );
+  }
+
   private getExtensionOrThrow(id: string): ExtensionEntity {
     const row = this.database().prepare("SELECT * FROM extensions WHERE id = ?").get(id) as ExtensionRow | undefined;
     if (!row) throw Object.assign(new Error("Extension does not exist"), { status: 404 });
@@ -1699,6 +1843,27 @@ export class SqlitePanelRepository implements PanelRepository {
       );
   }
 
+  private insertExtensionSourceExact(source: ExtensionSourceEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO extension_sources (
+          id, name, url, status, allow_unsigned_assets, last_refreshed_at,
+          last_error, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        source.id,
+        source.name,
+        source.url,
+        source.status,
+        source.allowUnsignedAssets ? 1 : 0,
+        source.lastRefreshedAt ?? null,
+        source.lastError ?? null,
+        source.createdAt,
+        source.updatedAt,
+      );
+  }
+
   private getExtensionSourceOrThrow(id: string): ExtensionSourceEntity {
     const row = this.database().prepare("SELECT * FROM extension_sources WHERE id = ?").get(id) as ExtensionSourceRow | undefined;
     if (!row) throw Object.assign(new Error("Extension source does not exist"), { status: 404 });
@@ -1709,6 +1874,42 @@ export class SqlitePanelRepository implements PanelRepository {
     const row = this.database().prepare("SELECT * FROM browser_environments WHERE id = ?").get(id) as EnvironmentRow | undefined;
     if (!row) throw Object.assign(new Error("环境不存在"), { status: 404 });
     return this.environmentFromRow(row);
+  }
+
+  private insertEnvironmentExact(environment: BrowserEnvironment): void {
+    const runtimeProfile = normalizeProfile(environment.runtimeProfile);
+    this.database()
+      .prepare(`
+        INSERT INTO browser_environments (
+          id, name, notes, mode, start_url, group_id, proxy_id, runtime_profile_json, last_network_check_json,
+          created_at, updated_at, deleted_at, delete_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        environment.id,
+        environment.name,
+        environment.notes,
+        environment.mode,
+        environment.startUrl,
+        environment.groupId,
+        environment.proxyId ?? null,
+        JSON.stringify(runtimeProfile),
+        environment.lastNetworkCheck ? JSON.stringify(environment.lastNetworkCheck) : null,
+        environment.createdAt,
+        environment.updatedAt,
+        environment.deletedAt ?? null,
+        environment.deleteReason ?? null,
+      );
+    for (const tagId of environment.tagIds) {
+      this.database()
+        .prepare("INSERT OR IGNORE INTO environment_tags (environment_id, tag_id) VALUES (?, ?)")
+        .run(environment.id, tagId);
+    }
+    for (const extensionId of environment.extensionIds) {
+      this.database()
+        .prepare("INSERT OR IGNORE INTO environment_extensions (environment_id, extension_id) VALUES (?, ?)")
+        .run(environment.id, extensionId);
+    }
   }
 
   private throwIfReferenced(entityKind: ReferenceUsage["entityKind"], entityId: string): void {
@@ -1988,6 +2189,60 @@ function parseProfile(raw: string): BrowserProfile {
 
 function parseSettings(raw: string): AppSettings {
   return normalizeSettings(JSON.parse(raw) as Partial<AppSettings>);
+}
+
+function normalizeFullBackupData(data: AppBackupData): AppBackupData {
+  if (!data || typeof data !== "object" || data.schemaVersion !== APP_BACKUP_SCHEMA_VERSION) {
+    throw Object.assign(new Error("Unsupported app backup schema version."), { status: 400 });
+  }
+  if (!Array.isArray(data.profiles)) throw Object.assign(new Error("App backup profiles must be an array."), { status: 400 });
+  if (!Array.isArray(data.environments)) throw Object.assign(new Error("App backup environments must be an array."), { status: 400 });
+  if (!Array.isArray(data.groups)) throw Object.assign(new Error("App backup groups must be an array."), { status: 400 });
+  if (!Array.isArray(data.tags)) throw Object.assign(new Error("App backup tags must be an array."), { status: 400 });
+  if (!Array.isArray(data.proxies)) throw Object.assign(new Error("App backup proxies must be an array."), { status: 400 });
+  if (!Array.isArray(data.extensions)) throw Object.assign(new Error("App backup extensions must be an array."), { status: 400 });
+  if (!Array.isArray(data.extensionSources)) throw Object.assign(new Error("App backup extensionSources must be an array."), { status: 400 });
+
+  return {
+    schemaVersion: APP_BACKUP_SCHEMA_VERSION,
+    settings: normalizeSettings(data.settings),
+    profiles: data.profiles.map((profile) => normalizeProfile(profile)),
+    environments: data.environments.map((environment) => ({
+      ...environment,
+      runtimeProfile: normalizeProfile(environment.runtimeProfile),
+      tagIds: uniqueStrings(environment.tagIds ?? []),
+      extensionIds: uniqueStrings(environment.extensionIds ?? []),
+      proxyId: typeof environment.proxyId === "string" && environment.proxyId.trim() ? environment.proxyId.trim() : undefined,
+      deletedAt: typeof environment.deletedAt === "string" && environment.deletedAt.trim() ? environment.deletedAt.trim() : undefined,
+      deleteReason: typeof environment.deleteReason === "string" && environment.deleteReason.trim() ? environment.deleteReason.trim() : undefined,
+    })),
+    groups: data.groups.map((group) => ({
+      ...group,
+      id: createEntityId(group.id, "group"),
+      name: cleanRequiredName(group.name, "Group name cannot be empty"),
+      color: cleanColor(group.color, colorForName(group.name)),
+      description: typeof group.description === "string" ? group.description : "",
+      order: Number.isFinite(group.order) ? Number(group.order) : 0,
+      status: group.status === "disabled" ? "disabled" : "enabled",
+      isDefault: group.isDefault === true,
+      createdAt: typeof group.createdAt === "string" && group.createdAt ? group.createdAt : nowIso(),
+      updatedAt: typeof group.updatedAt === "string" && group.updatedAt ? group.updatedAt : nowIso(),
+    })),
+    tags: data.tags.map((tag) => ({
+      ...tag,
+      id: createEntityId(tag.id, "tag"),
+      name: cleanRequiredName(tag.name, "Tag name cannot be empty"),
+      color: cleanColor(tag.color, colorForName(tag.name)),
+      description: typeof tag.description === "string" ? tag.description : "",
+      order: Number.isFinite(tag.order) ? Number(tag.order) : 0,
+      status: tag.status === "disabled" ? "disabled" : "enabled",
+      createdAt: typeof tag.createdAt === "string" && tag.createdAt ? tag.createdAt : nowIso(),
+      updatedAt: typeof tag.updatedAt === "string" && tag.updatedAt ? tag.updatedAt : nowIso(),
+    })),
+    proxies: data.proxies.map(normalizeProxyEntity),
+    extensions: data.extensions.map(normalizeExtensionEntity),
+    extensionSources: data.extensionSources.map(normalizeExtensionSourceEntity),
+  };
 }
 
 function parseProxyParts(profile: BrowserProfile): {

@@ -26,7 +26,7 @@ export function useExtensionActions({
 }: {
   draft: BrowserProfile | null;
   draftIsNew: boolean;
-  loadState: () => Promise<void>;
+  loadState: () => Promise<unknown>;
   selectedProfiles: BrowserProfile[];
   setBusy: Dispatch<SetStateAction<string>>;
   setConfirmDialog: Dispatch<SetStateAction<ConfirmDialogState>>;

@@ -49,7 +49,7 @@ export function useProfileLifecycleActions({
   draft: BrowserProfile | null;
   draftIsNew: boolean;
   draftProxyLibraryIds: Record<string, string>;
-  loadState: () => Promise<void>;
+  loadState: () => Promise<unknown>;
   localProxyDraftIds: Set<string>;
   pendingLaunchIdsRef: MutableRefObject<Set<string>>;
   setBusy: Dispatch<SetStateAction<string>>;

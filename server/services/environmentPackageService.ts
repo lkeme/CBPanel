@@ -1,8 +1,6 @@
 import fs from "node:fs/promises";
-import { createReadStream, createWriteStream, mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { AsyncZipDeflate, Unzip, UnzipInflate, Zip, type UnzipFile } from "fflate";
 import type { BrowserEnvironment, ExtensionEntity, GroupEntity } from "../../src/shared/entities";
 import {
   ENVIRONMENT_PACKAGE_KIND,
@@ -16,6 +14,16 @@ import {
 } from "../../src/shared/environmentPackage";
 import { createId, nowIso, proxyUrlFromParts } from "../../src/shared/profile";
 import type { PanelRepository } from "../storage/types";
+import {
+  type ArchiveEntry,
+  copyDirectory,
+  directoryArchiveEntries,
+  extractZipArchive,
+  jsonArchiveEntry,
+  pathExists,
+  readJsonArchiveFile,
+  writeZipArchive,
+} from "./archiveUtils";
 
 type EnvironmentPackageServiceOptions = {
   repository: PanelRepository;
@@ -33,12 +41,6 @@ type ImportRequest = {
   inputPath: string;
 };
 
-type PackageEntry = {
-  archivePath: string;
-  filePath?: string;
-  bytes?: Uint8Array;
-};
-
 type PreparedImport = {
   data: EnvironmentPackageData;
   stagingDir: string;
@@ -52,8 +54,6 @@ type PreparedImport = {
 
 const MANIFEST_ENTRY = "manifest.json";
 const DATA_ENTRY = "data.json";
-const TEXT_ENCODER = new TextEncoder();
-const TEXT_DECODER = new TextDecoder();
 
 export class EnvironmentPackageService {
   private readonly operations = new Map<string, EnvironmentPackageOperation>();
@@ -83,7 +83,7 @@ export class EnvironmentPackageService {
     const scope: EnvironmentPackageScope = request.environmentIds?.length ? "selected" : "all";
     const prepared = await this.buildExportEntries(environments, scope, operationId);
     await fs.mkdir(path.dirname(outputPath), { recursive: true });
-    await writeZip(outputPath, prepared.entries, (current, total, archivePath) => {
+    await writeZipArchive(outputPath, prepared.entries, (current, total, archivePath) => {
       this.setProgress(operationId, "writing", current, total, `Writing ${archivePath}.`);
     });
     this.setProgress(operationId, "finalizing", prepared.entries.length, prepared.entries.length, "Environment package written.");
@@ -186,7 +186,7 @@ export class EnvironmentPackageService {
   }
 
   private async buildExportEntries(environments: BrowserEnvironment[], scope: EnvironmentPackageScope, operationId?: string): Promise<{
-    entries: PackageEntry[];
+    entries: ArchiveEntry[];
     manifest: EnvironmentPackageManifest;
     warnings: string[];
   }> {
@@ -194,7 +194,7 @@ export class EnvironmentPackageService {
     const groups = await this.exportGroups(environments);
     const extensions = await this.exportExtensions(environments);
     const exportedEnvironments = await this.materializeEnvironmentDependencies(environments);
-    const entries: PackageEntry[] = [];
+    const entries: ArchiveEntry[] = [];
     const browserDataEntries = await this.browserDataEntries(exportedEnvironments, warnings);
     const extensionEntries = await this.extensionEntries(extensions, warnings);
     const manifest: EnvironmentPackageManifest = {
@@ -218,8 +218,8 @@ export class EnvironmentPackageService {
       groups,
       extensions,
     };
-    entries.push(jsonEntry(MANIFEST_ENTRY, manifest));
-    entries.push(jsonEntry(DATA_ENTRY, data));
+    entries.push(jsonArchiveEntry(MANIFEST_ENTRY, manifest));
+    entries.push(jsonArchiveEntry(DATA_ENTRY, data));
     entries.push(...browserDataEntries.entries);
     entries.push(...extensionEntries.entries);
     this.setProgress(operationId, "collecting", entries.length, entries.length, "Collected environment package entries.");
@@ -276,8 +276,8 @@ export class EnvironmentPackageService {
     });
   }
 
-  private async browserDataEntries(environments: BrowserEnvironment[], warnings: string[]): Promise<{ count: number; entries: PackageEntry[] }> {
-    const entries: PackageEntry[] = [];
+  private async browserDataEntries(environments: BrowserEnvironment[], warnings: string[]): Promise<{ count: number; entries: ArchiveEntry[] }> {
+    const entries: ArchiveEntry[] = [];
     let count = 0;
     for (const environment of environments) {
       const directory = path.join(this.options.browserDataDir, environment.id);
@@ -286,13 +286,13 @@ export class EnvironmentPackageService {
         continue;
       }
       count += 1;
-      entries.push(...await directoryEntries(directory, `browser-data/${environment.id}`));
+      entries.push(...await directoryArchiveEntries(directory, `browser-data/${environment.id}`));
     }
     return { count, entries };
   }
 
-  private async extensionEntries(extensions: ExtensionEntity[], warnings: string[]): Promise<{ count: number; entries: PackageEntry[] }> {
-    const entries: PackageEntry[] = [];
+  private async extensionEntries(extensions: ExtensionEntity[], warnings: string[]): Promise<{ count: number; entries: ArchiveEntry[] }> {
+    const entries: ArchiveEntry[] = [];
     let count = 0;
     for (const extension of extensions) {
       const directory = extension.localPath ?? path.join(this.options.extensionCacheDir, extension.id);
@@ -301,7 +301,7 @@ export class EnvironmentPackageService {
         continue;
       }
       count += 1;
-      entries.push(...await directoryEntries(directory, `extensions/${extension.id}`));
+      entries.push(...await directoryArchiveEntries(directory, `extensions/${extension.id}`));
     }
     return { count, entries };
   }
@@ -310,9 +310,9 @@ export class EnvironmentPackageService {
     this.setProgress(operationId, "extracting", 0, 1, "Extracting environment package.");
     const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-environment-import-"));
     try {
-      await extractZip(inputPath, stagingDir);
-      const manifest = parseManifest(await readJsonFile(path.join(stagingDir, MANIFEST_ENTRY)));
-      const data = parsePackageData(await readJsonFile(path.join(stagingDir, DATA_ENTRY)));
+      await extractZipArchive(inputPath, stagingDir, "Environment package contains an unsafe path.");
+      const manifest = parseManifest(await readJsonArchiveFile(path.join(stagingDir, MANIFEST_ENTRY)));
+      const data = parsePackageData(await readJsonArchiveFile(path.join(stagingDir, DATA_ENTRY)));
       validateManifestData(manifest, data);
       const environmentIdMap = Object.fromEntries(data.environments.map((environment) => [environment.id, createId()]));
       const { extensionIdMap, reusedExtensionIds } = await this.resolveExtensionIdMap(data.extensions);
@@ -447,157 +447,6 @@ export class EnvironmentPackageService {
   }
 }
 
-function jsonEntry(archivePath: string, value: unknown): PackageEntry {
-  return {
-    archivePath,
-    bytes: TEXT_ENCODER.encode(`${JSON.stringify(value, null, 2)}\n`),
-  };
-}
-
-async function directoryEntries(root: string, archiveRoot: string): Promise<PackageEntry[]> {
-  const entries: PackageEntry[] = [];
-  await collectDirectoryEntries(path.resolve(root), normalizeArchivePath(archiveRoot), entries);
-  return entries;
-}
-
-async function collectDirectoryEntries(root: string, archiveRoot: string, entries: PackageEntry[], current = root): Promise<void> {
-  const dirents = await fs.readdir(current, { withFileTypes: true });
-  for (const dirent of dirents) {
-    const filePath = path.join(current, dirent.name);
-    const relative = path.relative(root, filePath).replace(/\\/g, "/");
-    const archivePath = normalizeArchivePath(`${archiveRoot}/${relative}`);
-    if (dirent.isDirectory()) {
-      await collectDirectoryEntries(root, archiveRoot, entries, filePath);
-    } else if (dirent.isFile()) {
-      entries.push({ archivePath, filePath });
-    }
-  }
-}
-
-async function writeZip(outputPath: string, entries: PackageEntry[], onProgress: (current: number, total: number, archivePath: string) => void): Promise<void> {
-  const tempPath = `${outputPath}.tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const output = createWriteStream(tempPath);
-  let failed: Error | undefined;
-  const zip = new Zip((error, data, final) => {
-    if (error) {
-      failed = error;
-      output.destroy(error);
-      return;
-    }
-    output.write(data, () => {
-      if (final) output.end();
-    });
-  });
-
-  try {
-    for (const [index, entry] of entries.entries()) {
-      if (failed) throw failed;
-      onProgress(index + 1, entries.length, entry.archivePath);
-      await addZipEntry(zip, entry);
-    }
-    zip.end();
-    await new Promise<void>((resolve, reject) => {
-      output.once("finish", resolve);
-      output.once("error", reject);
-    });
-    if (failed) throw failed;
-    await fs.rename(tempPath, outputPath);
-  } catch (error) {
-    zip.terminate();
-    output.destroy();
-    await fs.rm(tempPath, { force: true }).catch(() => undefined);
-    throw error;
-  }
-}
-
-async function addZipEntry(zip: Zip, entry: PackageEntry): Promise<void> {
-  const file = new AsyncZipDeflate(entry.archivePath, { level: 6 });
-  zip.add(file);
-  if (entry.bytes) {
-    file.push(entry.bytes, true);
-    return;
-  }
-  if (!entry.filePath) {
-    file.push(new Uint8Array(), true);
-    return;
-  }
-  await new Promise<void>((resolve, reject) => {
-    const stream = createReadStream(entry.filePath as string);
-    stream.on("data", (chunk) => file.push(chunk instanceof Uint8Array ? chunk : Buffer.from(chunk)));
-    stream.on("end", () => {
-      file.push(new Uint8Array(), true);
-      resolve();
-    });
-    stream.on("error", reject);
-  });
-}
-
-async function extractZip(inputPath: string, outputDir: string): Promise<void> {
-  const writes: Promise<void>[] = [];
-  const unzip = new Unzip((file) => {
-    if (!isSafeArchivePath(file.name)) {
-      throw Object.assign(new Error("Environment package contains an unsafe path."), { status: 400 });
-    }
-    const normalizedName = normalizeArchivePath(file.name);
-    if (!normalizedName || normalizedName.endsWith("/")) return;
-    const write = writeUnzipFile(file, safeJoin(outputDir, normalizedName));
-    writes.push(write);
-  });
-  unzip.register(UnzipInflate);
-  await new Promise<void>((resolve, reject) => {
-    const input = createReadStream(inputPath);
-    input.on("data", (chunk) => {
-      try {
-        unzip.push(chunk instanceof Uint8Array ? chunk : Buffer.from(chunk), false);
-      } catch (error) {
-        input.destroy(error as Error);
-      }
-    });
-    input.once("end", () => {
-      try {
-        unzip.push(new Uint8Array(), true);
-        resolve();
-      } catch (error) {
-        reject(error);
-      }
-    });
-    input.once("error", reject);
-  });
-  await Promise.all(writes);
-}
-
-function writeUnzipFile(file: UnzipFile, targetPath: string): Promise<void> {
-  mkdirSync(path.dirname(targetPath), { recursive: true });
-  const output = createWriteStream(targetPath);
-  const done = new Promise<void>((resolve, reject) => {
-    output.once("finish", resolve);
-    output.once("error", reject);
-  });
-  file.ondata = (error, chunk, final) => {
-    if (error) {
-      output.destroy(error);
-      return;
-    }
-    output.write(chunk, () => {
-      if (final) output.end();
-    });
-  };
-  try {
-    file.start();
-  } catch (error) {
-    output.destroy(error as Error);
-  }
-  return done;
-}
-
-async function readJsonFile(filePath: string): Promise<unknown> {
-  try {
-    return JSON.parse(TEXT_DECODER.decode(await fs.readFile(filePath)));
-  } catch (error) {
-    throw Object.assign(new Error(`Invalid package JSON ${path.basename(filePath)}: ${(error as Error).message}`), { status: 400 });
-  }
-}
-
 function parseManifest(input: unknown): EnvironmentPackageManifest {
   if (!isRecord(input)) throw Object.assign(new Error("Package manifest must be an object."), { status: 400 });
   if (input.kind !== ENVIRONMENT_PACKAGE_KIND) throw Object.assign(new Error("Unsupported environment package kind."), { status: 400 });
@@ -654,51 +503,8 @@ async function countExistingDirectories(paths: string[]): Promise<number> {
   return count;
 }
 
-async function copyDirectory(source: string, target: string): Promise<void> {
-  if (await pathExists(target)) {
-    throw Object.assign(new Error(`Import target already exists: ${target}`), { status: 409 });
-  }
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.cp(source, target, { recursive: true, force: false });
-}
-
-async function pathExists(itemPath: string): Promise<boolean> {
-  try {
-    await fs.access(itemPath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function ensurePackageExtension(filePath: string): string {
   return filePath.toLowerCase().endsWith(".cbpe") ? filePath : `${filePath}.cbpe`;
-}
-
-function normalizeArchivePath(value: string): string {
-  return value.replace(/\\/g, "/").replace(/^\/+/, "");
-}
-
-function safeJoin(root: string, relativePath: string): string {
-  if (!isSafeArchivePath(relativePath)) {
-    throw Object.assign(new Error("Environment package contains an unsafe path."), { status: 400 });
-  }
-  const targetPath = path.resolve(root, relativePath);
-  const rootPath = path.resolve(root);
-  const comparableTarget = process.platform === "win32" ? targetPath.toLowerCase() : targetPath;
-  const comparableRoot = process.platform === "win32" ? rootPath.toLowerCase() : rootPath;
-  if (comparableTarget !== comparableRoot && !comparableTarget.startsWith(`${comparableRoot}${path.sep}`)) {
-    throw Object.assign(new Error("Environment package contains an unsafe path."), { status: 400 });
-  }
-  return targetPath;
-}
-
-function isSafeArchivePath(relativePath: string): boolean {
-  const rawPath = relativePath.replace(/\\/g, "/");
-  if (rawPath.startsWith("/") || path.isAbsolute(relativePath) || /^[a-z]:\//i.test(rawPath)) return false;
-  const normalizedPath = normalizeArchivePath(relativePath);
-  if (!normalizedPath || normalizedPath.startsWith("/") || path.isAbsolute(normalizedPath)) return false;
-  return !normalizedPath.split("/").some((part) => part === ".." || part === "");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -39,7 +39,7 @@ type ProfileWorkbenchControlsProps = {
   exportProfiles: () => Promise<void>;
   importEnvironmentPackage: () => Promise<void>;
   importProfiles: (file: File) => Promise<void>;
-  loadState: () => Promise<void>;
+  loadState: () => Promise<unknown>;
   openColumns: () => void;
   resetFilters: () => void;
   setFilterPanelOpen: (updater: (current: boolean) => boolean) => void;

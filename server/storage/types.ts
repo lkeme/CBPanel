@@ -10,6 +10,7 @@ import type {
   TrashEnvironment,
 } from "../../src/shared/entities";
 import type { AppSettings, AppSettingsPatch, StorageInfo } from "../../src/shared/settings";
+import type { AppBackupData } from "../../src/shared/appBackup";
 
 export type EnvironmentPackageImportInput = {
   environments: BrowserEnvironment[];
@@ -49,6 +50,8 @@ export interface SettingsRepository {
 export interface StorageRepository {
   getInfo(): Promise<StorageInfo>;
   migrateLegacyJson(): Promise<StorageInfo>;
+  exportFullBackupData(): Promise<AppBackupData>;
+  restoreFullBackupData(data: AppBackupData): Promise<void>;
 }
 
 export interface EnvironmentRepository {

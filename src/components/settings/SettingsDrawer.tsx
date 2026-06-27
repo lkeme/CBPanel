@@ -14,6 +14,7 @@ import { NetworkSettingsPanel } from "./NetworkSettingsPanel";
 import { CopyButton } from "../ui/CopyButton";
 import { Drawer, Field, InfoTip, NumberField, Segmented, ToggleField } from "../ui/form-controls";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
+import { Download, Upload } from "lucide-react";
 
 export type SettingsTab = "general" | "appearance" | "network" | "browserCore" | "advanced";
 
@@ -25,8 +26,10 @@ export function SettingsDrawer({
   close,
   clearBinaryCache,
   importBrowserCoreZip,
+  exportAppBackup,
   initialTab,
   installBinary,
+  restoreAppBackup,
   openRuntimeCheck,
   requestAdvancedWebEntry,
   runtime,
@@ -41,11 +44,13 @@ export function SettingsDrawer({
   checkGithubMirrors: (customGithubMirrorPrefix: string) => Promise<GithubMirrorProbeResponse>;
   close: () => void;
   clearBinaryCache: () => Promise<void>;
+  exportAppBackup: () => Promise<void>;
   importBrowserCoreZip: (filePath: string) => void;
   initialTab: SettingsTab;
   installBinary: () => Promise<void>;
   openRuntimeCheck: () => void;
   requestAdvancedWebEntry: () => void;
+  restoreAppBackup: () => Promise<void>;
   runtime: DesktopRuntimeInfo | null;
   settings: AppSettings;
   saveSettings: (patch: AppSettingsPatch) => Promise<void>;
@@ -205,34 +210,53 @@ export function SettingsDrawer({
         </TabsContent>
 
         <TabsContent value="advanced" className="motion-tab-content">
-          <section className="settings-section">
-            <h2>{t("settings.maintenanceEntry")}</h2>
-            <ToggleField
-              label={t("settings.advancedWebEntry")}
-              help={t("tips.advancedWebEntry", { code: ADVANCED_WEB_ENTRY_CODE })}
-              checked={normalized.desktop.advancedWebEntry}
-              onChange={setAdvancedWebEntry}
-            />
-            <div className={`settings-status-line ${normalized.desktop.advancedWebEntry ? "enabled" : ""}`}>
-              <span className="settings-status-heading">
-                <strong>
-                  {normalized.desktop.advancedWebEntry
-                    ? t("settings.advancedWebEnabled")
-                    : t("settings.advancedWebDisabled")}
-                </strong>
-                <InfoTip text={t("settings.advancedWebEffect")} />
-              </span>
-              {normalized.desktop.advancedWebEntry && (
-                <span className="settings-status-address">
-                  <span>{t("settings.advancedWebAddress")}</span>
-                  <a href={maintenanceUrl} target="_blank" rel="noreferrer">
-                    {maintenanceUrl}
-                  </a>
-                  <CopyButton value={maintenanceUrl} t={t} />
+          <div className="settings-stack no-padding">
+            <section className="settings-section">
+              <div className="settings-section-head">
+                <h2>{t("appBackup.title")}</h2>
+                <InfoTip text={t("appBackup.help")} />
+              </div>
+              <div className="settings-action-row">
+                <button className="command" disabled={busy === "app-backup-export"} onClick={() => void exportAppBackup()} type="button">
+                  <Download size={15} />
+                  {t("appBackup.export")}
+                </button>
+                <button className="command danger subtle" disabled={busy === "app-backup-restore"} onClick={() => void restoreAppBackup()} type="button">
+                  <Upload size={15} />
+                  {t("appBackup.restore")}
+                </button>
+              </div>
+              <div className="result-line">{t("appBackup.includes")}</div>
+            </section>
+            <section className="settings-section">
+              <h2>{t("settings.maintenanceEntry")}</h2>
+              <ToggleField
+                label={t("settings.advancedWebEntry")}
+                help={t("tips.advancedWebEntry", { code: ADVANCED_WEB_ENTRY_CODE })}
+                checked={normalized.desktop.advancedWebEntry}
+                onChange={setAdvancedWebEntry}
+              />
+              <div className={`settings-status-line ${normalized.desktop.advancedWebEntry ? "enabled" : ""}`}>
+                <span className="settings-status-heading">
+                  <strong>
+                    {normalized.desktop.advancedWebEntry
+                      ? t("settings.advancedWebEnabled")
+                      : t("settings.advancedWebDisabled")}
+                  </strong>
+                  <InfoTip text={t("settings.advancedWebEffect")} />
                 </span>
-              )}
-            </div>
-          </section>
+                {normalized.desktop.advancedWebEntry && (
+                  <span className="settings-status-address">
+                    <span>{t("settings.advancedWebAddress")}</span>
+                    <a href={maintenanceUrl} target="_blank" rel="noreferrer">
+                      {maintenanceUrl}
+                    </a>
+                    <CopyButton value={maintenanceUrl} t={t} />
+                  </span>
+                )}
+              </div>
+            </section>
+          </div>
         </TabsContent>
 
         {busy === "settings" && <div className="result-line">{t("status.saving")}</div>}

@@ -41,6 +41,7 @@ const JSON_EXPORT_EXTENSIONS: &[&str] = &["json"];
 const MARKDOWN_EXPORT_EXTENSIONS: &[&str] = &["md", "markdown"];
 const TEXT_EXPORT_EXTENSIONS: &[&str] = &["txt"];
 const ENVIRONMENT_PACKAGE_EXTENSIONS: &[&str] = &["cbpe"];
+const APP_BACKUP_EXTENSIONS: &[&str] = &["cbpb"];
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -319,6 +320,55 @@ async fn cbpanel_select_environment_package_open_path(
     .map_err(|error| format!("Package picker task failed: {error}."))?
 }
 
+#[tauri::command]
+async fn cbpanel_select_app_backup_save_path(
+    app: tauri::AppHandle,
+    filename: String,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let filename = sanitize_export_filename(&filename);
+        let Some(file_path) = app
+            .dialog()
+            .file()
+            .set_title("Save CBPanel backup")
+            .set_file_name(filename)
+            .add_filter("CBPanel Backup", APP_BACKUP_EXTENSIONS)
+            .blocking_save_file()
+        else {
+            return Ok(None);
+        };
+        let path = file_path
+            .into_path()
+            .map_err(|error| format!("Invalid backup path: {error}."))?;
+        Ok(Some(path.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|error| format!("Backup picker task failed: {error}."))?
+}
+
+#[tauri::command]
+async fn cbpanel_select_app_backup_open_path(
+    app: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(file_path) = app
+            .dialog()
+            .file()
+            .set_title("Open CBPanel backup")
+            .add_filter("CBPanel Backup", APP_BACKUP_EXTENSIONS)
+            .blocking_pick_file()
+        else {
+            return Ok(None);
+        };
+        let path = file_path
+            .into_path()
+            .map_err(|error| format!("Invalid backup path: {error}."))?;
+        Ok(Some(path.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|error| format!("Backup picker task failed: {error}."))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let runtime_state = Mutex::new(RuntimeState {
@@ -343,6 +393,8 @@ pub fn run() {
             cbpanel_runtime_config,
             cbpanel_app_quit,
             cbpanel_save_text_file,
+            cbpanel_select_app_backup_save_path,
+            cbpanel_select_app_backup_open_path,
             cbpanel_select_environment_package_save_path,
             cbpanel_select_environment_package_open_path,
             cbpanel_update_tray_state,

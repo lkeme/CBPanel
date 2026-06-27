@@ -39,7 +39,7 @@ export function useProfileUtilityActions({
   downloadTextFile: (content: string, filename: string, type: string) => Promise<boolean>;
   draft: BrowserProfile | null;
   importInput: RefObject<HTMLInputElement | null>;
-  loadState: () => Promise<void>;
+  loadState: () => Promise<unknown>;
   selectedProfiles: BrowserProfile[];
   sessionsByProfileId: Map<string, SessionSummary>;
   setBusy: Dispatch<SetStateAction<string>>;

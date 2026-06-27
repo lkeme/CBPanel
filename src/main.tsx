@@ -12,7 +12,6 @@ import { AppSidebar } from "./components/app/AppSidebar";
 import { DesktopTitlebar } from "./components/app/DesktopTitlebar";
 import type { BrowserCoreImportDialogState } from "./components/browser-core/BrowserCoreImportDialog";
 import { browserCoreOperationActive, isBrowserCoreBusy } from "./components/browser-core/BrowserCoreStatusPanels";
-import { EnvironmentPackageOperationDialog } from "./components/profiles/EnvironmentPackageOperationDialog";
 import {
   DetailsDrawer,
   ProfileInspectorAside,
@@ -65,6 +64,7 @@ import {
   shouldRunStartupBrowserCoreUpdateCheck,
 } from "./shared/browserCore";
 import type { EnvironmentPackageOperation } from "./shared/environmentPackage";
+import type { AppBackupOperation } from "./shared/appBackup";
 import {
   type AppSettings,
   type AppSettingsPatch,
@@ -97,6 +97,9 @@ const BrowserCoreImportDialog = lazy(() =>
 );
 const ProfileEditorDrawer = lazy(() =>
   import("./components/profiles/ProfileEditorDrawer").then((module) => ({ default: module.ProfileEditorDrawer })),
+);
+const EnvironmentPackageOperationDialog = lazy(() =>
+  import("./components/profiles/EnvironmentPackageOperationDialog").then((module) => ({ default: module.EnvironmentPackageOperationDialog })),
 );
 const SettingsDrawer = lazy(() =>
   import("./components/settings/SettingsDrawer").then((module) => ({ default: module.SettingsDrawer })),
@@ -197,6 +200,7 @@ function App() {
   const [extensionSourceEditor, setExtensionSourceEditor] = useState<ExtensionSourceEditorState>(null);
   const [browserCoreImport, setBrowserCoreImport] = useState<BrowserCoreImportDialogState>(null);
   const [environmentPackageOperation, setEnvironmentPackageOperation] = useState<EnvironmentPackageOperation | null>(null);
+  const [appBackupOperation, setAppBackupOperation] = useState<AppBackupOperation | null>(null);
   const [proxyCheck, setProxyCheck] = useState("");
   const [binaryInfo, setBinaryInfo] = useState<BinaryInfo | null>(null);
   const [preflight, setPreflight] = useState<ProfilePreflightReport | null>(null);
@@ -402,13 +406,14 @@ function App() {
     await Promise.all([loadState(), loadBinaryInfo(false), loadRuntimeInfo(), loadDiagnostics()]);
   }
 
-  async function loadState() {
+  async function loadState(): Promise<PanelState> {
     const next = await api<PanelState>("/api/state");
     const optimisticSettings = optimisticSettingsRef.current;
     if (!optimisticSettings) {
       confirmedSettingsRef.current = normalizeSettings(next.settings);
     }
     setState(optimisticSettings ? { ...next, settings: optimisticSettings } : next);
+    return next;
   }
 
   async function loadRuntimeInfo() {
@@ -482,6 +487,41 @@ function App() {
     } catch (error) {
       toast("error", errorMessage(error));
     }
+  }
+
+  async function exportAppBackup() {
+    await runAppBackupAction("export");
+  }
+
+  async function restoreAppBackup() {
+    await runAppBackupAction("restore");
+  }
+
+  async function runAppBackupAction(action: "export" | "restore") {
+    const client = await import("./lib/appBackupClient");
+    const context = {
+      t,
+      toast,
+      setBusy,
+      setAppBackupOperation,
+    };
+    if (action === "export") {
+      await client.runAppBackupExport(context);
+      return;
+    }
+    await client.requestAppBackupRestore({
+      ...context,
+      setConfirmDialog,
+      afterRestore: refreshAfterAppBackupRestore,
+    });
+  }
+
+  async function refreshAfterAppBackupRestore() {
+    setSelectedIds(new Set());
+    setDraft(null);
+    setDrawerMode(null);
+    const [nextState] = await Promise.all([loadState(), loadBinaryInfo(false), loadRuntimeInfo(), loadDiagnostics()]);
+    setSelectedId(nextState.profiles[0]?.id ?? "");
   }
 
   function closeDrawer() {
@@ -1269,6 +1309,7 @@ function App() {
             checkBrowserCoreUpdate={checkBrowserCoreUpdate}
             checkGithubMirrors={checkGithubMirrors}
             close={closeDrawer}
+            exportAppBackup={exportAppBackup}
             importBrowserCoreZip={(filePath) => setBrowserCoreImport({ filePath })}
             installBinary={installBinary}
             initialTab={settingsInitialTab}
@@ -1277,6 +1318,7 @@ function App() {
               setWorkbenchView("runtimeCheck");
             }}
             requestAdvancedWebEntry={() => requestAdvancedWebEntry(normalizedSettings)}
+            restoreAppBackup={restoreAppBackup}
             runtime={runtime}
             settings={settings}
             saveSettings={saveSettings}
@@ -1413,6 +1455,14 @@ function App() {
       {environmentPackageOperation && (
         <EnvironmentPackageOperationDialog
           operation={environmentPackageOperation}
+          t={t}
+        />
+      )}
+
+      {appBackupOperation && (
+        <EnvironmentPackageOperationDialog
+          namespace="appBackup"
+          operation={appBackupOperation}
           t={t}
         />
       )}

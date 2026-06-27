@@ -4629,6 +4629,12 @@ textarea {
   gap: 12px;
 }
 
+.settings-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .settings-section h2 {
   margin: 0;
   font-size: 16px;
