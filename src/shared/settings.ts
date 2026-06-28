@@ -12,6 +12,8 @@ export type DesktopCloseBehavior = "ask" | "tray" | "quit";
 export type BrowserCoreCacheDirMode = "auto" | "custom";
 export type BrowserCoreDownloadSourceMode = "official" | "custom";
 export type BrowserCoreChecksumPolicy = "strict" | "skip";
+export type BrowserCoreTierMode = "free" | "pro";
+export type BrowserCoreVersionMode = "latest" | "pinned";
 export type BrowserCoreEnvValueKind = "text" | "path" | "directory" | "url" | "boolean" | "number" | "secret";
 export type GithubMirrorProviderId =
   | "off"
@@ -101,6 +103,10 @@ export interface BinarySettings {
   customCacheDir: string;
   downloadSourceMode: BrowserCoreDownloadSourceMode;
   customDownloadBaseUrl: string;
+  tierMode: BrowserCoreTierMode;
+  licenseKey: string;
+  browserVersionMode: BrowserCoreVersionMode;
+  pinnedBrowserVersion: string;
   internalAutoUpdate: boolean;
   checksumPolicy: BrowserCoreChecksumPolicy;
   geoipTimeoutSeconds: number | null;
@@ -215,6 +221,8 @@ export const BUILTIN_CLOAKBROWSER_ENV_KEYS = [
   "CLOAKBROWSER_AUTO_UPDATE",
   "CLOAKBROWSER_SKIP_CHECKSUM",
   "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS",
+  "CLOAKBROWSER_VERSION",
+  "CLOAKBROWSER_LICENSE_KEY",
 ] as const;
 
 export type BuiltinCloakBrowserEnvKey = (typeof BUILTIN_CLOAKBROWSER_ENV_KEYS)[number];
@@ -223,6 +231,8 @@ export const OPTIONAL_CLOAKBROWSER_ENV_KEYS = [
   "CLOAKBROWSER_BINARY_PATH",
   "CLOAKBROWSER_DOWNLOAD_URL",
   "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS",
+  "CLOAKBROWSER_VERSION",
+  "CLOAKBROWSER_LICENSE_KEY",
 ] as const;
 
 export type OptionalCloakBrowserEnvKey = (typeof OPTIONAL_CLOAKBROWSER_ENV_KEYS)[number];
@@ -286,6 +296,10 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     customCacheDir: "",
     downloadSourceMode: "official",
     customDownloadBaseUrl: "",
+    tierMode: "free",
+    licenseKey: "",
+    browserVersionMode: "latest",
+    pinnedBrowserVersion: "",
     internalAutoUpdate: false,
     checksumPolicy: "strict",
     geoipTimeoutSeconds: 12,
@@ -373,6 +387,10 @@ export function normalizeSettings(input: AppSettingsPatch = {}): AppSettings {
       customCacheDir: stringValueAllowEmpty(binary.customCacheDir, base.binary.customCacheDir),
       downloadSourceMode: enumValue(binary.downloadSourceMode, ["official", "custom"], base.binary.downloadSourceMode),
       customDownloadBaseUrl: normalizeUrlBase(binary.customDownloadBaseUrl, base.binary.customDownloadBaseUrl),
+      tierMode: enumValue(binary.tierMode, ["free", "pro"], base.binary.tierMode),
+      licenseKey: normalizeLicenseKey(binary.licenseKey, base.binary.licenseKey),
+      browserVersionMode: enumValue(binary.browserVersionMode, ["latest", "pinned"], base.binary.browserVersionMode),
+      pinnedBrowserVersion: normalizeBrowserVersionPin(binary.pinnedBrowserVersion, base.binary.pinnedBrowserVersion),
       internalAutoUpdate: booleanValue(binary.internalAutoUpdate, base.binary.internalAutoUpdate),
       checksumPolicy: enumValue(binary.checksumPolicy, ["strict", "skip"], base.binary.checksumPolicy),
       geoipTimeoutSeconds: normalizeNullableNumber(binary.geoipTimeoutSeconds, 1, 60, base.binary.geoipTimeoutSeconds),
@@ -532,12 +550,16 @@ function normalizeBrowserCoreUpdateCheck(value: unknown): BrowserCoreUpdateCheck
   }
   const latestVersion = stringValueAllowEmpty(input.latestVersion, "");
   const error = stringValueAllowEmpty(input.error, "");
+  const blockedReason = stringValueAllowEmpty(input.blockedReason, "");
   return {
     checkedAt,
+    targetTier: enumValue<NonNullable<BrowserCoreUpdateCheck["targetTier"]>>(input.targetTier, ["free", "pro"], "free"),
+    versionMode: enumValue<NonNullable<BrowserCoreUpdateCheck["versionMode"]>>(input.versionMode, ["latest", "pinned"], "latest"),
     currentVersion,
     latestVersion: latestVersion || undefined,
     updateAvailable: input.updateAvailable,
     downloadLinks: normalizeBrowserCoreDownloadLinks(input.downloadLinks),
+    blockedReason: blockedReason || undefined,
     error: error || undefined,
   };
 }
@@ -549,16 +571,22 @@ function normalizeBrowserCoreDownloadLinks(value: unknown): BrowserCoreUpdateChe
   const platform = stringValueAllowEmpty(input.platform, "");
   const primaryUrl = stringValueAllowEmpty(input.primaryUrl, "");
   const checksumUrl = stringValueAllowEmpty(input.checksumUrl, "");
-  if (!version || !platform || !primaryUrl || !checksumUrl) return undefined;
+  if (!version || !platform || !primaryUrl) return undefined;
   const fallbackUrl = stringValueAllowEmpty(input.fallbackUrl, "");
   const fallbackChecksumUrl = stringValueAllowEmpty(input.fallbackChecksumUrl, "");
+  const signatureUrl = stringValueAllowEmpty(input.signatureUrl, "");
+  const fallbackSignatureUrl = stringValueAllowEmpty(input.fallbackSignatureUrl, "");
   return {
+    tier: enumValue(input.tier, ["free", "pro"], "free"),
     version,
     platform,
     primaryUrl,
     fallbackUrl: fallbackUrl || undefined,
-    checksumUrl,
+    checksumUrl: checksumUrl || undefined,
+    signatureUrl: signatureUrl || undefined,
     fallbackChecksumUrl: fallbackChecksumUrl || undefined,
+    fallbackSignatureUrl: fallbackSignatureUrl || undefined,
+    requiresLicense: booleanValue(input.requiresLicense, false) || undefined,
   };
 }
 
@@ -619,6 +647,18 @@ function stringValueAllowEmpty(value: unknown, fallback: string): string {
 function normalizeUrlBase(value: unknown, fallback: string): string {
   if (typeof value !== "string") return fallback;
   return value.trim().replace(/\/+$/, "");
+}
+
+function normalizeLicenseKey(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  return value.trim();
+}
+
+function normalizeBrowserVersionPin(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  return /^[0-9]+(?:\.[0-9]+){3,4}$/.test(trimmed) ? trimmed : fallback;
 }
 
 function normalizeTraceUrl(value: unknown, fallback: string): string {
@@ -719,17 +759,30 @@ function normalizeCustomEnvVars(value: unknown): BrowserCoreEnvVarSetting[] {
       key,
       value: typeof input.value === "string" ? input.value : "",
       enabled: booleanValue(input.enabled, true),
-      sensitive: booleanValue(input.sensitive, false),
+      sensitive: booleanValue(input.sensitive, defaultEnvSensitive(key)),
       description: typeof input.description === "string" ? input.description.trim() : "",
       valueKind: enumValue(
         input.valueKind,
         ["text", "path", "directory", "url", "boolean", "number", "secret"],
-        input.sensitive ? "secret" : "text",
+        defaultEnvSensitive(key) || input.sensitive ? "secret" : defaultEnvValueKind(key),
       ),
     });
   }
 
   return result;
+}
+
+function defaultEnvSensitive(key: string): boolean {
+  return /TOKEN|SECRET|PASSWORD|CREDENTIAL|KEY/i.test(key);
+}
+
+function defaultEnvValueKind(key: string): BrowserCoreEnvValueKind {
+  if (key === "CLOAKBROWSER_LICENSE_KEY") return "secret";
+  if (key === "CLOAKBROWSER_VERSION") return "text";
+  if (key.endsWith("_DIR") || key.endsWith("_CDM")) return "directory";
+  if (key.endsWith("_URL")) return "url";
+  if (key.endsWith("_SECONDS") || key.endsWith("_TIMEOUT")) return "number";
+  return "text";
 }
 
 export function normalizeCloakBrowserEnvKey(value: unknown): string | undefined {

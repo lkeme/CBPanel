@@ -1,4 +1,5 @@
 import {
+  githubMirrorProbeSignatureTargetUrl,
   githubMirrorProbeTargetUrl,
   rewriteGithubDownloadUrl,
   selectRecommendedGithubMirror,
@@ -60,8 +61,9 @@ export class GithubMirrorProbeService {
 
     const checkedAt = new Date().toISOString();
     const targetUrl = githubMirrorProbeTargetUrl(version);
+    const signatureTargetUrl = githubMirrorProbeSignatureTargetUrl(version);
     const targets = mirrorProbeTargets(settings, request);
-    const results = await Promise.all(targets.map((target) => this.checkOne(target, targetUrl, checkedAt)));
+    const results = await Promise.all(targets.map((target) => this.checkOne(target, targetUrl, signatureTargetUrl, checkedAt)));
     const recommendedProviderId = selectRecommendedGithubMirror(results);
     const recommended = results.find((result) => result.providerId === recommendedProviderId);
     if (recommended?.ok) {
@@ -121,38 +123,45 @@ export class GithubMirrorProbeService {
   private async checkOne(
     target: GithubMirrorProbeTarget,
     targetUrl: string,
+    signatureTargetUrl: string,
     checkedAt: string,
   ): Promise<GithubMirrorProbeResult> {
     const rewrite = rewriteGithubDownloadUrl(targetUrl, target.prefix);
-    if (!rewrite) {
+    const signatureRewrite = rewriteGithubDownloadUrl(signatureTargetUrl, target.prefix);
+    if (!rewrite || !signatureRewrite) {
       return {
         ...target,
         ok: false,
         checkedAt,
-        error: "Mirror prefix cannot rewrite the CloakBrowser checksum URL.",
+        error: "Mirror prefix cannot rewrite the CloakBrowser checksum or signature URL.",
       };
     }
 
     const startedAt = Date.now();
     try {
-      const response = await this.fetchImpl(rewrite.rewrittenUrl, {
-        method: "GET",
-        redirect: "follow",
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-      const text = await response.text();
+      const [manifest, signature] = await Promise.all([
+        this.fetchText(rewrite.rewrittenUrl),
+        this.fetchText(signatureRewrite.rewrittenUrl),
+      ]);
       const latencyMs = Date.now() - startedAt;
-      const bodyLooksValid = text.includes("cloakbrowser-") || text.includes("SHA256");
+      const manifestLooksValid = manifest.ok && manifest.text.split("\n").some((line) =>
+        /^([a-f0-9]{64})\s+\*?cloakbrowser-/i.test(line.trim()) || line.trim().startsWith("version="),
+      );
+      const signatureLooksValid = signature.ok && /^[A-Za-z0-9+/= \r\n]+$/.test(signature.text) && signature.text.trim().length >= 40;
       return {
         ...target,
-        ok: response.ok && bodyLooksValid,
+        ok: manifestLooksValid && signatureLooksValid,
         latencyMs,
-        status: response.status,
+        status: manifest.ok ? signature.status : manifest.status,
         checkedAt,
-        ...(!response.ok
-          ? { error: `HTTP ${response.status}` }
-          : !bodyLooksValid
+        ...(!manifest.ok
+          ? { error: `SHA256SUMS HTTP ${manifest.status}` }
+          : !signature.ok
+            ? { error: `SHA256SUMS.sig HTTP ${signature.status}` }
+          : !manifestLooksValid
             ? { error: "Response does not look like CloakBrowser SHA256SUMS." }
+          : !signatureLooksValid
+            ? { error: "Response does not look like CloakBrowser SHA256SUMS.sig." }
             : {}),
       };
     } catch (error) {
@@ -164,6 +173,19 @@ export class GithubMirrorProbeService {
         error: (error as Error).message || "Mirror check failed.",
       };
     }
+  }
+
+  private async fetchText(url: string): Promise<{ ok: boolean; status: number; text: string }> {
+    const response = await this.fetchImpl(url, {
+      method: "GET",
+      redirect: "follow",
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    return {
+      ok: response.ok,
+      status: response.status,
+      text: await response.text(),
+    };
   }
 }
 

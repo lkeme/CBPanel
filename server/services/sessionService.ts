@@ -14,6 +14,7 @@ import {
   preflightProfile,
 } from "../../src/shared/profile";
 import type { BrowserEnvironment, NetworkCheckResult } from "../../src/shared/entities";
+import type { BrowserCoreTier } from "../../src/shared/browserCore";
 import { normalizeSettings, type AppSettings } from "../../src/shared/settings";
 import type { ExtensionService } from "./extensionService";
 import { applyGithubMirrorFetch } from "./githubMirrorFetch";
@@ -35,6 +36,7 @@ type BinaryInfoReader = () => Promise<{
   installed: boolean;
   binaryPath: string;
   version: string;
+  tier?: BrowserCoreTier;
 }>;
 
 type SessionServiceOptions = {
@@ -419,7 +421,9 @@ export class SessionService {
     if (!this.options.readSettings) return;
     const settings = normalizeSettings(await this.options.readSettings());
     const binary = await this.options.readBinaryInfo();
-    const resolution = await this.githubMirrorProbeService.resolvePrefix(settings, binary.version);
+    const resolution = binary.tier === "pro"
+      ? undefined
+      : await this.githubMirrorProbeService.resolvePrefix(settings, binary.version);
     applyGithubMirrorFetch(settings, resolution?.prefix);
   }
 }

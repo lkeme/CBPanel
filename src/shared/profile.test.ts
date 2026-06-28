@@ -37,6 +37,13 @@ test("defaultProfile starts on CreepJS for first-run fingerprint inspection", ()
   assert.equal(defaultProfile().startUrl, DEFAULT_START_URL);
 });
 
+test("defaultProfile uses native viewport for new headed profiles", () => {
+  const profile = defaultProfile();
+
+  assert.equal(profile.runtime.headless, false);
+  assert.equal(profile.viewport.mode, "native");
+});
+
 test("start URL presets include the legacy detection targets", () => {
   const urls = START_URL_PRESETS.map((preset) => preset.url);
 

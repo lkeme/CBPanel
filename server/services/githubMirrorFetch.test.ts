@@ -44,7 +44,9 @@ test("auto-best mirror resolution rewrites downloads with the fastest successful
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.startsWith("https://ghfast.top/")) {
         await new Promise((resolve) => setTimeout(resolve, 1));
-        return new Response("SHA256 cloakbrowser-windows-x64.zip");
+        return url.endsWith("/SHA256SUMS.sig")
+          ? new Response("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/==")
+          : new Response(`${"a".repeat(64)} cloakbrowser-windows-x64.zip`);
       }
       return new Response("bad", { status: 502 });
     }) as typeof fetch,

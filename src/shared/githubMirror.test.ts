@@ -24,6 +24,13 @@ test("rewriteGithubDownloadUrl mirrors CloakBrowser checksum and GeoIP database 
     "https://ghproxy.vip/https://github.com/CloakHQ/cloakbrowser/releases/download/chromium-v146.0.7680.177.5/SHA256SUMS",
   );
   assert.equal(
+    rewriteGithubDownloadUrl(
+      "https://cloakbrowser.dev/chromium-v146.0.7680.177.5/SHA256SUMS.sig",
+      "https://ghproxy.vip///",
+    )?.rewrittenUrl,
+    "https://ghproxy.vip/https://github.com/CloakHQ/cloakbrowser/releases/download/chromium-v146.0.7680.177.5/SHA256SUMS.sig",
+  );
+  assert.equal(
     rewriteGithubDownloadUrl(CLOAKBROWSER_GEOIP_DB_URL, "https://ghproxy.vip/")?.rewrittenUrl,
     "https://ghproxy.vip/https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb",
   );

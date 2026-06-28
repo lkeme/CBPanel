@@ -496,7 +496,7 @@ export function defaultProfile(input: Partial<BrowserProfile> = {}): BrowserProf
       extraArgs: [],
     },
     viewport: {
-      mode: "fixed",
+      mode: "native",
       width: 1920,
       height: 947,
       userAgent: "",

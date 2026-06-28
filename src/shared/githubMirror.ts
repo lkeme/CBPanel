@@ -53,6 +53,10 @@ export function githubMirrorProbeTargetUrl(version: string): string {
   return `${CLOAKBROWSER_OFFICIAL_BASE_URL}/chromium-v${version}/SHA256SUMS`;
 }
 
+export function githubMirrorProbeSignatureTargetUrl(version: string): string {
+  return `${CLOAKBROWSER_OFFICIAL_BASE_URL}/chromium-v${version}/SHA256SUMS.sig`;
+}
+
 export function selectRecommendedGithubMirror(
   results: readonly GithubMirrorProbeResult[],
 ): Exclude<GithubMirrorProviderId, "off"> | undefined {
@@ -103,7 +107,9 @@ export function normalizeSupportedGithubDownloadUrl(inputUrl: string): { url: st
 }
 
 function isSupportedCloakBrowserReleaseAsset(asset: string): boolean {
-  return asset === "SHA256SUMS" || /^cloakbrowser-[A-Za-z0-9_-]+\.(zip|tar\.gz)$/.test(asset);
+  return asset === "SHA256SUMS"
+    || asset === "SHA256SUMS.sig"
+    || /^cloakbrowser-[A-Za-z0-9_-]+\.(zip|tar\.gz)$/.test(asset);
 }
 
 function normalizeMirrorPrefix(value: string | undefined): string | undefined {

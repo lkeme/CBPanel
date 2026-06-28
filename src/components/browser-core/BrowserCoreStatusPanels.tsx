@@ -82,8 +82,11 @@ export function BrowserCoreUpdateStatus({
       <KeyValueList
         items={[
           { label: t("browserCore.lastCheckedAt"), value: formatTime(update.checkedAt, "dateTime") },
+          { label: t("browserCore.tier"), value: update.targetTier ?? core.targetTier },
+          { label: t("browserCore.versionMode"), value: update.versionMode ?? core.versionMode },
           { label: t("browserCore.currentVersion"), value: update.currentVersion },
           { label: t("browserCore.latestVersion"), value: update.latestVersion ?? "-" },
+          ...(update.blockedReason ? [{ label: t("browserCore.updateBlockedReason"), value: update.blockedReason }] : []),
           ...(update.error ? [{ label: t("status.error"), value: <span className="inline-error">{update.error}</span> }] : []),
         ]}
       />
@@ -97,6 +100,12 @@ export function BrowserCoreUpdateStatus({
             <div className="download-url-row">
               <span className="mono-cell">{update.downloadLinks.fallbackUrl}</span>
               <CopyButton value={update.downloadLinks.fallbackUrl} t={t} />
+            </div>
+          )}
+          {update.downloadLinks.signatureUrl && (
+            <div className="download-url-row">
+              <span className="mono-cell">{update.downloadLinks.signatureUrl}</span>
+              <CopyButton value={update.downloadLinks.signatureUrl} t={t} />
             </div>
           )}
         </div>

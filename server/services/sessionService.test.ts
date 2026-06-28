@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { NetworkCheckResult } from "../../src/shared/entities";
 import { defaultProfile, type BrowserProfile } from "../../src/shared/profile";
+import { normalizeSettings } from "../../src/shared/settings";
+import { restoreGithubMirrorFetch } from "./githubMirrorFetch";
 import { formatNetworkCheckDetail, SessionService } from "./sessionService";
 
 type TestRuntimeHandle = {
@@ -119,6 +121,48 @@ test("stopAll waits for a launching runtime before closing it", async () => {
   const session = service.listSessions().find((item) => item.profileId === profile.id);
   assert.equal(service.closeCount, 1);
   assert.equal(session?.status, "stopped");
+});
+
+test("launchProfile does not probe or install GitHub mirrors for Pro binaries", async () => {
+  const originalFetch = globalThis.fetch;
+  const seenUrls: string[] = [];
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    seenUrls.push(url);
+    return new Response("unexpected mirror probe", { status: 500 });
+  }) as typeof fetch;
+
+  const service = new ControlledRuntimeSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({
+      installed: true,
+      binaryPath: "C:/fake/chrome.exe",
+      version: "147.0.7700.1",
+      tier: "pro",
+    }),
+    readSettings: async () => normalizeSettings({
+      networkTrace: {
+        providerId: "cloudflare-speed",
+        customProviderUrl: "",
+        timeoutSeconds: 8,
+        githubMirrorProviderId: "auto-best",
+        customGithubMirrorPrefix: "",
+      },
+    }),
+  });
+  const profile = defaultProfile({ id: "pro-no-mirror-test" });
+
+  try {
+    const launch = service.launchProfile(profile);
+    await waitFor(() => service.listSessions().some((session) => session.profileId === profile.id && session.status === "launching"));
+    service.releaseRuntime();
+    await launch;
+
+    assert.deepEqual(seenUrls, []);
+  } finally {
+    restoreGithubMirrorFetch();
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("formatNetworkCheckDetail keeps legacy geo fallback for stored old checks", () => {

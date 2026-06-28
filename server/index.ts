@@ -1268,7 +1268,10 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/browser-core/import/analyze", async (request, response) => {
     try {
-      response.json(await binaryService.analyzeImportZip(String(request.body?.path ?? "")));
+      response.json(await binaryService.analyzeImportZip(String(request.body?.path ?? ""), {
+        targetTier: request.body?.targetTier === "pro" ? "pro" : request.body?.targetTier === "free" ? "free" : undefined,
+        setAsDefault: typeof request.body?.setAsDefault === "boolean" ? request.body.setAsDefault : undefined,
+      }));
     } catch (error) {
       sendError(response, error);
     }
@@ -1276,7 +1279,10 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/browser-core/import/install", async (request, response) => {
     try {
-      response.json(await binaryService.installImportZip(String(request.body?.path ?? "")));
+      response.json(await binaryService.installImportZip(String(request.body?.path ?? ""), {
+        targetTier: request.body?.targetTier === "pro" ? "pro" : request.body?.targetTier === "free" ? "free" : undefined,
+        setAsDefault: typeof request.body?.setAsDefault === "boolean" ? request.body.setAsDefault : undefined,
+      }));
     } catch (error) {
       sendError(response, error);
     }

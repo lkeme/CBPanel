@@ -39,6 +39,8 @@ const controlledBrowserCoreEnvDefaults: Record<ControlledBrowserCoreEnvKey, {
   CLOAKBROWSER_BINARY_PATH: { value: "", valueKind: "path" },
   CLOAKBROWSER_DOWNLOAD_URL: { value: "", valueKind: "url" },
   CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS: { value: "12", valueKind: "number" },
+  CLOAKBROWSER_VERSION: { value: "", valueKind: "text" },
+  CLOAKBROWSER_LICENSE_KEY: { value: "", valueKind: "secret" },
 };
 
 export function BrowserCoreSettingsPanel({
@@ -149,11 +151,15 @@ export function BrowserCoreSettingsPanel({
           className="browser-core-download-details"
           items={[
             { label: coreInstalled ? t("browserCore.installedVersion") : t("browserCore.targetVersion"), value: <CopyableValueRow value={binaryInfo?.version} /> },
+            { label: t("browserCore.tier"), value: binaryInfo?.tier ?? binaryInfo?.core?.targetTier ?? "-" },
+            { label: t("browserCore.versionMode"), value: binaryInfo?.core?.versionMode ?? "-" },
+            { label: t("browserCore.bundledVersion"), value: <CopyableValueRow value={binaryInfo?.core?.versions.baselineChromiumVersion} /> },
             { label: t("browserCore.wrapperVersion"), value: <CopyableValueRow value={binaryInfo?.core?.versions.wrapperVersion} /> },
             { label: coreInstalled ? t("browserCore.executablePath") : t("browserCore.expectedExecutablePath"), value: <CopyableValueRow t={t} value={binaryInfo?.binaryPath} /> },
             { label: coreInstalled ? t("browserCore.cacheDirectory") : t("browserCore.expectedCacheDirectory"), value: <CopyableValueRow t={t} value={binaryInfo?.cacheDir} /> },
             { label: t("browserCore.primaryUrl"), value: <CopyableValueRow t={t} value={binaryInfo?.core?.downloads.current.primaryUrl ?? binaryInfo?.downloadUrl} /> },
             { label: t("browserCore.fallbackUrl"), value: <CopyableValueRow t={t} value={binaryInfo?.core?.downloads.current.fallbackUrl} /> },
+            { label: t("browserCore.signatureUrl"), value: <CopyableValueRow t={t} value={binaryInfo?.core?.downloads.current.signatureUrl} /> },
           ]}
         />
         <ToggleField
@@ -174,6 +180,49 @@ export function BrowserCoreSettingsPanel({
 
       <section className="settings-section">
         <h2>{t("browserCore.offlineImport")}</h2>
+        <Field label={t("browserCore.tier")}>
+          <Segmented
+            value={binary.tierMode}
+            options={[
+              { value: "free", label: t("browserCore.tierFree") },
+              { value: "pro", label: t("browserCore.tierPro") },
+            ]}
+            onChange={(tierMode) => saveBinary({ tierMode })}
+          />
+        </Field>
+        {binary.tierMode === "pro" && (
+          <Field label={t("browserCore.licenseKey")} help={t("browserCore.licenseKeyHelp")} wide>
+            <input
+              autoComplete="off"
+              type="password"
+              value={binary.licenseKey}
+              onChange={(event) => saveBinary({ licenseKey: event.target.value })}
+              placeholder="cb_xxxxxxxx"
+            />
+          </Field>
+        )}
+        <Field label={t("browserCore.versionMode")}>
+          <Segmented
+            value={binary.browserVersionMode}
+            options={[
+              { value: "latest", label: t("browserCore.versionLatest") },
+              { value: "pinned", label: t("browserCore.versionPinned") },
+            ]}
+            onChange={(browserVersionMode) => saveBinary({ browserVersionMode })}
+          />
+        </Field>
+        {binary.browserVersionMode === "pinned" && (
+          <Field label={t("browserCore.pinnedVersion")} help={t("browserCore.pinnedVersionHelp")} wide>
+            <input
+              value={binary.pinnedBrowserVersion}
+              onChange={(event) => saveBinary({ pinnedBrowserVersion: event.target.value })}
+              placeholder="148.0.7778.215.2"
+            />
+          </Field>
+        )}
+        {binary.downloadSourceMode === "custom" && binary.tierMode === "pro" && (
+          <div className="result-line">{t("browserCore.customSourceDisablesPro")}</div>
+        )}
         <Field label={t("browserCore.cacheDirMode")}>
           <Segmented
             value={binary.cacheDirMode}
@@ -331,7 +380,7 @@ function CustomEnvVarEditor({
           ...draft,
           id: crypto.randomUUID(),
           key: normalizedKey,
-          sensitive: false,
+          sensitive: envSensitiveForKey(normalizedKey),
           valueKind: envValueKindForKey(normalizedKey, draft.valueKind),
         },
       ],
@@ -370,7 +419,11 @@ function CustomEnvVarEditor({
               options={customKeyOptions}
               t={t}
               value={item.key}
-              onChange={(key) => updateCustomEnv(item.id, { key, valueKind: envValueKindForKey(key, item.valueKind) })}
+              onChange={(key) => updateCustomEnv(item.id, {
+                key,
+                sensitive: envSensitiveForKey(key),
+                valueKind: envValueKindForKey(key, item.valueKind),
+              })}
             />
             <input
               className="mono-cell"
@@ -396,7 +449,12 @@ function CustomEnvVarEditor({
           options={customKeyOptions}
           t={t}
           value={draft.key}
-          onChange={(key) => setDraft((current) => ({ ...current, key, valueKind: envValueKindForKey(key, current.valueKind) }))}
+          onChange={(key) => setDraft((current) => ({
+            ...current,
+            key,
+            sensitive: envSensitiveForKey(key),
+            valueKind: envValueKindForKey(key, current.valueKind),
+          }))}
         />
         <input
           className="mono-cell"
@@ -429,4 +487,8 @@ function envValueKindForKey(key: string, fallback: BrowserCoreEnvValueKind): Bro
   if (key.endsWith("_SECONDS") || key.endsWith("_TIMEOUT")) return "number";
   if (key === "CLOAKBROWSER_WIDEVINE") return "boolean";
   return fallback === "secret" ? "text" : fallback;
+}
+
+function envSensitiveForKey(key: string): boolean {
+  return /TOKEN|SECRET|PASSWORD|CREDENTIAL|KEY/i.test(key);
 }

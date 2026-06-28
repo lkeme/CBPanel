@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { TranslationKey } from "../../i18n";
 import type { BrowserCoreImportAnalysis } from "../../shared/browserCore";
 import { DialogShell } from "../ui/DialogShell";
+import { Field, Segmented, ToggleField } from "../ui/form-controls";
 import { KeyValueList } from "../ui/KeyValueList";
 
 export type BrowserCoreImportDialogState = {
@@ -48,6 +49,9 @@ export function BrowserCoreImportDialog({
   }, [analyzeImport, setState, state.analysis, state.filePath]);
 
   const analysis = state.analysis;
+  function updateAnalysis(patch: Partial<BrowserCoreImportAnalysis>) {
+    setState((current) => current?.analysis ? { ...current, analysis: { ...current.analysis, ...patch } } : current);
+  }
   return (
     <DialogShell
       actions={
@@ -90,9 +94,31 @@ export function BrowserCoreImportDialog({
               { label: t("browserCore.importZipPath"), value: analysis.filePath, mono: true },
               { label: t("form.platform"), value: analysis.platform },
               { label: t("form.version"), value: analysis.importedVersion ?? "-" },
+              { label: t("browserCore.tier"), value: analysis.targetTier },
               { label: "SHA-256", value: analysis.sha256, mono: true },
               { label: t("form.cache"), value: analysis.targetCacheDir ?? "-", mono: true },
             ]}
+          />
+          <Field label={t("browserCore.importTier")}>
+            <Segmented
+              value={analysis.targetTier}
+              options={[
+                { value: "free", label: t("browserCore.tierFree") },
+                { value: "pro", label: t("browserCore.tierPro") },
+              ]}
+              onChange={(targetTier) => updateAnalysis({
+                targetTier,
+                targetCacheDir: analysis.targetCacheDir && analysis.importedVersion
+                  ? analysis.targetCacheDir.replace(/chromium-[^\\/]+$/, `chromium-${analysis.importedVersion}${targetTier === "pro" ? "-pro" : ""}`)
+                  : analysis.targetCacheDir,
+              })}
+            />
+          </Field>
+          <ToggleField
+            checked={analysis.setAsDefault}
+            label={t("browserCore.importSetDefault")}
+            help={t("browserCore.importSetDefaultHelp")}
+            onChange={(setAsDefault) => updateAnalysis({ setAsDefault })}
           />
         </div>
       )}

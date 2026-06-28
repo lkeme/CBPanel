@@ -14,6 +14,8 @@ const binaryEnvRows: Array<{ key: keyof CloakBrowserEnvInfo; label: string }> = 
   { key: "autoUpdate", label: "CLOAKBROWSER_AUTO_UPDATE" },
   { key: "skipChecksum", label: "CLOAKBROWSER_SKIP_CHECKSUM" },
   { key: "geoipTimeoutSeconds", label: "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS" },
+  { key: "version", label: "CLOAKBROWSER_VERSION" },
+  { key: "licenseKey", label: "CLOAKBROWSER_LICENSE_KEY" },
 ];
 
 export function SystemStatusContent({
@@ -153,6 +155,8 @@ export function SystemStatusContent({
           <KeyValueList
             items={[
               { label: t("settings.binary"), value: binaryInfo?.installed ? t("form.installed") : t("form.missing") },
+              { label: t("form.version"), value: binaryInfo?.version ?? "-" },
+              { label: t("browserCore.tier"), value: binaryInfo?.tier ?? "-" },
               { label: t("form.path"), value: binaryInfo?.binaryPath ?? "-" },
               { label: t("form.cache"), value: binaryInfo?.cacheDir ?? "-" },
               { label: t("settings.platform"), value: binaryInfo?.platform ?? "-" },

@@ -14,7 +14,9 @@ import {
   type BrowserCoreImportKind,
   type BrowserCoreOperation,
   type BrowserCoreOperationLog,
+  type BrowserCoreTier,
   type BrowserCoreUpdateCheck,
+  type BrowserCoreVersionMode,
   maskEnvValue,
 } from "../../src/shared/browserCore";
 import {
@@ -37,6 +39,8 @@ export type CloakBrowserEnvInfo = {
   autoUpdate?: string;
   skipChecksum?: string;
   geoipTimeoutSeconds?: string;
+  version?: string;
+  licenseKey?: string;
 };
 
 export type CloakBrowserModule = typeof import("cloakbrowser");
@@ -86,8 +90,19 @@ const BUILTIN_ENV_KEYS = [
   "CLOAKBROWSER_AUTO_UPDATE",
   "CLOAKBROWSER_SKIP_CHECKSUM",
   "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS",
+  "CLOAKBROWSER_VERSION",
+  "CLOAKBROWSER_LICENSE_KEY",
 ] as const;
 const BUILTIN_ENV_KEY_SET = new Set<string>(BUILTIN_ENV_KEYS);
+
+type BrowserCoreTarget = {
+  tier: BrowserCoreTier;
+  versionMode: BrowserCoreVersionMode;
+  pinnedVersion?: string;
+  licenseKey?: string;
+  customBinaryPath?: string;
+  customDownloadBaseUrl?: string;
+};
 
 export class BinaryService {
   private readonly fetchImpl: typeof fetch;
@@ -107,8 +122,10 @@ export class BinaryService {
   }
 
   async readInfo(): Promise<CloakBinaryInfo> {
+    const settings = normalizeSettings(await this.options.readSettings());
+    const target = browserCoreTarget(settings);
     const runtime = await this.cloakbrowser();
-    const info = await this.withCustomBinaryOverride(await runtime.binaryInfo());
+    const info = await this.withCustomBinaryOverride(await runtime.binaryInfo(target.pinnedVersion));
     return this.withManagedCacheProbe(info);
   }
 
@@ -125,9 +142,10 @@ export class BinaryService {
     this.startOperation("install", "preparing", "Installing CloakBrowser Chromium.");
     try {
       const settings = normalizeSettings(await this.options.readSettings());
+      const target = browserCoreTarget(settings);
       this.setOperationProgress("checking-cache", "Checking existing CloakBrowser cache.");
       const runtime = await this.cloakbrowser();
-      const before = await this.withCustomBinaryOverride(await runtime.binaryInfo());
+      const before = await this.withCustomBinaryOverride(await runtime.binaryInfo(target.pinnedVersion));
       if (settings.binary.preferExistingCache && before.installed) {
         this.setOperationProgress("reusing-cache", "Existing CloakBrowser cache is ready.", 100, 100);
         this.finishOperation("succeeded", "Reused existing CloakBrowser Chromium cache.", before.binaryPath);
@@ -135,7 +153,7 @@ export class BinaryService {
       }
 
       this.setOperationProgress("installing", "Calling cloakbrowser.ensureBinary().");
-      const binaryPath = await this.captureCloakbrowserOperationLogs(() => runtime.ensureBinary());
+      const binaryPath = await this.captureCloakbrowserOperationLogs(() => runtime.ensureBinary(target.licenseKey, target.pinnedVersion));
       this.setOperationProgress("finalizing", "Refreshing browser core state.", 100, 100);
       this.finishOperation("succeeded", "Installed CloakBrowser Chromium.", binaryPath);
       return { binaryPath, info: await this.readPublicInfo() };
@@ -148,9 +166,32 @@ export class BinaryService {
   async update(): Promise<{ version: string | null; info: PublicBinaryInfo }> {
     this.startOperation("update", "preparing", "Updating CloakBrowser Chromium.");
     try {
-      this.setOperationProgress("checking-update", "Checking CloakBrowser release metadata.");
+      const settings = normalizeSettings(await this.options.readSettings());
+      const target = browserCoreTarget(settings);
+      if (target.versionMode === "pinned") {
+        this.finishOperation("failed", "CloakBrowser Chromium update skipped.", "Pinned browser version is enabled.");
+        throw Object.assign(new Error("Pinned browser version is enabled. Change the pinned version or switch back to latest before updating."), { status: 400 });
+      }
+
       const runtime = await this.cloakbrowser();
-      const version = await this.captureCloakbrowserOperationLogs(() => runtime.checkForUpdate());
+      let version: string | null = null;
+      if (target.tier === "pro") {
+        if (!target.licenseKey) {
+          throw Object.assign(new Error("CloakBrowser Pro requires CLOAKBROWSER_LICENSE_KEY."), { status: 400 });
+        }
+        this.setOperationProgress("checking-update", "Checking CloakBrowser Pro release metadata.");
+        const current = await this.withCustomBinaryOverride(await runtime.binaryInfo(target.pinnedVersion));
+        const latest = await this.latestProChromiumVersion(current.platform);
+        if (latest && compareVersions(latest, current.version) > 0) {
+          this.setOperationProgress("installing", `Calling cloakbrowser.ensureBinary() for Pro ${latest}.`);
+          await this.captureCloakbrowserOperationLogs(() => runtime.ensureBinary(target.licenseKey, latest));
+          await this.writeProVersionMarker(latest);
+          version = latest;
+        }
+      } else {
+        this.setOperationProgress("checking-update", "Checking CloakBrowser release metadata.");
+        version = await this.captureCloakbrowserOperationLogs(() => runtime.checkForUpdate());
+      }
       this.setOperationProgress("finalizing", "Refreshing browser core state.", 100, 100);
       this.finishOperation("succeeded", version ? `Updated to ${version}.` : "No newer Chromium binary is available.");
       return { version, info: await this.readPublicInfo() };
@@ -176,21 +217,32 @@ export class BinaryService {
   }
 
   async checkUpdate(): Promise<{ update: BrowserCoreUpdateCheck; info: PublicBinaryInfo }> {
+    const settings = normalizeSettings(await this.options.readSettings());
+    const target = browserCoreTarget(settings);
     const current = await this.readInfo();
     const checkedAt = new Date().toISOString();
     try {
-      const latestVersion = await this.latestChromiumVersion(current.platform);
+      const latestVersion = target.tier === "pro"
+        ? await this.latestProChromiumVersion(current.platform)
+        : await this.latestChromiumVersion(current.platform);
       const updateAvailable = Boolean(latestVersion && compareVersions(latestVersion, current.version) > 0);
       this.updateCheck = {
         checkedAt,
+        targetTier: target.tier,
+        versionMode: target.versionMode,
         currentVersion: current.version,
         latestVersion,
         updateAvailable,
-        downloadLinks: latestVersion ? this.downloadLinks(current, latestVersion) : undefined,
+        downloadLinks: latestVersion ? this.downloadLinks(current, latestVersion, target.tier) : undefined,
+        blockedReason: target.versionMode === "pinned" && updateAvailable
+          ? "Pinned browser version is enabled; automatic update will not replace it."
+          : undefined,
       };
     } catch (error) {
       this.updateCheck = {
         checkedAt,
+        targetTier: target.tier,
+        versionMode: target.versionMode,
         currentVersion: current.version,
         updateAvailable: false,
         error: (error as Error).message,
@@ -200,8 +252,13 @@ export class BinaryService {
     return { update: this.updateCheck, info: await this.readPublicInfo() };
   }
 
-  async analyzeImportZip(filePath: string): Promise<BrowserCoreImportAnalysis> {
+  async analyzeImportZip(
+    filePath: string,
+    options: { targetTier?: BrowserCoreTier; setAsDefault?: boolean } = {},
+  ): Promise<BrowserCoreImportAnalysis> {
     const resolvedPath = path.resolve(filePath);
+    const settings = normalizeSettings(await this.options.readSettings());
+    const target = browserCoreTarget(settings);
     const [stat, archiveBytes, current] = await Promise.all([
       fs.stat(resolvedPath),
       fs.readFile(resolvedPath),
@@ -217,8 +274,10 @@ export class BinaryService {
     const importedVersion = normalizeImportedVersion(await readChromeVersionFromArchive(resolvedPath, archiveBytes, archiveKind), current.version);
     const operation = importOperation(current.version, importedVersion, platform === current.platform);
     const allowed = operation !== "blocked";
+    const targetTier = options.targetTier ?? target.tier;
+    const setAsDefault = options.setAsDefault ?? target.versionMode !== "pinned";
     const targetCacheDir = importedVersion
-      ? path.join(path.dirname(current.cacheDir), `chromium-${importedVersion}`)
+      ? path.join(path.dirname(current.cacheDir), `chromium-${importedVersion}${targetTier === "pro" ? "-pro" : ""}`)
       : undefined;
 
     return {
@@ -227,6 +286,8 @@ export class BinaryService {
       fileSize: stat.size,
       sha256,
       platform,
+      targetTier,
+      setAsDefault,
       currentVersion: current.version,
       importedVersion,
       operation,
@@ -236,8 +297,11 @@ export class BinaryService {
     };
   }
 
-  async installImportZip(filePath: string): Promise<{ analysis: BrowserCoreImportAnalysis; info: PublicBinaryInfo }> {
-    const analysis = await this.analyzeImportZip(filePath);
+  async installImportZip(
+    filePath: string,
+    options: { targetTier?: BrowserCoreTier; setAsDefault?: boolean } = {},
+  ): Promise<{ analysis: BrowserCoreImportAnalysis; info: PublicBinaryInfo }> {
+    const analysis = await this.analyzeImportZip(filePath, options);
     if (!analysis.allowed || !analysis.importedVersion || !analysis.targetCacheDir) {
       throw Object.assign(new Error(analysis.reason ?? "CloakBrowser import package cannot be installed safely."), { status: 400 });
     }
@@ -259,7 +323,13 @@ export class BinaryService {
       await fs.rm(analysis.targetCacheDir, { recursive: true, force: true });
       await fs.mkdir(path.dirname(analysis.targetCacheDir), { recursive: true });
       await fs.rename(stagingDir, analysis.targetCacheDir);
-      await this.writeVersionMarker(analysis.importedVersion);
+      if (analysis.setAsDefault) {
+        if (analysis.targetTier === "pro") {
+          await this.writeProVersionMarker(analysis.importedVersion);
+        } else {
+          await this.writeVersionMarker(analysis.importedVersion);
+        }
+      }
       this.setOperationProgress("finalizing", "Refreshing browser core state.", 100, 100);
       this.finishOperation("succeeded", `Imported CloakBrowser Chromium ${analysis.importedVersion}.`, analysis.targetCacheDir);
       return { analysis, info: await this.readPublicInfo() };
@@ -272,13 +342,18 @@ export class BinaryService {
 
   private async coreInfo(info: CloakBinaryInfo): Promise<BrowserCoreInfo> {
     const settings = normalizeSettings(await this.options.readSettings());
+    const target = browserCoreTarget(settings);
     this.updateCheck ??= settings.binary.lastUpdateCheck;
     const env = this.runtimeEnv(settings);
     const status = info.installed ? "installed" : "not-installed";
-    const current = this.downloadLinks(info, info.version);
+    const current = this.downloadLinks(info, info.version, info.tier ?? target.tier);
     return {
       status,
       installed: info.installed,
+      tier: info.tier,
+      targetTier: target.tier,
+      versionMode: target.versionMode,
+      pinnedVersion: target.pinnedVersion,
       platform: info.platform,
       binaryPath: info.binaryPath,
       cacheDir: info.cacheDir,
@@ -288,7 +363,7 @@ export class BinaryService {
         wrapperVersion: PACKAGE_VERSIONS.cloakbrowser,
         wrapperVersionDetail: PACKAGE_VERSIONS.cloakbrowser ? "Packaged with CBPanel sidecar." : "Unknown in packaged runtime.",
         chromiumVersion: info.version,
-        baselineChromiumVersion: info.version,
+        baselineChromiumVersion: info.bundledVersion ?? info.version,
         playwrightCoreVersion: PACKAGE_VERSIONS.playwrightCore,
         puppeteerCoreVersion: PACKAGE_VERSIONS.puppeteerCore,
       },
@@ -347,7 +422,7 @@ export class BinaryService {
       enabled: Boolean(envValues.downloadUrl),
       source: envValues.downloadUrlSource,
       valueKind: "url",
-      detail: envValues.downloadUrl ? "Custom source disables CloakBrowser's GitHub fallback." : undefined,
+      detail: envValues.downloadUrl ? "Custom source disables CloakBrowser's GitHub fallback and Pro download routing." : undefined,
     });
     this.setRuntimeEnv(values, {
       key: "CLOAKBROWSER_AUTO_UPDATE",
@@ -373,6 +448,23 @@ export class BinaryService {
       enabled: Boolean(envValues.geoipTimeoutSeconds),
       source: envValues.geoipTimeoutSecondsSource,
       valueKind: "number",
+    });
+    this.setRuntimeEnv(values, {
+      key: "CLOAKBROWSER_VERSION",
+      value: envValues.version,
+      enabled: Boolean(envValues.version),
+      source: envValues.versionSource,
+      valueKind: "text",
+      detail: envValues.version ? "Pins an exact CloakBrowser Chromium version for launches and binary management." : undefined,
+    });
+    this.setRuntimeEnv(values, {
+      key: "CLOAKBROWSER_LICENSE_KEY",
+      value: envValues.licenseKey,
+      enabled: Boolean(envValues.licenseKey),
+      source: envValues.licenseKeySource,
+      valueKind: "secret",
+      sensitive: true,
+      detail: envValues.licenseKey ? "Enables CloakBrowser Pro downloads unless a custom download URL is set." : undefined,
     });
 
     for (const item of binary.customEnvVars) {
@@ -426,7 +518,10 @@ export class BinaryService {
 
   private async applyGithubMirrorFetch(runtime: CloakBrowserModule): Promise<void> {
     const settings = normalizeSettings(await this.options.readSettings());
-    const resolution = await this.githubMirrorProbeService.resolvePrefix(settings, runtime.binaryInfo().version);
+    const target = browserCoreTarget(settings);
+    const resolution = target.tier === "pro"
+      ? undefined
+      : await this.githubMirrorProbeService.resolvePrefix(settings, runtime.binaryInfo(target.pinnedVersion).version);
     applyGithubMirrorFetch(settings, resolution?.prefix);
   }
 
@@ -464,6 +559,8 @@ export class BinaryService {
       CLOAKBROWSER_AUTO_UPDATE: envValues.autoUpdate,
       CLOAKBROWSER_SKIP_CHECKSUM: envValues.skipChecksum,
       CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS: envValues.geoipTimeoutSeconds,
+      CLOAKBROWSER_VERSION: envValues.version,
+      CLOAKBROWSER_LICENSE_KEY: envValues.licenseKey,
     };
 
     for (const [key, value] of Object.entries(desiredBuiltins)) {
@@ -513,7 +610,10 @@ export class BinaryService {
     const executableName = path.basename(info.binaryPath);
     const cacheRoot = path.dirname(info.cacheDir);
     const candidates = await listManagedCacheCandidates(cacheRoot, executableName);
-    const compatible = candidates.find((candidate) => versionsShareChromiumBuild(info.version, candidate.version));
+    const isPro = info.tier === "pro" || info.cacheDir.endsWith("-pro");
+    const compatible = candidates.find((candidate) =>
+      candidate.pro === isPro && versionsShareChromiumBuild(info.version, candidate.version),
+    );
     if (!compatible) return undefined;
 
     await fs.rm(info.cacheDir, { recursive: true, force: true });
@@ -526,26 +626,61 @@ export class BinaryService {
   }
 
   private async writeVersionMarker(version: string): Promise<void> {
-    const info = await this.readInfo();
-    await fs.mkdir(info.cacheDir, { recursive: true });
-    await fs.writeFile(path.join(info.cacheDir, `latest_version_${info.platform}`), version, "utf8");
+    const runtime = await this.cloakbrowser();
+    const info = runtime.binaryInfo(version);
+    const cacheRoot = process.env.CLOAKBROWSER_CACHE_DIR || this.defaultCacheDir();
+    await fs.mkdir(cacheRoot, { recursive: true });
+    await fs.writeFile(path.join(cacheRoot, `latest_version_${info.platform}`), version, "utf8");
   }
 
-  private downloadLinks(info: CloakBinaryInfo, version: string): BrowserCoreDownloadLinks {
+  private async writeProVersionMarker(version: string): Promise<void> {
+    const runtime = await this.cloakbrowser();
+    const info = runtime.binaryInfo(version);
+    const cacheRoot = process.env.CLOAKBROWSER_CACHE_DIR || this.defaultCacheDir();
+    await fs.mkdir(cacheRoot, { recursive: true });
+    await fs.writeFile(path.join(cacheRoot, `latest_pro_version_${info.platform}`), version, "utf8");
+  }
+
+  private downloadLinks(info: CloakBinaryInfo, version: string, tier: BrowserCoreTier): BrowserCoreDownloadLinks {
     const customBase = process.env.CLOAKBROWSER_DOWNLOAD_URL?.replace(/\/+$/, "");
     const platform = info.platform;
     const archiveName = archiveNameForPlatform(platform);
+    if (tier === "pro" && !customBase) {
+      const manifestBase = `${CLOAKBROWSER_DEFAULT_BASE_URL}/releases/pro/chromium-v${version}`;
+      return {
+        tier,
+        version,
+        platform,
+        primaryUrl: `${CLOAKBROWSER_DEFAULT_BASE_URL}/api/download/${version}`,
+        checksumUrl: `${manifestBase}/SHA256SUMS`,
+        signatureUrl: `${manifestBase}/SHA256SUMS.sig`,
+        requiresLicense: true,
+      };
+    }
     const base = customBase || CLOAKBROWSER_DEFAULT_BASE_URL;
     const primaryUrl = `${base}/chromium-v${version}/${archiveName}`;
     const checksumUrl = `${base}/chromium-v${version}/SHA256SUMS`;
     return {
+      tier: customBase ? "free" : tier,
       version,
       platform,
       primaryUrl: primaryUrl,
       fallbackUrl: customBase ? undefined : `${GITHUB_DOWNLOAD_BASE_URL}/chromium-v${version}/${archiveName}`,
       checksumUrl: checksumUrl,
+      signatureUrl: customBase ? undefined : `${base}/chromium-v${version}/SHA256SUMS.sig`,
       fallbackChecksumUrl: customBase ? undefined : `${GITHUB_DOWNLOAD_BASE_URL}/chromium-v${version}/SHA256SUMS`,
+      fallbackSignatureUrl: customBase ? undefined : `${GITHUB_DOWNLOAD_BASE_URL}/chromium-v${version}/SHA256SUMS.sig`,
     };
+  }
+
+  private async latestProChromiumVersion(platform: string): Promise<string | undefined> {
+    const response = await this.fetchImpl(`${CLOAKBROWSER_DEFAULT_BASE_URL}/api/download/version`, {
+      headers: { "X-Platform": platform },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`CloakBrowser Pro version check failed: HTTP ${response.status}`);
+    const data = await response.json() as { version?: unknown };
+    return typeof data.version === "string" && data.version.trim() ? data.version.trim() : undefined;
   }
 
   private async latestChromiumVersion(platform: string): Promise<string | undefined> {
@@ -699,6 +834,8 @@ export class BinaryService {
       autoUpdate: process.env.CLOAKBROWSER_AUTO_UPDATE,
       skipChecksum: process.env.CLOAKBROWSER_SKIP_CHECKSUM,
       geoipTimeoutSeconds: process.env.CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS,
+      version: process.env.CLOAKBROWSER_VERSION,
+      licenseKey: process.env.CLOAKBROWSER_LICENSE_KEY ? maskEnvValue("CLOAKBROWSER_LICENSE_KEY", process.env.CLOAKBROWSER_LICENSE_KEY, true) : undefined,
     };
   }
 }
@@ -706,6 +843,40 @@ export class BinaryService {
 function isCacheManagedByCbpanel(env: BrowserCoreEnvRuntimeValue[]): boolean {
   const row = env.find((item) => item.key === "CLOAKBROWSER_CACHE_DIR");
   return row?.source === "cbpanel-default" || row?.source === "settings";
+}
+
+function browserCoreTarget(settings: AppSettings): BrowserCoreTarget {
+  const binary = settings.binary;
+  const customRows = new Map(binary.customEnvVars.map((item) => [item.key, item]));
+  const enabledCustom = new Map(binary.customEnvVars.filter((item) => item.enabled).map((item) => [item.key, item]));
+  const customDownloadBaseUrl =
+    envUrlBaseValue(enabledCustom.get("CLOAKBROWSER_DOWNLOAD_URL")?.value)
+    ?? (!customRows.has("CLOAKBROWSER_DOWNLOAD_URL") && binary.downloadSourceMode === "custom"
+      ? envUrlBaseValue(binary.customDownloadBaseUrl)
+      : undefined);
+  const licenseKey =
+    envStringValue(enabledCustom.get("CLOAKBROWSER_LICENSE_KEY")?.value)
+    ?? (!customRows.has("CLOAKBROWSER_LICENSE_KEY") && binary.tierMode === "pro"
+      ? envStringValue(binary.licenseKey)
+      : undefined);
+  const pinnedVersion =
+    envStringValue(enabledCustom.get("CLOAKBROWSER_VERSION")?.value)
+    ?? (!customRows.has("CLOAKBROWSER_VERSION") && binary.browserVersionMode === "pinned"
+      ? envStringValue(binary.pinnedBrowserVersion)
+      : undefined);
+  const customBinaryPath =
+    envStringValue(enabledCustom.get("CLOAKBROWSER_BINARY_PATH")?.value)
+    ?? (!customRows.has("CLOAKBROWSER_BINARY_PATH") && binary.customBinaryPathEnabled
+      ? envStringValue(binary.customBinaryPath)
+      : undefined);
+  return {
+    tier: customDownloadBaseUrl ? "free" : binary.tierMode,
+    versionMode: pinnedVersion ? "pinned" : "latest",
+    pinnedVersion,
+    licenseKey,
+    customBinaryPath,
+    customDownloadBaseUrl,
+  };
 }
 
 function browserCoreEnvValues(settings: AppSettings): {
@@ -719,10 +890,15 @@ function browserCoreEnvValues(settings: AppSettings): {
   skipChecksumSource: BrowserCoreEnvRuntimeValue["source"];
   geoipTimeoutSeconds: string | undefined;
   geoipTimeoutSecondsSource: BrowserCoreEnvRuntimeValue["source"];
+  version: string | undefined;
+  versionSource: BrowserCoreEnvRuntimeValue["source"];
+  licenseKey: string | undefined;
+  licenseKeySource: BrowserCoreEnvRuntimeValue["source"];
 } {
   const binary = settings.binary;
   const customRows = new Map(settings.binary.customEnvVars.map((item) => [item.key, item]));
   const custom = new Map(settings.binary.customEnvVars.filter((item) => item.enabled).map((item) => [item.key, item]));
+  const target = browserCoreTarget(settings);
   const binaryPath =
     envStringValue(custom.get("CLOAKBROWSER_BINARY_PATH")?.value)
     ?? (!customRows.has("CLOAKBROWSER_BINARY_PATH") && binary.customBinaryPathEnabled ? envStringValue(binary.customBinaryPath) : undefined);
@@ -735,6 +911,12 @@ function browserCoreEnvValues(settings: AppSettings): {
   const geoipTimeoutSeconds = geoipRow
     ? numberEnvValue(geoipRow.value, 12, 1, 60)
     : undefined;
+  const version =
+    envStringValue(custom.get("CLOAKBROWSER_VERSION")?.value)
+    ?? (!customRows.has("CLOAKBROWSER_VERSION") ? target.pinnedVersion : undefined);
+  const licenseKey =
+    envStringValue(custom.get("CLOAKBROWSER_LICENSE_KEY")?.value)
+    ?? (!customRows.has("CLOAKBROWSER_LICENSE_KEY") ? target.licenseKey : undefined);
 
   return {
     binaryPath,
@@ -747,6 +929,10 @@ function browserCoreEnvValues(settings: AppSettings): {
     skipChecksumSource: "settings",
     geoipTimeoutSeconds,
     geoipTimeoutSecondsSource: geoipRow ? "custom" : "cloakbrowser-default",
+    version,
+    versionSource: custom.has("CLOAKBROWSER_VERSION") ? "custom" : target.pinnedVersion ? "settings" : "cloakbrowser-default",
+    licenseKey,
+    licenseKeySource: custom.has("CLOAKBROWSER_LICENSE_KEY") ? "custom" : target.licenseKey ? "settings" : "cloakbrowser-default",
   };
 }
 
@@ -1001,7 +1187,10 @@ async function findFile(directory: string, fileName: string, depth: number): Pro
   return undefined;
 }
 
-async function listManagedCacheCandidates(cacheRoot: string, executableName: string): Promise<Array<{ directory: string; version: string; binaryPath: string }>> {
+async function listManagedCacheCandidates(
+  cacheRoot: string,
+  executableName: string,
+): Promise<Array<{ directory: string; version: string; binaryPath: string; pro: boolean }>> {
   let entries: Array<import("node:fs").Dirent>;
   try {
     entries = await fs.readdir(cacheRoot, { withFileTypes: true });
@@ -1009,14 +1198,16 @@ async function listManagedCacheCandidates(cacheRoot: string, executableName: str
     return [];
   }
 
-  const candidates: Array<{ directory: string; version: string; binaryPath: string }> = [];
+  const candidates: Array<{ directory: string; version: string; binaryPath: string; pro: boolean }> = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const version = entry.name.match(/^chromium-(.+)$/i)?.[1];
-    if (!version) continue;
+    const match = entry.name.match(/^chromium-(.+?)(-pro)?$/i);
+    if (!match?.[1]) continue;
+    const version = match[1];
+    const pro = Boolean(match[2]);
     const directory = path.join(cacheRoot, entry.name);
     const binaryPath = path.join(directory, executableName);
-    if (await pathExists(binaryPath)) candidates.push({ directory, version, binaryPath });
+    if (await pathExists(binaryPath)) candidates.push({ directory, version, binaryPath, pro });
   }
   return candidates.sort((left, right) => compareVersions(right.version, left.version));
 }

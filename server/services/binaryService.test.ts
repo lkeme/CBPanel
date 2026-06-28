@@ -14,6 +14,8 @@ const CLOAK_ENV_KEYS = [
   "CLOAKBROWSER_AUTO_UPDATE",
   "CLOAKBROWSER_SKIP_CHECKSUM",
   "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS",
+  "CLOAKBROWSER_VERSION",
+  "CLOAKBROWSER_LICENSE_KEY",
 ] as const;
 
 test("BinaryService applies browser core settings before loading CloakBrowser", async () => {
@@ -228,6 +230,78 @@ test("BinaryService install reuses an installed cache when preferExistingCache i
   }
 });
 
+test("BinaryService passes Pro license and pinned version to CloakBrowser install", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const calls: Array<{ licenseKey?: string; browserVersion?: string }> = [];
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({
+      preferExistingCache: false,
+      tierMode: "pro",
+      licenseKey: "license-secret",
+      browserVersionMode: "pinned",
+      pinnedBrowserVersion: "147.0.7700.1",
+    }),
+    loadCloakBrowser: async () => ({
+      ...fakeCloakBrowserModule({ version: "147.0.7700.1", tier: "pro" }),
+      binaryInfo: (browserVersion?: string) => fakeBinaryInfo({
+        version: browserVersion ?? "146.0.7680.177.5",
+        tier: "pro",
+        cacheDir: `C:/cache/chromium-${browserVersion ?? "146.0.7680.177.5"}-pro`,
+        binaryPath: `C:/cache/chromium-${browserVersion ?? "146.0.7680.177.5"}-pro/chrome.exe`,
+      }),
+      ensureBinary: async (licenseKey?: string, browserVersion?: string) => {
+        calls.push({ licenseKey, browserVersion });
+        return `C:/cache/chromium-${browserVersion}-pro/chrome.exe`;
+      },
+    } as CloakBrowserModule),
+  });
+
+  try {
+    const result = await service.install();
+
+    assert.deepEqual(calls, [{ licenseKey: "license-secret", browserVersion: "147.0.7700.1" }]);
+    assert.equal(process.env.CLOAKBROWSER_VERSION, "147.0.7700.1");
+    assert.equal(process.env.CLOAKBROWSER_LICENSE_KEY, "license-secret");
+    assert.equal(result.info.core.targetTier, "pro");
+    assert.equal(result.info.core.versionMode, "pinned");
+    assert.equal(result.info.core.pinnedVersion, "147.0.7700.1");
+    assert.equal(result.info.core.downloads.current.requiresLicense, true);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+test("BinaryService blocks automatic update while browser version is pinned", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  let ensureCalls = 0;
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({
+      browserVersionMode: "pinned",
+      pinnedBrowserVersion: "146.0.7680.177.5",
+    }),
+    loadCloakBrowser: async () => ({
+      ...fakeCloakBrowserModule({ installed: true }),
+      ensureBinary: async () => {
+        ensureCalls += 1;
+        return "C:/cache/chrome.exe";
+      },
+    } as CloakBrowserModule),
+  });
+
+  try {
+    await assert.rejects(() => service.update(), /Pinned browser version is enabled/);
+    assert.equal(ensureCalls, 0);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
 test("BinaryService repairs a compatible managed cache directory and reports installed", async () => {
   const originalEnv = captureEnv();
   const directory = await makeTempDir();
@@ -332,6 +406,49 @@ test("BinaryService imports local Linux tar.gz into the wrapper-compatible cache
     assert.equal(result.info.binaryPath, path.join(wrapperCacheDir, "chrome"));
     assert.ok(await exists(path.join(wrapperCacheDir, "chrome")));
     assert.equal(result.info.core.downloads.current.primaryUrl, "https://cloakbrowser.dev/chromium-v146.0.7680.177.5/cloakbrowser-linux-x64.tar.gz");
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+test("BinaryService imports local ZIP into a Pro cache without changing the Free marker", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const cacheRoot = path.join(directory, "cache");
+  const wrapperCacheDir = path.join(cacheRoot, "chromium-146.0.7680.177.5-pro");
+  const zipPath = path.join(directory, "cloakbrowser-windows-x64.zip");
+  await fs.writeFile(zipPath, zipSync({
+    "chromium-146.0.7680.177/chrome.exe": new Uint8Array([1, 2, 3]),
+  }));
+
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: true,
+    readSettings: async () => settings({
+      cacheDirMode: "custom",
+      customCacheDir: cacheRoot,
+      tierMode: "pro",
+      licenseKey: "license-secret",
+    }),
+    loadCloakBrowser: async () => fakeCloakBrowserModule({
+      binaryPath: path.join(wrapperCacheDir, "chrome.exe"),
+      cacheDir: wrapperCacheDir,
+      installed: false,
+      tier: "pro",
+    }),
+  });
+
+  try {
+    const analysis = await service.analyzeImportZip(zipPath, { targetTier: "pro" });
+    assert.equal(analysis.targetTier, "pro");
+    assert.equal(analysis.setAsDefault, true);
+    assert.equal(analysis.targetCacheDir, wrapperCacheDir);
+
+    await service.installImportZip(zipPath, { targetTier: "pro" });
+
+    assert.ok(await exists(path.join(wrapperCacheDir, "chrome.exe")));
+    assert.equal(await fs.readFile(path.join(cacheRoot, "latest_pro_version_windows-x64"), "utf8"), "146.0.7680.177.5");
+    assert.equal(await exists(path.join(cacheRoot, "latest_version_windows-x64")), false);
   } finally {
     restoreEnv(originalEnv);
   }
@@ -497,6 +614,53 @@ test("BinaryService checks Linux tar.gz release assets", async () => {
   }
 });
 
+test("BinaryService checks Pro releases through the CloakBrowser Pro API", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const seen: Array<{ url: string; platform?: string }> = [];
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({
+      tierMode: "pro",
+      licenseKey: "license-secret",
+      browserVersionMode: "latest",
+    }),
+    fetchImpl: async (input, init) => {
+      seen.push({
+        url: String(input),
+        platform: init?.headers instanceof Headers
+          ? init.headers.get("X-Platform") ?? undefined
+          : (init?.headers as Record<string, string> | undefined)?.["X-Platform"],
+      });
+      return Response.json({ version: "147.0.7700.1" });
+    },
+    loadCloakBrowser: async () => fakeCloakBrowserModule({
+      installed: true,
+      tier: "pro",
+      platform: "linux-x64",
+      version: "146.0.7680.177.5",
+      binaryPath: "/cache/chromium-146.0.7680.177.5-pro/chrome",
+      cacheDir: "/cache/chromium-146.0.7680.177.5-pro",
+    }),
+  });
+
+  try {
+    const result = await service.checkUpdate();
+
+    assert.deepEqual(seen, [{ url: "https://cloakbrowser.dev/api/download/version", platform: "linux-x64" }]);
+    assert.equal(result.update.targetTier, "pro");
+    assert.equal(result.update.latestVersion, "147.0.7700.1");
+    assert.equal(result.update.downloadLinks?.primaryUrl, "https://cloakbrowser.dev/api/download/147.0.7700.1");
+    assert.equal(result.update.downloadLinks?.checksumUrl, "https://cloakbrowser.dev/releases/pro/chromium-v147.0.7700.1/SHA256SUMS");
+    assert.equal(result.update.downloadLinks?.signatureUrl, "https://cloakbrowser.dev/releases/pro/chromium-v147.0.7700.1/SHA256SUMS.sig");
+    assert.equal(result.update.downloadLinks?.fallbackUrl, undefined);
+    assert.equal(result.update.downloadLinks?.requiresLicense, true);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
 test("BinaryService restores the last browser core update check from settings", async () => {
   const originalEnv = captureEnv();
   const directory = await makeTempDir();
@@ -548,22 +712,37 @@ function fakeCloakBrowserModule(patch: {
   downloadUrl?: string;
   installed?: boolean;
   platform?: string;
+  tier?: "free" | "pro";
   version?: string;
 } = {}): CloakBrowserModule {
-  const info = {
-    version: patch.version ?? "146.0.7680.177.5",
-    platform: patch.platform ?? "windows-x64",
-    binaryPath: patch.binaryPath ?? "C:/cache/chromium-146.0.7680.177.5/chrome.exe",
-    installed: patch.installed ?? false,
-    cacheDir: patch.cacheDir ?? "C:/cache/chromium-146.0.7680.177.5",
-    downloadUrl: patch.downloadUrl ?? "https://cloakbrowser.dev/chromium-v146.0.7680.177.5/cloakbrowser-windows-x64.zip",
-  };
+  const info = fakeBinaryInfo(patch);
   return {
     binaryInfo: () => info,
     ensureBinary: async () => info.binaryPath,
     checkForUpdate: async () => null,
     clearCache: () => undefined,
   } as CloakBrowserModule;
+}
+
+function fakeBinaryInfo(patch: {
+  binaryPath?: string;
+  cacheDir?: string;
+  downloadUrl?: string;
+  installed?: boolean;
+  platform?: string;
+  tier?: "free" | "pro";
+  version?: string;
+} = {}) {
+  return {
+    version: patch.version ?? "146.0.7680.177.5",
+    bundledVersion: patch.version ?? "146.0.7680.177.5",
+    platform: patch.platform ?? "windows-x64",
+    binaryPath: patch.binaryPath ?? "C:/cache/chromium-146.0.7680.177.5/chrome.exe",
+    installed: patch.installed ?? false,
+    cacheDir: patch.cacheDir ?? "C:/cache/chromium-146.0.7680.177.5",
+    downloadUrl: patch.downloadUrl ?? "https://cloakbrowser.dev/chromium-v146.0.7680.177.5/cloakbrowser-windows-x64.zip",
+    tier: patch.tier ?? "free",
+  };
 }
 
 function captureEnv(): Record<string, string | undefined> {

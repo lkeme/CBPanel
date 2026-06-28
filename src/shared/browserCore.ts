@@ -15,14 +15,20 @@ export type BrowserCoreOperationType = "install" | "update" | "clear-cache" | "i
 export type BrowserCoreOperationStatus = "idle" | "running" | "succeeded" | "failed";
 export type BrowserCoreEnvSource = "cbpanel-default" | "settings" | "custom" | "external" | "cloakbrowser-default";
 export type BrowserCoreImportKind = "install" | "upgrade" | "reinstall" | "downgrade" | "blocked";
+export type BrowserCoreTier = "free" | "pro";
+export type BrowserCoreVersionMode = "latest" | "pinned";
 
 export interface BrowserCoreDownloadLinks {
+  tier: BrowserCoreTier;
   version: string;
   platform: string;
   primaryUrl: string;
   fallbackUrl?: string;
-  checksumUrl: string;
+  checksumUrl?: string;
+  signatureUrl?: string;
   fallbackChecksumUrl?: string;
+  fallbackSignatureUrl?: string;
+  requiresLicense?: boolean;
 }
 
 export interface BrowserCoreVersionInfo {
@@ -73,10 +79,13 @@ export interface BrowserCoreOperation {
 
 export interface BrowserCoreUpdateCheck {
   checkedAt: string;
+  targetTier?: BrowserCoreTier;
+  versionMode?: BrowserCoreVersionMode;
   currentVersion: string;
   latestVersion?: string;
   updateAvailable: boolean;
   downloadLinks?: BrowserCoreDownloadLinks;
+  blockedReason?: string;
   error?: string;
 }
 
@@ -86,6 +95,8 @@ export interface BrowserCoreImportAnalysis {
   fileSize: number;
   sha256: string;
   platform: string;
+  targetTier: BrowserCoreTier;
+  setAsDefault: boolean;
   currentVersion: string;
   importedVersion?: string;
   operation: BrowserCoreImportKind;
@@ -98,6 +109,10 @@ export interface BrowserCoreImportAnalysis {
 export interface BrowserCoreInfo {
   status: BrowserCoreInstallStatus;
   installed: boolean;
+  tier?: BrowserCoreTier;
+  targetTier: BrowserCoreTier;
+  versionMode: BrowserCoreVersionMode;
+  pinnedVersion?: string;
   platform: string;
   binaryPath: string;
   cacheDir: string;
@@ -123,10 +138,14 @@ export interface CloakBrowserEnvInfo {
   autoUpdate?: string;
   skipChecksum?: string;
   geoipTimeoutSeconds?: string;
+  version?: string;
+  licenseKey?: string;
 }
 
 export interface BinaryInfo {
   version: string;
+  bundledVersion?: string;
+  tier?: BrowserCoreTier;
   platform: string;
   binaryPath: string;
   installed: boolean;

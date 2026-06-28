@@ -107,7 +107,11 @@ export function useBrowserCoreActions({
     try {
       const result = await api<{ analysis: BrowserCoreImportAnalysis; info: BinaryInfo }>("/api/browser-core/import/install", {
         method: "POST",
-        body: JSON.stringify({ path: analysis.filePath }),
+        body: JSON.stringify({
+          path: analysis.filePath,
+          targetTier: analysis.targetTier,
+          setAsDefault: analysis.setAsDefault,
+        }),
       });
       setBinaryInfo(result.info);
       setBrowserCoreImport(null);

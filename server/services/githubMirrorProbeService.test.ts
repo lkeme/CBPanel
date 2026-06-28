@@ -22,13 +22,18 @@ test("mirrorProbeTargets returns built-in mirrors and valid custom mirror for al
   assert.equal(targets.at(-1)?.prefix, "https://mirror.example.com/");
 });
 
-test("GithubMirrorProbeService checks checksum URLs and recommends the fastest successful mirror", async () => {
+test("GithubMirrorProbeService checks checksum and signature URLs before recommending a mirror", async () => {
   const seenUrls: string[] = [];
   const service = new GithubMirrorProbeService({
     fetchImpl: (async (input: Parameters<typeof fetch>[0]) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       seenUrls.push(url);
-      if (url.startsWith("https://ghproxy.vip/")) return new Response("abc cloakbrowser-windows-x64.zip", { status: 200 });
+      if (url.startsWith("https://ghproxy.vip/") && url.endsWith("/SHA256SUMS")) {
+        return new Response(`${"a".repeat(64)} cloakbrowser-windows-x64.zip`, { status: 200 });
+      }
+      if (url.startsWith("https://ghproxy.vip/") && url.endsWith("/SHA256SUMS.sig")) {
+        return new Response("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/==", { status: 200 });
+      }
       return new Response("missing", { status: 502 });
     }) as typeof fetch,
   });
@@ -46,9 +51,8 @@ test("GithubMirrorProbeService checks checksum URLs and recommends the fastest s
 
   assert.equal(response.recommendedProviderId, "ghproxy-vip");
   assert.equal(response.results.find((item) => item.providerId === "ghproxy-vip")?.ok, true);
-  assert.ok(
-    seenUrls.every((url) => url.endsWith("/https://github.com/CloakHQ/cloakbrowser/releases/download/chromium-v146.0.7680.177.5/SHA256SUMS")),
-  );
+  assert.ok(seenUrls.some((url) => url.endsWith("/SHA256SUMS")));
+  assert.ok(seenUrls.some((url) => url.endsWith("/SHA256SUMS.sig")));
 });
 
 test("auto-best probe target checks all built-in mirrors", () => {
@@ -97,9 +101,12 @@ test("GithubMirrorProbeService records failed mirrors without failing the whole 
 test("GithubMirrorProbeService reuses recent mirror probe results", async () => {
   let fetchCalls = 0;
   const service = new GithubMirrorProbeService({
-    fetchImpl: (async () => {
+    fetchImpl: (async (input: Parameters<typeof fetch>[0]) => {
       fetchCalls += 1;
-      return new Response("SHA256 cloakbrowser-windows-x64.zip");
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      return url.endsWith("/SHA256SUMS.sig")
+        ? new Response("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/==")
+        : new Response(`${"a".repeat(64)} cloakbrowser-windows-x64.zip`);
     }) as typeof fetch,
   });
   const settings = normalizeSettings({
@@ -115,16 +122,19 @@ test("GithubMirrorProbeService reuses recent mirror probe results", async () => 
   const first = await service.check(settings, "146.0.7680.177.5", { providerId: "all" });
   const second = await service.check(settings, "146.0.7680.177.5", { providerId: "all" });
 
-  assert.equal(fetchCalls, 5);
+  assert.equal(fetchCalls, 10);
   assert.deepEqual(second, first);
 });
 
 test("GithubMirrorProbeService caches mirror probes by request shape", async () => {
   let fetchCalls = 0;
   const service = new GithubMirrorProbeService({
-    fetchImpl: (async () => {
+    fetchImpl: (async (input: Parameters<typeof fetch>[0]) => {
       fetchCalls += 1;
-      return new Response("SHA256 cloakbrowser-windows-x64.zip");
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      return url.endsWith("/SHA256SUMS.sig")
+        ? new Response("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/==")
+        : new Response(`${"a".repeat(64)} cloakbrowser-windows-x64.zip`);
     }) as typeof fetch,
   });
   const settings = normalizeSettings({
@@ -144,7 +154,7 @@ test("GithubMirrorProbeService caches mirror probes by request shape", async () 
     customGithubMirrorPrefix: "https://mirror-two.example.com/",
   });
 
-  assert.equal(fetchCalls, 2);
+  assert.equal(fetchCalls, 4);
 });
 
 test("GitHub mirror probe target is still limited to supported CloakBrowser downloads", () => {
