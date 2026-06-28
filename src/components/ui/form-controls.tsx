@@ -75,15 +75,26 @@ export function Field({
   label: string;
   wide?: boolean;
 }) {
+  const labelId = React.useId();
+  const generatedControlId = React.useId();
+  const labelledControl = labelSingleNativeControl(children, labelId, generatedControlId);
+  const labelContent = labelledControl.controlId
+    ? <label htmlFor={labelledControl.controlId} id={labelId}>{label}</label>
+    : <span id={labelId}>{label}</span>;
+  const labelNode = (
+    <span className="field-label">
+      {labelContent}
+      {help && <InfoTip text={help} />}
+    </span>
+  );
+  const rootClassName = `field ${wide ? "wide" : ""}`;
+
   return (
-    <label className={`field ${wide ? "wide" : ""}`}>
-      <span className="field-label">
-        {label}
-        {help && <InfoTip text={help} />}
-      </span>
-      {children}
+    <div aria-labelledby={labelId} className={rootClassName} role="group">
+      {labelNode}
+      {labelledControl.children}
       {error && <span className="field-error">{error}</span>}
-    </label>
+    </div>
   );
 }
 
@@ -178,12 +189,42 @@ export function Segmented<T extends string>({
   onChange: (value: T) => void;
 }) {
   return (
-    <div className="segmented">
+    <div className="segmented" role="group">
       {options.map((option) => (
-        <button className={option.value === value ? "active" : ""} key={option.value} onClick={() => onChange(option.value)} type="button">
+        <button
+          aria-pressed={option.value === value}
+          className={option.value === value ? "active" : ""}
+          key={option.value}
+          onClick={() => onChange(option.value)}
+          type="button"
+        >
           {option.label}
         </button>
       ))}
     </div>
   );
+}
+
+function labelSingleNativeControl(
+  children: React.ReactNode,
+  labelId: string,
+  generatedControlId: string,
+): { children: React.ReactNode; controlId?: string } {
+  if (!React.isValidElement(children) || typeof children.type !== "string") return { children };
+  if (!["input", "select", "textarea"].includes(children.type)) return { children };
+  const child = children as React.ReactElement<Record<string, unknown>, string>;
+  const props = child.props as {
+    "aria-label"?: string;
+    "aria-labelledby"?: string;
+    id?: unknown;
+  };
+  const existingId = typeof props.id === "string" ? props.id.trim() : "";
+  const controlId = existingId || generatedControlId;
+  const labelledProps: Record<string, string> = {};
+  if (!existingId) labelledProps.id = controlId;
+  if (!props["aria-label"] && !props["aria-labelledby"]) labelledProps["aria-labelledby"] = labelId;
+  return {
+    children: Object.keys(labelledProps).length > 0 ? React.cloneElement(child, labelledProps) : children,
+    controlId,
+  };
 }

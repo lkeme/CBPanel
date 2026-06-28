@@ -123,10 +123,17 @@ export function useBrowserCoreActions({
     }
   }
 
-  async function analyzeBrowserCoreImport(filePath: string): Promise<BrowserCoreImportAnalysis> {
+  async function analyzeBrowserCoreImport(
+    filePath: string,
+    options: Partial<Pick<BrowserCoreImportAnalysis, "setAsDefault" | "targetTier">> = {},
+  ): Promise<BrowserCoreImportAnalysis> {
     return api<BrowserCoreImportAnalysis>("/api/browser-core/import/analyze", {
       method: "POST",
-      body: JSON.stringify({ path: filePath }),
+      body: JSON.stringify({
+        path: filePath,
+        setAsDefault: options.setAsDefault,
+        targetTier: options.targetTier,
+      }),
     });
   }
 

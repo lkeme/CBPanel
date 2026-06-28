@@ -631,6 +631,19 @@ test("mergeSettings applies partial patches without losing sibling groups", () =
   assert.equal(settings.storage.primary, "sqlite");
 });
 
+test("mergeSettings applies browser core partial patches without losing sibling settings", () => {
+  const settings = mergeSettings(DEFAULT_APP_SETTINGS, {
+    binary: {
+      tierMode: "pro",
+    },
+  });
+
+  assert.equal(settings.binary.tierMode, "pro");
+  assert.equal(settings.binary.browserVersionMode, DEFAULT_APP_SETTINGS.binary.browserVersionMode);
+  assert.equal(settings.binary.cacheDirMode, DEFAULT_APP_SETTINGS.binary.cacheDirMode);
+  assert.equal(settings.binary.customEnvVars.length, DEFAULT_APP_SETTINGS.binary.customEnvVars.length);
+});
+
 test("resolveLanguageMode maps system language to supported locale", () => {
   assert.equal(resolveLanguageMode("system", "zh-Hans-CN"), "zh-CN");
   assert.equal(resolveLanguageMode("system", "en-GB"), "en-US");

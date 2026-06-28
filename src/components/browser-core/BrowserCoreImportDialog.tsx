@@ -8,6 +8,8 @@ import { KeyValueList } from "../ui/KeyValueList";
 
 export type BrowserCoreImportDialogState = {
   filePath: string;
+  setAsDefault?: boolean;
+  targetTier?: BrowserCoreImportAnalysis["targetTier"];
   analysis?: BrowserCoreImportAnalysis;
 } | null;
 
@@ -20,7 +22,10 @@ export function BrowserCoreImportDialog({
   state,
   t,
 }: {
-  analyzeImport: (filePath: string) => Promise<BrowserCoreImportAnalysis>;
+  analyzeImport: (
+    filePath: string,
+    options?: Partial<Pick<BrowserCoreImportAnalysis, "setAsDefault" | "targetTier">>,
+  ) => Promise<BrowserCoreImportAnalysis>;
   busy: string;
   close: () => void;
   installImport: (analysis: BrowserCoreImportAnalysis) => Promise<void>;
@@ -36,7 +41,10 @@ export function BrowserCoreImportDialog({
     async function analyze() {
       setError("");
       try {
-        const analysis = await analyzeImport(state.filePath);
+        const analysis = await analyzeImport(state.filePath, {
+          setAsDefault: state.setAsDefault,
+          targetTier: state.targetTier,
+        });
         if (!cancelled) setState((current) => (current ? { ...current, analysis } : current));
       } catch (analysisError) {
         if (!cancelled) setError((analysisError as Error).message);
@@ -46,7 +54,7 @@ export function BrowserCoreImportDialog({
     return () => {
       cancelled = true;
     };
-  }, [analyzeImport, setState, state.analysis, state.filePath]);
+  }, [analyzeImport, setState, state.analysis, state.filePath, state.setAsDefault, state.targetTier]);
 
   const analysis = state.analysis;
   function updateAnalysis(patch: Partial<BrowserCoreImportAnalysis>) {

@@ -11,6 +11,8 @@ import {
   type AppSettings,
   type AppSettingsPatch,
   type BinarySettings,
+  type BrowserCoreTierMode,
+  type BrowserCoreVersionMode,
   type BrowserCoreEnvValueKind,
   type BrowserCoreEnvVarSetting,
   isBuiltinCloakBrowserEnvKey,
@@ -61,7 +63,10 @@ export function BrowserCoreSettingsPanel({
   busy: string;
   checkBrowserCoreUpdate: () => Promise<void>;
   clearBinaryCache: () => Promise<void>;
-  importBrowserCoreZip: (filePath: string) => void;
+  importBrowserCoreZip: (
+    filePath: string,
+    options?: { setAsDefault?: boolean; targetTier?: BrowserCoreTierMode },
+  ) => void;
   installBinary: () => Promise<void>;
   openRuntimeCheck: () => void;
   saveSettings: (patch: AppSettingsPatch) => Promise<void>;
@@ -80,6 +85,8 @@ export function BrowserCoreSettingsPanel({
   const actionBusy = operationBusy || checkBusy;
   const coreInstalled = Boolean(binaryInfo?.installed);
   const updateAvailable = Boolean(binaryInfo?.core?.update?.updateAvailable);
+  const targetTier = binaryInfo?.core?.targetTier ?? binary.tierMode;
+  const targetVersionMode = binaryInfo?.core?.versionMode ?? binary.browserVersionMode;
   const statusDetail = managedCoreDisabled
     ? t("browserCore.managedActionsDisabled")
     : coreInstalled
@@ -87,7 +94,7 @@ export function BrowserCoreSettingsPanel({
       : t("browserCore.missingStatusDetail");
 
   function saveBinary(patch: Partial<BinarySettings>) {
-    void saveSettings({ binary: { ...binary, ...patch } });
+    void saveSettings({ binary: patch });
   }
 
   return (
@@ -152,8 +159,8 @@ export function BrowserCoreSettingsPanel({
           className="browser-core-download-details"
           items={[
             { label: coreInstalled ? t("browserCore.installedVersion") : t("browserCore.targetVersion"), value: <CopyableValueRow value={binaryInfo?.version} /> },
-            { label: t("browserCore.tier"), value: binaryInfo?.tier ?? binaryInfo?.core?.targetTier ?? "-" },
-            { label: t("browserCore.versionMode"), value: binaryInfo?.core?.versionMode ?? "-" },
+            { label: t("browserCore.tier"), value: tierModeLabel(targetTier, t) },
+            { label: t("browserCore.versionMode"), value: browserVersionModeLabel(targetVersionMode, t) },
             { label: t("browserCore.bundledVersion"), value: <CopyableValueRow value={binaryInfo?.core?.versions.baselineChromiumVersion} /> },
             { label: t("browserCore.wrapperVersion"), value: <CopyableValueRow value={binaryInfo?.core?.versions.wrapperVersion} /> },
             { label: coreInstalled ? t("browserCore.executablePath") : t("browserCore.expectedExecutablePath"), value: <CopyableValueRow t={t} value={binaryInfo?.binaryPath} /> },
@@ -253,7 +260,15 @@ export function BrowserCoreSettingsPanel({
             ) : (
               <span className="input-hint">{t("browserCore.webManualPathOnly")}</span>
             )}
-            <button className="command" disabled={!importPath.trim() || actionBusy || importBusy} onClick={() => importBrowserCoreZip(importPath)} type="button">
+            <button
+              className="command"
+              disabled={!importPath.trim() || actionBusy || importBusy}
+              onClick={() => importBrowserCoreZip(importPath, {
+                setAsDefault: binary.browserVersionMode !== "pinned",
+                targetTier: binary.tierMode,
+              })}
+              type="button"
+            >
               {t("browserCore.analyzeImport")}
             </button>
           </div>
@@ -273,6 +288,20 @@ export function BrowserCoreSettingsPanel({
       </section>
     </div>
   );
+}
+
+function tierModeLabel(
+  value: BrowserCoreTierMode,
+  t: (key: TranslationKey) => string,
+): string {
+  return value === "pro" ? t("browserCore.tierPro") : t("browserCore.tierFree");
+}
+
+function browserVersionModeLabel(
+  value: BrowserCoreVersionMode,
+  t: (key: TranslationKey) => string,
+): string {
+  return value === "pinned" ? t("browserCore.versionPinned") : t("browserCore.versionLatest");
 }
 
 async function pickBrowserCoreZip(

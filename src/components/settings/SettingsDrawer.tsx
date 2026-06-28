@@ -5,6 +5,7 @@ import {
   ADVANCED_WEB_ENTRY_CODE,
   type AppSettings,
   type AppSettingsPatch,
+  type BrowserCoreTierMode,
   type DesktopCloseBehavior,
   type DesktopRuntimeInfo,
   normalizeSettings,
@@ -45,7 +46,10 @@ export function SettingsDrawer({
   close: () => void;
   clearBinaryCache: () => Promise<void>;
   exportAppBackup: () => Promise<void>;
-  importBrowserCoreZip: (filePath: string) => void;
+  importBrowserCoreZip: (
+    filePath: string,
+    options?: { setAsDefault?: boolean; targetTier?: BrowserCoreTierMode },
+  ) => void;
   initialTab: SettingsTab;
   installBinary: () => Promise<void>;
   openRuntimeCheck: () => void;

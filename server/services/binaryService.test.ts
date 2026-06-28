@@ -327,6 +327,44 @@ test("BinaryService preserves external Pro license and version env when settings
   }
 });
 
+test("BinaryService resolves target tier and version mode from updated settings", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  let currentSettings = settings({});
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => currentSettings,
+    loadCloakBrowser: async () => ({
+      ...fakeCloakBrowserModule(),
+      binaryInfo: (browserVersion?: string) => fakeBinaryInfo({
+        version: browserVersion ?? "146.0.7680.177.5",
+      }),
+    } as CloakBrowserModule),
+  });
+
+  try {
+    const first = await service.readPublicInfo();
+    assert.equal(first.core.targetTier, "free");
+    assert.equal(first.core.versionMode, "latest");
+
+    currentSettings = settings({
+      tierMode: "pro",
+      licenseKey: "license-secret",
+      browserVersionMode: "pinned",
+      pinnedBrowserVersion: "147.0.7700.1",
+    });
+
+    const second = await service.readPublicInfo();
+    assert.equal(second.core.targetTier, "pro");
+    assert.equal(second.core.versionMode, "pinned");
+    assert.equal(second.core.pinnedVersion, "147.0.7700.1");
+    assert.equal(second.version, "147.0.7700.1");
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
 test("BinaryService blocks automatic update while browser version is pinned", async () => {
   const originalEnv = captureEnv();
   const directory = await makeTempDir();

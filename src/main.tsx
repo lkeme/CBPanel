@@ -613,6 +613,7 @@ function App() {
       if (saveSeq === settingsSaveSeqRef.current) {
         optimisticSettingsRef.current = null;
         setState((current) => (current ? { ...current, settings: saved } : current));
+        if (patch.binary !== undefined) void loadBinaryInfo(false);
       }
     } catch (error) {
       if (saveSeq === settingsSaveSeqRef.current) {
@@ -1328,7 +1329,7 @@ function App() {
             checkGithubMirrors={checkGithubMirrors}
             close={closeDrawer}
             exportAppBackup={exportAppBackup}
-            importBrowserCoreZip={(filePath) => setBrowserCoreImport({ filePath })}
+            importBrowserCoreZip={(filePath, options) => setBrowserCoreImport({ filePath, ...options })}
             installBinary={installBinary}
             initialTab={settingsInitialTab}
             openRuntimeCheck={() => {
