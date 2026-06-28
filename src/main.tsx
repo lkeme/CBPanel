@@ -101,9 +101,14 @@ const ProfileEditorDrawer = lazy(() =>
 const EnvironmentPackageOperationDialog = lazy(() =>
   import("./components/profiles/EnvironmentPackageOperationDialog").then((module) => ({ default: module.EnvironmentPackageOperationDialog })),
 );
-const SettingsDrawer = lazy(() =>
-  import("./components/settings/SettingsDrawer").then((module) => ({ default: module.SettingsDrawer })),
-);
+type SettingsDrawerModule = typeof import("./components/settings/SettingsDrawer");
+let settingsDrawerModulePromise: Promise<SettingsDrawerModule> | null = null;
+function loadSettingsDrawer(): Promise<SettingsDrawerModule> {
+  settingsDrawerModulePromise ??= import("./components/settings/SettingsDrawer");
+  return settingsDrawerModulePromise;
+}
+const SettingsDrawer = lazy(() => loadSettingsDrawer().then((module) => ({ default: module.SettingsDrawer })));
+void loadSettingsDrawer();
 const ColumnSettingsDrawer = lazy(() =>
   import("./components/profiles/ColumnSettingsDrawer").then((module) => ({ default: module.ColumnSettingsDrawer })),
 );
@@ -1304,7 +1309,7 @@ function App() {
       )}
 
       {drawerMode === "settings" && (
-        <Suspense fallback={<LazyDrawerFallback close={closeDrawer} title={t("nav.settings")} t={t} />}>
+        <Suspense fallback={null}>
           <SettingsDrawer
             binaryInfo={binaryInfo}
             busy={busy}
