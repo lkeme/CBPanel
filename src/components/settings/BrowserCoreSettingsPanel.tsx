@@ -13,6 +13,7 @@ import {
   type BinarySettings,
   type BrowserCoreEnvValueKind,
   type BrowserCoreEnvVarSetting,
+  isBuiltinCloakBrowserEnvKey,
   isManagedCloakBrowserEnvKey,
   normalizeCloakBrowserEnvKey,
 } from "../../shared/settings";
@@ -267,7 +268,7 @@ export function BrowserCoreSettingsPanel({
             {t("browserCore.envDocs")}
           </a>
         </div>
-        <BrowserCoreEnvTable env={managedBrowserCoreRuntimeEnv(binaryInfo?.core?.env ?? [])} t={t} />
+        <BrowserCoreEnvTable env={builtinBrowserCoreRuntimeEnv(binaryInfo?.core?.env ?? [])} t={t} />
         <CustomEnvVarEditor binary={binary} saveBinary={saveBinary} t={t} />
       </section>
     </div>
@@ -328,8 +329,8 @@ function envSourceText(
   return t("browserCore.envSource.cloakbrowser");
 }
 
-function managedBrowserCoreRuntimeEnv(env: BrowserCoreEnvRuntimeValue[]): BrowserCoreEnvRuntimeValue[] {
-  return env.filter((item) => isManagedCloakBrowserEnvKey(item.key));
+function builtinBrowserCoreRuntimeEnv(env: BrowserCoreEnvRuntimeValue[]): BrowserCoreEnvRuntimeValue[] {
+  return env.filter((item) => isBuiltinCloakBrowserEnvKey(item.key));
 }
 
 function CustomEnvVarEditor({

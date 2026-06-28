@@ -104,6 +104,11 @@ type BrowserCoreTarget = {
   customDownloadBaseUrl?: string;
 };
 
+type BrowserCoreEnvResolution = {
+  value?: string;
+  source: BrowserCoreEnvRuntimeValue["source"];
+};
+
 export class BinaryService {
   private readonly fetchImpl: typeof fetch;
   private readonly githubMirrorProbeService: GithubMirrorProbeService;
@@ -123,7 +128,7 @@ export class BinaryService {
 
   async readInfo(): Promise<CloakBinaryInfo> {
     const settings = normalizeSettings(await this.options.readSettings());
-    const target = browserCoreTarget(settings);
+    const target = browserCoreTarget(settings, this.initialBuiltinEnv);
     const runtime = await this.cloakbrowser();
     const info = await this.withCustomBinaryOverride(await runtime.binaryInfo(target.pinnedVersion));
     return this.withManagedCacheProbe(info);
@@ -142,7 +147,7 @@ export class BinaryService {
     this.startOperation("install", "preparing", "Installing CloakBrowser Chromium.");
     try {
       const settings = normalizeSettings(await this.options.readSettings());
-      const target = browserCoreTarget(settings);
+      const target = browserCoreTarget(settings, this.initialBuiltinEnv);
       this.setOperationProgress("checking-cache", "Checking existing CloakBrowser cache.");
       const runtime = await this.cloakbrowser();
       const before = await this.withCustomBinaryOverride(await runtime.binaryInfo(target.pinnedVersion));
@@ -167,7 +172,7 @@ export class BinaryService {
     this.startOperation("update", "preparing", "Updating CloakBrowser Chromium.");
     try {
       const settings = normalizeSettings(await this.options.readSettings());
-      const target = browserCoreTarget(settings);
+      const target = browserCoreTarget(settings, this.initialBuiltinEnv);
       if (target.versionMode === "pinned") {
         this.finishOperation("failed", "CloakBrowser Chromium update skipped.", "Pinned browser version is enabled.");
         throw Object.assign(new Error("Pinned browser version is enabled. Change the pinned version or switch back to latest before updating."), { status: 400 });
@@ -218,7 +223,7 @@ export class BinaryService {
 
   async checkUpdate(): Promise<{ update: BrowserCoreUpdateCheck; info: PublicBinaryInfo }> {
     const settings = normalizeSettings(await this.options.readSettings());
-    const target = browserCoreTarget(settings);
+    const target = browserCoreTarget(settings, this.initialBuiltinEnv);
     const current = await this.readInfo();
     const checkedAt = new Date().toISOString();
     try {
@@ -258,7 +263,7 @@ export class BinaryService {
   ): Promise<BrowserCoreImportAnalysis> {
     const resolvedPath = path.resolve(filePath);
     const settings = normalizeSettings(await this.options.readSettings());
-    const target = browserCoreTarget(settings);
+    const target = browserCoreTarget(settings, this.initialBuiltinEnv);
     const [stat, archiveBytes, current] = await Promise.all([
       fs.stat(resolvedPath),
       fs.readFile(resolvedPath),
@@ -342,7 +347,7 @@ export class BinaryService {
 
   private async coreInfo(info: CloakBinaryInfo): Promise<BrowserCoreInfo> {
     const settings = normalizeSettings(await this.options.readSettings());
-    const target = browserCoreTarget(settings);
+    const target = browserCoreTarget(settings, this.initialBuiltinEnv);
     this.updateCheck ??= settings.binary.lastUpdateCheck;
     const env = this.runtimeEnv(settings);
     const status = info.installed ? "installed" : "not-installed";
@@ -399,7 +404,7 @@ export class BinaryService {
       binary.cacheDirMode === "custom" && binary.customCacheDir
         ? binary.customCacheDir
         : this.defaultCacheDir();
-    const envValues = browserCoreEnvValues(settings);
+    const envValues = browserCoreEnvValues(settings, this.initialBuiltinEnv);
 
     this.setRuntimeEnv(values, {
       key: "CLOAKBROWSER_BINARY_PATH",
@@ -518,7 +523,7 @@ export class BinaryService {
 
   private async applyGithubMirrorFetch(runtime: CloakBrowserModule): Promise<void> {
     const settings = normalizeSettings(await this.options.readSettings());
-    const target = browserCoreTarget(settings);
+    const target = browserCoreTarget(settings, this.initialBuiltinEnv);
     const resolution = target.tier === "pro"
       ? undefined
       : await this.githubMirrorProbeService.resolvePrefix(settings, runtime.binaryInfo(target.pinnedVersion).version);
@@ -548,14 +553,14 @@ export class BinaryService {
   private async applyBrowserCoreEnv(): Promise<void> {
     const settings = normalizeSettings(await this.options.readSettings());
     const binary = settings.binary;
-    const envValues = browserCoreEnvValues(settings);
+    const envValues = browserCoreEnvValues(settings, this.initialBuiltinEnv);
     const desiredBuiltins: Record<(typeof BUILTIN_ENV_KEYS)[number], string | undefined> = {
-      CLOAKBROWSER_BINARY_PATH: envValues.binaryPath || this.initialBuiltinEnv.get("CLOAKBROWSER_BINARY_PATH"),
+      CLOAKBROWSER_BINARY_PATH: envValues.binaryPath,
       CLOAKBROWSER_CACHE_DIR:
         binary.cacheDirMode === "custom" && binary.customCacheDir
           ? binary.customCacheDir
           : this.defaultCacheDir(),
-      CLOAKBROWSER_DOWNLOAD_URL: envValues.downloadUrl || this.initialBuiltinEnv.get("CLOAKBROWSER_DOWNLOAD_URL"),
+      CLOAKBROWSER_DOWNLOAD_URL: envValues.downloadUrl,
       CLOAKBROWSER_AUTO_UPDATE: envValues.autoUpdate,
       CLOAKBROWSER_SKIP_CHECKSUM: envValues.skipChecksum,
       CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS: envValues.geoipTimeoutSeconds,
@@ -845,32 +850,47 @@ function isCacheManagedByCbpanel(env: BrowserCoreEnvRuntimeValue[]): boolean {
   return row?.source === "cbpanel-default" || row?.source === "settings";
 }
 
-function browserCoreTarget(settings: AppSettings): BrowserCoreTarget {
+function browserCoreTarget(
+  settings: AppSettings,
+  initialBuiltinEnv = new Map<string, string | undefined>(),
+): BrowserCoreTarget {
   const binary = settings.binary;
   const customRows = new Map(binary.customEnvVars.map((item) => [item.key, item]));
   const enabledCustom = new Map(binary.customEnvVars.filter((item) => item.enabled).map((item) => [item.key, item]));
-  const customDownloadBaseUrl =
-    envUrlBaseValue(enabledCustom.get("CLOAKBROWSER_DOWNLOAD_URL")?.value)
-    ?? (!customRows.has("CLOAKBROWSER_DOWNLOAD_URL") && binary.downloadSourceMode === "custom"
-      ? envUrlBaseValue(binary.customDownloadBaseUrl)
-      : undefined);
-  const licenseKey =
-    envStringValue(enabledCustom.get("CLOAKBROWSER_LICENSE_KEY")?.value)
-    ?? (!customRows.has("CLOAKBROWSER_LICENSE_KEY") && binary.tierMode === "pro"
-      ? envStringValue(binary.licenseKey)
-      : undefined);
-  const pinnedVersion =
-    envStringValue(enabledCustom.get("CLOAKBROWSER_VERSION")?.value)
-    ?? (!customRows.has("CLOAKBROWSER_VERSION") && binary.browserVersionMode === "pinned"
-      ? envStringValue(binary.pinnedBrowserVersion)
-      : undefined);
-  const customBinaryPath =
-    envStringValue(enabledCustom.get("CLOAKBROWSER_BINARY_PATH")?.value)
-    ?? (!customRows.has("CLOAKBROWSER_BINARY_PATH") && binary.customBinaryPathEnabled
-      ? envStringValue(binary.customBinaryPath)
-      : undefined);
+  const customDownloadBaseUrl = resolveOptionalEnvValue(
+    "CLOAKBROWSER_DOWNLOAD_URL",
+    customRows,
+    enabledCustom,
+    binary.downloadSourceMode === "custom" ? envUrlBaseValue(binary.customDownloadBaseUrl) : undefined,
+    initialBuiltinEnv,
+    envUrlBaseValue,
+  ).value;
+  const licenseKey = resolveOptionalEnvValue(
+    "CLOAKBROWSER_LICENSE_KEY",
+    customRows,
+    enabledCustom,
+    binary.tierMode === "pro" ? envStringValue(binary.licenseKey) : undefined,
+    initialBuiltinEnv,
+    envStringValue,
+  ).value;
+  const pinnedVersion = resolveOptionalEnvValue(
+    "CLOAKBROWSER_VERSION",
+    customRows,
+    enabledCustom,
+    binary.browserVersionMode === "pinned" ? envStringValue(binary.pinnedBrowserVersion) : undefined,
+    initialBuiltinEnv,
+    envStringValue,
+  ).value;
+  const customBinaryPath = resolveOptionalEnvValue(
+    "CLOAKBROWSER_BINARY_PATH",
+    customRows,
+    enabledCustom,
+    binary.customBinaryPathEnabled ? envStringValue(binary.customBinaryPath) : undefined,
+    initialBuiltinEnv,
+    envStringValue,
+  ).value;
   return {
-    tier: customDownloadBaseUrl ? "free" : binary.tierMode,
+    tier: customDownloadBaseUrl ? "free" : licenseKey ? "pro" : binary.tierMode,
     versionMode: pinnedVersion ? "pinned" : "latest",
     pinnedVersion,
     licenseKey,
@@ -879,7 +899,10 @@ function browserCoreTarget(settings: AppSettings): BrowserCoreTarget {
   };
 }
 
-function browserCoreEnvValues(settings: AppSettings): {
+function browserCoreEnvValues(
+  settings: AppSettings,
+  initialBuiltinEnv = new Map<string, string | undefined>(),
+): {
   binaryPath: string | undefined;
   binaryPathSource: BrowserCoreEnvRuntimeValue["source"];
   downloadUrl: string | undefined;
@@ -898,41 +921,60 @@ function browserCoreEnvValues(settings: AppSettings): {
   const binary = settings.binary;
   const customRows = new Map(settings.binary.customEnvVars.map((item) => [item.key, item]));
   const custom = new Map(settings.binary.customEnvVars.filter((item) => item.enabled).map((item) => [item.key, item]));
-  const target = browserCoreTarget(settings);
-  const binaryPath =
-    envStringValue(custom.get("CLOAKBROWSER_BINARY_PATH")?.value)
-    ?? (!customRows.has("CLOAKBROWSER_BINARY_PATH") && binary.customBinaryPathEnabled ? envStringValue(binary.customBinaryPath) : undefined);
-  const downloadUrl =
-    envUrlBaseValue(custom.get("CLOAKBROWSER_DOWNLOAD_URL")?.value)
-    ?? (!customRows.has("CLOAKBROWSER_DOWNLOAD_URL") && binary.downloadSourceMode === "custom" ? envUrlBaseValue(binary.customDownloadBaseUrl) : undefined);
+  const binaryPath = resolveOptionalEnvValue(
+    "CLOAKBROWSER_BINARY_PATH",
+    customRows,
+    custom,
+    binary.customBinaryPathEnabled ? envStringValue(binary.customBinaryPath) : undefined,
+    initialBuiltinEnv,
+    envStringValue,
+  );
+  const downloadUrl = resolveOptionalEnvValue(
+    "CLOAKBROWSER_DOWNLOAD_URL",
+    customRows,
+    custom,
+    binary.downloadSourceMode === "custom" ? envUrlBaseValue(binary.customDownloadBaseUrl) : undefined,
+    initialBuiltinEnv,
+    envUrlBaseValue,
+  );
   const autoUpdate = "false";
   const skipChecksum = "false";
   const geoipRow = custom.get("CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS");
   const geoipTimeoutSeconds = geoipRow
     ? numberEnvValue(geoipRow.value, 12, 1, 60)
     : undefined;
-  const version =
-    envStringValue(custom.get("CLOAKBROWSER_VERSION")?.value)
-    ?? (!customRows.has("CLOAKBROWSER_VERSION") ? target.pinnedVersion : undefined);
-  const licenseKey =
-    envStringValue(custom.get("CLOAKBROWSER_LICENSE_KEY")?.value)
-    ?? (!customRows.has("CLOAKBROWSER_LICENSE_KEY") ? target.licenseKey : undefined);
+  const version = resolveOptionalEnvValue(
+    "CLOAKBROWSER_VERSION",
+    customRows,
+    custom,
+    binary.browserVersionMode === "pinned" ? envStringValue(binary.pinnedBrowserVersion) : undefined,
+    initialBuiltinEnv,
+    envStringValue,
+  );
+  const licenseKey = resolveOptionalEnvValue(
+    "CLOAKBROWSER_LICENSE_KEY",
+    customRows,
+    custom,
+    binary.tierMode === "pro" ? envStringValue(binary.licenseKey) : undefined,
+    initialBuiltinEnv,
+    envStringValue,
+  );
 
   return {
-    binaryPath,
-    binaryPathSource: custom.has("CLOAKBROWSER_BINARY_PATH") || (!customRows.has("CLOAKBROWSER_BINARY_PATH") && binary.customBinaryPathEnabled) ? "custom" : "cloakbrowser-default",
-    downloadUrl,
-    downloadUrlSource: custom.has("CLOAKBROWSER_DOWNLOAD_URL") || (!customRows.has("CLOAKBROWSER_DOWNLOAD_URL") && binary.downloadSourceMode === "custom") ? "custom" : "cloakbrowser-default",
+    binaryPath: binaryPath.value,
+    binaryPathSource: binaryPath.source,
+    downloadUrl: downloadUrl.value,
+    downloadUrlSource: downloadUrl.source,
     autoUpdate,
     autoUpdateSource: "settings",
     skipChecksum,
     skipChecksumSource: "settings",
     geoipTimeoutSeconds,
     geoipTimeoutSecondsSource: geoipRow ? "custom" : "cloakbrowser-default",
-    version,
-    versionSource: custom.has("CLOAKBROWSER_VERSION") ? "custom" : target.pinnedVersion ? "settings" : "cloakbrowser-default",
-    licenseKey,
-    licenseKeySource: custom.has("CLOAKBROWSER_LICENSE_KEY") ? "custom" : target.licenseKey ? "settings" : "cloakbrowser-default",
+    version: version.value,
+    versionSource: version.source,
+    licenseKey: licenseKey.value,
+    licenseKeySource: licenseKey.source,
   };
 }
 
@@ -944,6 +986,31 @@ function envStringValue(value: string | undefined): string | undefined {
 function envUrlBaseValue(value: string | undefined): string | undefined {
   const trimmed = value?.trim().replace(/\/+$/, "");
   return trimmed || undefined;
+}
+
+function resolveOptionalEnvValue(
+  key: string,
+  customRows: Map<string, { enabled: boolean; value: string }>,
+  enabledCustom: Map<string, { value: string }>,
+  settingsValue: string | undefined,
+  initialBuiltinEnv: Map<string, string | undefined>,
+  normalize: (value: string | undefined) => string | undefined,
+): BrowserCoreEnvResolution {
+  const custom = enabledCustom.get(key);
+  if (custom) {
+    return { value: normalize(custom.value), source: "custom" };
+  }
+  if (customRows.has(key)) {
+    return { source: "cloakbrowser-default" };
+  }
+  if (settingsValue) {
+    return { value: settingsValue, source: "settings" };
+  }
+  const external = normalize(initialBuiltinEnv.get(key));
+  if (external) {
+    return { value: external, source: "external" };
+  }
+  return { source: "cloakbrowser-default" };
 }
 
 function numberEnvValue(value: string | undefined, fallback: number, min: number, max: number): string {

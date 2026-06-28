@@ -151,6 +151,7 @@ test("BinaryService marks restart only for env values changed after CloakBrowser
 test("BinaryService ignores disabled optional browser core env rows", async () => {
   const originalEnv = captureEnv();
   const directory = await makeTempDir();
+  process.env.CLOAKBROWSER_LICENSE_KEY = "external-license";
   const service = new BinaryService({
     dataDir: directory,
     portable: false,
@@ -176,6 +177,15 @@ test("BinaryService ignores disabled optional browser core env rows", async () =
           description: "",
           valueKind: "number",
         },
+        {
+          id: "license",
+          key: "CLOAKBROWSER_LICENSE_KEY",
+          value: "disabled-license",
+          enabled: false,
+          sensitive: true,
+          description: "",
+          valueKind: "secret",
+        },
       ],
     }),
     loadCloakBrowser: async () => fakeCloakBrowserModule(),
@@ -185,15 +195,20 @@ test("BinaryService ignores disabled optional browser core env rows", async () =
     const info = await service.readPublicInfo();
     const downloadUrl = info.core.env.find((item) => item.key === "CLOAKBROWSER_DOWNLOAD_URL");
     const geoipTimeout = info.core.env.find((item) => item.key === "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS");
+    const license = info.core.env.find((item) => item.key === "CLOAKBROWSER_LICENSE_KEY");
 
     assert.equal(process.env.CLOAKBROWSER_DOWNLOAD_URL, undefined);
     assert.equal(process.env.CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS, undefined);
+    assert.equal(process.env.CLOAKBROWSER_LICENSE_KEY, undefined);
     assert.equal(downloadUrl?.enabled, false);
     assert.equal(downloadUrl?.value, undefined);
     assert.equal(downloadUrl?.source, "cloakbrowser-default");
     assert.equal(geoipTimeout?.enabled, false);
     assert.equal(geoipTimeout?.value, undefined);
     assert.equal(geoipTimeout?.source, "cloakbrowser-default");
+    assert.equal(license?.enabled, false);
+    assert.equal(license?.value, undefined);
+    assert.equal(license?.source, "cloakbrowser-default");
   } finally {
     restoreEnv(originalEnv);
   }
@@ -269,6 +284,44 @@ test("BinaryService passes Pro license and pinned version to CloakBrowser instal
     assert.equal(result.info.core.versionMode, "pinned");
     assert.equal(result.info.core.pinnedVersion, "147.0.7700.1");
     assert.equal(result.info.core.downloads.current.requiresLicense, true);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+test("BinaryService preserves external Pro license and version env when settings are empty", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  process.env.CLOAKBROWSER_VERSION = "147.0.7700.1";
+  process.env.CLOAKBROWSER_LICENSE_KEY = "external-license";
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({}),
+    loadCloakBrowser: async () => fakeCloakBrowserModule({
+      version: "147.0.7700.1",
+      tier: "pro",
+      cacheDir: "C:/cache/chromium-147.0.7700.1-pro",
+      binaryPath: "C:/cache/chromium-147.0.7700.1-pro/chrome.exe",
+    }),
+  });
+
+  try {
+    const result = await service.readPublicInfo();
+    const version = result.core.env.find((item) => item.key === "CLOAKBROWSER_VERSION");
+    const license = result.core.env.find((item) => item.key === "CLOAKBROWSER_LICENSE_KEY");
+
+    assert.equal(process.env.CLOAKBROWSER_VERSION, "147.0.7700.1");
+    assert.equal(process.env.CLOAKBROWSER_LICENSE_KEY, "external-license");
+    assert.equal(result.core.targetTier, "pro");
+    assert.equal(result.core.versionMode, "pinned");
+    assert.equal(result.core.pinnedVersion, "147.0.7700.1");
+    assert.equal(version?.source, "external");
+    assert.equal(version?.value, "147.0.7700.1");
+    assert.equal(license?.source, "external");
+    assert.equal(license?.value, "external-license");
+    assert.equal(license?.maskedValue, "****");
+    assert.equal(result.env.licenseKey, "****");
   } finally {
     restoreEnv(originalEnv);
   }
