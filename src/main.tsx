@@ -95,23 +95,34 @@ const RegistryModuleView = lazy(() =>
 const BrowserCoreImportDialog = lazy(() =>
   import("./components/browser-core/BrowserCoreImportDialog").then((module) => ({ default: module.BrowserCoreImportDialog })),
 );
-const ProfileEditorDrawer = lazy(() =>
-  import("./components/profiles/ProfileEditorDrawer").then((module) => ({ default: module.ProfileEditorDrawer })),
-);
 const EnvironmentPackageOperationDialog = lazy(() =>
   import("./components/profiles/EnvironmentPackageOperationDialog").then((module) => ({ default: module.EnvironmentPackageOperationDialog })),
 );
-type SettingsDrawerModule = typeof import("./components/settings/SettingsDrawer");
-let settingsDrawerModulePromise: Promise<SettingsDrawerModule> | null = null;
-function loadSettingsDrawer(): Promise<SettingsDrawerModule> {
-  settingsDrawerModulePromise ??= import("./components/settings/SettingsDrawer");
-  return settingsDrawerModulePromise;
+function cachedModuleLoader<T>(load: () => Promise<T>): () => Promise<T> {
+  let promise: Promise<T> | null = null;
+  return () => {
+    promise ??= load().catch((error) => {
+      promise = null;
+      throw error;
+    });
+    return promise;
+  };
 }
+function preloadModule(load: () => Promise<unknown>): void {
+  void load().catch(() => undefined);
+}
+type ProfileEditorDrawerModule = typeof import("./components/profiles/ProfileEditorDrawer");
+type SettingsDrawerModule = typeof import("./components/settings/SettingsDrawer");
+type ColumnSettingsDrawerModule = typeof import("./components/profiles/ColumnSettingsDrawer");
+const loadProfileEditorDrawer = cachedModuleLoader<ProfileEditorDrawerModule>(() => import("./components/profiles/ProfileEditorDrawer"));
+const loadSettingsDrawer = cachedModuleLoader<SettingsDrawerModule>(() => import("./components/settings/SettingsDrawer"));
+const loadColumnSettingsDrawer = cachedModuleLoader<ColumnSettingsDrawerModule>(() => import("./components/profiles/ColumnSettingsDrawer"));
+const ProfileEditorDrawer = lazy(() => loadProfileEditorDrawer().then((module) => ({ default: module.ProfileEditorDrawer })));
 const SettingsDrawer = lazy(() => loadSettingsDrawer().then((module) => ({ default: module.SettingsDrawer })));
-void loadSettingsDrawer();
-const ColumnSettingsDrawer = lazy(() =>
-  import("./components/profiles/ColumnSettingsDrawer").then((module) => ({ default: module.ColumnSettingsDrawer })),
-);
+const ColumnSettingsDrawer = lazy(() => loadColumnSettingsDrawer().then((module) => ({ default: module.ColumnSettingsDrawer })));
+preloadModule(loadProfileEditorDrawer);
+preloadModule(loadSettingsDrawer);
+preloadModule(loadColumnSettingsDrawer);
 const ConfirmDialog = lazy(() =>
   import("./components/ui/ConfirmDialog").then((module) => ({ default: module.ConfirmDialog })),
 );
@@ -1437,7 +1448,7 @@ function App() {
       </Suspense>
 
       {browserCoreImport && (
-        <Suspense fallback={<LazyDrawerFallback close={() => setBrowserCoreImport(null)} title={t("settings.browserCore")} t={t} />}>
+        <Suspense fallback={<LazyModalFallback t={t} />}>
           <BrowserCoreImportDialog
             analyzeImport={analyzeBrowserCoreImport}
             busy={busy}
@@ -1462,18 +1473,22 @@ function App() {
       )}
 
       {environmentPackageOperation && (
-        <EnvironmentPackageOperationDialog
-          operation={environmentPackageOperation}
-          t={t}
-        />
+        <Suspense fallback={<LazyModalFallback t={t} />}>
+          <EnvironmentPackageOperationDialog
+            operation={environmentPackageOperation}
+            t={t}
+          />
+        </Suspense>
       )}
 
       {appBackupOperation && (
-        <EnvironmentPackageOperationDialog
-          namespace="appBackup"
-          operation={appBackupOperation}
-          t={t}
-        />
+        <Suspense fallback={<LazyModalFallback t={t} />}>
+          <EnvironmentPackageOperationDialog
+            namespace="appBackup"
+            operation={appBackupOperation}
+            t={t}
+          />
+        </Suspense>
       )}
 
       <Suspense fallback={<LazyModalFallback t={t} />}>
