@@ -553,8 +553,8 @@ function normalizeBrowserCoreUpdateCheck(value: unknown): BrowserCoreUpdateCheck
   const blockedReason = stringValueAllowEmpty(input.blockedReason, "");
   return {
     checkedAt,
-    targetTier: enumValue<NonNullable<BrowserCoreUpdateCheck["targetTier"]>>(input.targetTier, ["free", "pro"], "free"),
-    versionMode: enumValue<NonNullable<BrowserCoreUpdateCheck["versionMode"]>>(input.versionMode, ["latest", "pinned"], "latest"),
+    targetTier: optionalEnumValue<NonNullable<BrowserCoreUpdateCheck["targetTier"]>>(input.targetTier, ["free", "pro"]),
+    versionMode: optionalEnumValue<NonNullable<BrowserCoreUpdateCheck["versionMode"]>>(input.versionMode, ["latest", "pinned"]),
     currentVersion,
     latestVersion: latestVersion || undefined,
     updateAvailable: input.updateAvailable,
@@ -623,6 +623,10 @@ function normalizeNumber(value: unknown, fallback: number, min: number, max: num
 
 function enumValue<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
   return typeof value === "string" && allowed.includes(value as T) ? (value as T) : fallback;
+}
+
+function optionalEnumValue<T extends string>(value: unknown, allowed: readonly T[]): T | undefined {
+  return typeof value === "string" && allowed.includes(value as T) ? (value as T) : undefined;
 }
 
 function normalizeDesktopCloseBehavior(
