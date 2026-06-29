@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Activity, Download, ExternalLink, FilePlus2, ListChecks, RefreshCw, Trash2 } from "lucide-react";
@@ -12,7 +12,6 @@ import {
   type AppSettingsPatch,
   type BinarySettings,
   type BrowserCoreTierMode,
-  type BrowserCoreVersionMode,
   type BrowserCoreEnvValueKind,
   type BrowserCoreEnvVarSetting,
   isBuiltinCloakBrowserEnvKey,
@@ -23,6 +22,8 @@ import {
   BrowserCoreOperationPanel,
   BrowserCoreUpdateStatus,
   browserCoreOperationActive,
+  browserCoreTierLabel,
+  browserCoreVersionModeLabel,
   isBrowserCoreBusy,
 } from "../browser-core/BrowserCoreStatusPanels";
 import { Field, Segmented, ToggleField } from "../ui/form-controls";
@@ -75,7 +76,11 @@ export function BrowserCoreSettingsPanel({
   updateBinary: () => Promise<void>;
 }) {
   const binary = settings.binary;
+  const [draftBinary, setDraftBinary] = useState<BinarySettings>(() => binary);
   const [importPath, setImportPath] = useState("");
+  useEffect(() => {
+    setDraftBinary(binary);
+  }, [binary]);
   const managedCoreDisabled = Boolean(
     binary.customEnvVars.find((item) => item.key === "CLOAKBROWSER_BINARY_PATH" && item.enabled && item.value.trim()),
   );
@@ -94,6 +99,7 @@ export function BrowserCoreSettingsPanel({
       : t("browserCore.missingStatusDetail");
 
   function saveBinary(patch: Partial<BinarySettings>) {
+    setDraftBinary((current) => ({ ...current, ...patch }));
     void saveSettings({ binary: patch });
   }
 
@@ -159,8 +165,8 @@ export function BrowserCoreSettingsPanel({
           className="browser-core-download-details"
           items={[
             { label: coreInstalled ? t("browserCore.installedVersion") : t("browserCore.targetVersion"), value: <CopyableValueRow value={binaryInfo?.version} /> },
-            { label: t("browserCore.tier"), value: tierModeLabel(targetTier, t) },
-            { label: t("browserCore.versionMode"), value: browserVersionModeLabel(targetVersionMode, t) },
+            { label: t("browserCore.tier"), value: browserCoreTierLabel(targetTier, t) },
+            { label: t("browserCore.versionMode"), value: browserCoreVersionModeLabel(targetVersionMode, t) },
             { label: t("browserCore.bundledVersion"), value: <CopyableValueRow value={binaryInfo?.core?.versions.baselineChromiumVersion} /> },
             { label: t("browserCore.wrapperVersion"), value: <CopyableValueRow value={binaryInfo?.core?.versions.wrapperVersion} /> },
             { label: coreInstalled ? t("browserCore.executablePath") : t("browserCore.expectedExecutablePath"), value: <CopyableValueRow t={t} value={binaryInfo?.binaryPath} /> },
@@ -190,7 +196,7 @@ export function BrowserCoreSettingsPanel({
         <h2>{t("browserCore.offlineImport")}</h2>
         <Field label={t("browserCore.tier")}>
           <Segmented
-            value={binary.tierMode}
+            value={draftBinary.tierMode}
             options={[
               { value: "free", label: t("browserCore.tierFree") },
               { value: "pro", label: t("browserCore.tierPro") },
@@ -198,12 +204,12 @@ export function BrowserCoreSettingsPanel({
             onChange={(tierMode) => saveBinary({ tierMode })}
           />
         </Field>
-        {binary.tierMode === "pro" && (
+        {draftBinary.tierMode === "pro" && (
           <Field label={t("browserCore.licenseKey")} help={t("browserCore.licenseKeyHelp")} wide>
             <input
               autoComplete="off"
               type="password"
-              value={binary.licenseKey}
+              value={draftBinary.licenseKey}
               onChange={(event) => saveBinary({ licenseKey: event.target.value })}
               placeholder="cb_xxxxxxxx"
             />
@@ -211,7 +217,7 @@ export function BrowserCoreSettingsPanel({
         )}
         <Field label={t("browserCore.versionMode")}>
           <Segmented
-            value={binary.browserVersionMode}
+            value={draftBinary.browserVersionMode}
             options={[
               { value: "latest", label: t("browserCore.versionLatest") },
               { value: "pinned", label: t("browserCore.versionPinned") },
@@ -219,16 +225,16 @@ export function BrowserCoreSettingsPanel({
             onChange={(browserVersionMode) => saveBinary({ browserVersionMode })}
           />
         </Field>
-        {binary.browserVersionMode === "pinned" && (
+        {draftBinary.browserVersionMode === "pinned" && (
           <Field label={t("browserCore.pinnedVersion")} help={t("browserCore.pinnedVersionHelp")} wide>
             <input
-              value={binary.pinnedBrowserVersion}
+              value={draftBinary.pinnedBrowserVersion}
               onChange={(event) => saveBinary({ pinnedBrowserVersion: event.target.value })}
               placeholder="148.0.7778.215.2"
             />
           </Field>
         )}
-        {binary.downloadSourceMode === "custom" && binary.tierMode === "pro" && (
+        {binary.downloadSourceMode === "custom" && draftBinary.tierMode === "pro" && (
           <div className="result-line">{t("browserCore.customSourceDisablesPro")}</div>
         )}
         <Field label={t("browserCore.cacheDirMode")}>
@@ -264,8 +270,8 @@ export function BrowserCoreSettingsPanel({
               className="command"
               disabled={!importPath.trim() || actionBusy || importBusy}
               onClick={() => importBrowserCoreZip(importPath, {
-                setAsDefault: binary.browserVersionMode !== "pinned",
-                targetTier: binary.tierMode,
+                setAsDefault: draftBinary.browserVersionMode !== "pinned",
+                targetTier: draftBinary.tierMode,
               })}
               type="button"
             >
@@ -288,20 +294,6 @@ export function BrowserCoreSettingsPanel({
       </section>
     </div>
   );
-}
-
-function tierModeLabel(
-  value: BrowserCoreTierMode,
-  t: (key: TranslationKey) => string,
-): string {
-  return value === "pro" ? t("browserCore.tierPro") : t("browserCore.tierFree");
-}
-
-function browserVersionModeLabel(
-  value: BrowserCoreVersionMode,
-  t: (key: TranslationKey) => string,
-): string {
-  return value === "pinned" ? t("browserCore.versionPinned") : t("browserCore.versionLatest");
 }
 
 async function pickBrowserCoreZip(

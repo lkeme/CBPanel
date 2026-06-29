@@ -1,6 +1,11 @@
 import type { TranslationKey } from "../../i18n";
 import { formatTime } from "../../lib/utils";
-import type { BrowserCoreInfo, BrowserCoreOperation } from "../../shared/browserCore";
+import type {
+  BrowserCoreInfo,
+  BrowserCoreOperation,
+  BrowserCoreTier,
+  BrowserCoreVersionMode,
+} from "../../shared/browserCore";
 import { CopyButton } from "../ui/CopyButton";
 import { KeyValueList } from "../ui/KeyValueList";
 import { StatusPill, type StatusPillTone } from "../ui/StatusPill";
@@ -82,8 +87,8 @@ export function BrowserCoreUpdateStatus({
       <KeyValueList
         items={[
           { label: t("browserCore.lastCheckedAt"), value: formatTime(update.checkedAt, "dateTime") },
-          { label: t("browserCore.tier"), value: update.targetTier ?? core.targetTier },
-          { label: t("browserCore.versionMode"), value: update.versionMode ?? core.versionMode },
+          { label: t("browserCore.tier"), value: browserCoreTierLabel(update.targetTier ?? core.targetTier, t) },
+          { label: t("browserCore.versionMode"), value: browserCoreVersionModeLabel(update.versionMode ?? core.versionMode, t) },
           { label: t("browserCore.currentVersion"), value: update.currentVersion },
           { label: t("browserCore.latestVersion"), value: update.latestVersion ?? "-" },
           ...(update.blockedReason ? [{ label: t("browserCore.updateBlockedReason"), value: update.blockedReason }] : []),
@@ -112,6 +117,20 @@ export function BrowserCoreUpdateStatus({
       )}
     </section>
   );
+}
+
+export function browserCoreTierLabel(
+  value: BrowserCoreTier,
+  t: (key: TranslationKey) => string,
+): string {
+  return value === "pro" ? t("browserCore.tierPro") : t("browserCore.tierFree");
+}
+
+export function browserCoreVersionModeLabel(
+  value: BrowserCoreVersionMode,
+  t: (key: TranslationKey) => string,
+): string {
+  return value === "pinned" ? t("browserCore.versionPinned") : t("browserCore.versionLatest");
 }
 
 export function browserCoreOperationActive(operation: BrowserCoreOperation | undefined): boolean {
