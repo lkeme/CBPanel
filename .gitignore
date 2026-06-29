@@ -57,6 +57,7 @@ sidecars/
 # Local AI / agent workflow files
 .agents/
 .codex/
+.claude/
 .trellis/
 AGENTS.md
 CLAUDE.md
