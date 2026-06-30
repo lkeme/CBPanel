@@ -36,6 +36,11 @@ const CLOAKBROWSER_CONFIG_DOC_URL = "https://github.com/CloakHQ/CloakBrowser/tre
 
 type ControlledBrowserCoreEnvKey = (typeof OPTIONAL_CLOAKBROWSER_ENV_KEYS)[number];
 
+type OfflineImportDraft = Pick<
+  BinarySettings,
+  "tierMode" | "licenseKey" | "browserVersionMode" | "pinnedBrowserVersion"
+>;
+
 const controlledBrowserCoreEnvDefaults: Record<ControlledBrowserCoreEnvKey, {
   value: string;
   valueKind: BrowserCoreEnvValueKind;
@@ -76,11 +81,11 @@ export function BrowserCoreSettingsPanel({
   updateBinary: () => Promise<void>;
 }) {
   const binary = settings.binary;
-  const [draftBinary, setDraftBinary] = useState<BinarySettings>(() => binary);
+  const [offlineImportDraft, setOfflineImportDraft] = useState<OfflineImportDraft>(() => offlineImportDraftFromBinary(binary));
   const [importPath, setImportPath] = useState("");
   useEffect(() => {
-    setDraftBinary(binary);
-  }, [binary]);
+    setOfflineImportDraft(offlineImportDraftFromBinary(binary));
+  }, [binary.tierMode, binary.licenseKey, binary.browserVersionMode, binary.pinnedBrowserVersion]);
   const managedCoreDisabled = Boolean(
     binary.customEnvVars.find((item) => item.key === "CLOAKBROWSER_BINARY_PATH" && item.enabled && item.value.trim()),
   );
@@ -99,8 +104,12 @@ export function BrowserCoreSettingsPanel({
       : t("browserCore.missingStatusDetail");
 
   function saveBinary(patch: Partial<BinarySettings>) {
-    setDraftBinary((current) => ({ ...current, ...patch }));
     void saveSettings({ binary: patch });
+  }
+
+  function saveOfflineImportDraft(patch: Partial<OfflineImportDraft>) {
+    setOfflineImportDraft((current) => ({ ...current, ...patch }));
+    saveBinary(patch);
   }
 
   return (
@@ -196,45 +205,45 @@ export function BrowserCoreSettingsPanel({
         <h2>{t("browserCore.offlineImport")}</h2>
         <Field label={t("browserCore.tier")}>
           <Segmented
-            value={draftBinary.tierMode}
+            value={offlineImportDraft.tierMode}
             options={[
               { value: "free", label: t("browserCore.tierFree") },
               { value: "pro", label: t("browserCore.tierPro") },
             ]}
-            onChange={(tierMode) => saveBinary({ tierMode })}
+            onChange={(tierMode) => saveOfflineImportDraft({ tierMode })}
           />
         </Field>
-        {draftBinary.tierMode === "pro" && (
+        {offlineImportDraft.tierMode === "pro" && (
           <Field label={t("browserCore.licenseKey")} help={t("browserCore.licenseKeyHelp")} wide>
             <input
               autoComplete="off"
               type="password"
-              value={draftBinary.licenseKey}
-              onChange={(event) => saveBinary({ licenseKey: event.target.value })}
+              value={offlineImportDraft.licenseKey}
+              onChange={(event) => saveOfflineImportDraft({ licenseKey: event.target.value })}
               placeholder="cb_xxxxxxxx"
             />
           </Field>
         )}
         <Field label={t("browserCore.versionMode")}>
           <Segmented
-            value={draftBinary.browserVersionMode}
+            value={offlineImportDraft.browserVersionMode}
             options={[
               { value: "latest", label: t("browserCore.versionLatest") },
               { value: "pinned", label: t("browserCore.versionPinned") },
             ]}
-            onChange={(browserVersionMode) => saveBinary({ browserVersionMode })}
+            onChange={(browserVersionMode) => saveOfflineImportDraft({ browserVersionMode })}
           />
         </Field>
-        {draftBinary.browserVersionMode === "pinned" && (
+        {offlineImportDraft.browserVersionMode === "pinned" && (
           <Field label={t("browserCore.pinnedVersion")} help={t("browserCore.pinnedVersionHelp")} wide>
             <input
-              value={draftBinary.pinnedBrowserVersion}
-              onChange={(event) => saveBinary({ pinnedBrowserVersion: event.target.value })}
+              value={offlineImportDraft.pinnedBrowserVersion}
+              onChange={(event) => saveOfflineImportDraft({ pinnedBrowserVersion: event.target.value })}
               placeholder="148.0.7778.215.2"
             />
           </Field>
         )}
-        {binary.downloadSourceMode === "custom" && draftBinary.tierMode === "pro" && (
+        {binary.downloadSourceMode === "custom" && offlineImportDraft.tierMode === "pro" && (
           <div className="result-line">{t("browserCore.customSourceDisablesPro")}</div>
         )}
         <Field label={t("browserCore.cacheDirMode")}>
@@ -270,8 +279,8 @@ export function BrowserCoreSettingsPanel({
               className="command"
               disabled={!importPath.trim() || actionBusy || importBusy}
               onClick={() => importBrowserCoreZip(importPath, {
-                setAsDefault: draftBinary.browserVersionMode !== "pinned",
-                targetTier: draftBinary.tierMode,
+                setAsDefault: offlineImportDraft.browserVersionMode !== "pinned",
+                targetTier: offlineImportDraft.tierMode,
               })}
               type="button"
             >
@@ -294,6 +303,15 @@ export function BrowserCoreSettingsPanel({
       </section>
     </div>
   );
+}
+
+function offlineImportDraftFromBinary(binary: BinarySettings): OfflineImportDraft {
+  return {
+    tierMode: binary.tierMode,
+    licenseKey: binary.licenseKey,
+    browserVersionMode: binary.browserVersionMode,
+    pinnedBrowserVersion: binary.pinnedBrowserVersion,
+  };
 }
 
 async function pickBrowserCoreZip(
