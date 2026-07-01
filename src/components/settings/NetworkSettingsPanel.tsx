@@ -9,10 +9,11 @@ import {
   type AppSettings,
   type AppSettingsPatch,
   type GithubMirrorProviderId,
+  type NetworkTraceProvider,
+  type NetworkTraceProviderCategory,
   type NetworkTraceSettings,
 } from "../../shared/settings";
 import { ChoiceList, ChoiceOption, clampChoiceIndex, closeOnFocusLeave, nextChoiceIndex } from "../ui/choice-list";
-import { SelectMenu } from "../ui/SelectMenu";
 import { Field, NumberField } from "../ui/form-controls";
 
 export function NetworkSettingsPanel({
@@ -28,18 +29,6 @@ export function NetworkSettingsPanel({
 }) {
   const trace = settings.networkTrace;
   const [mirrorProbe, setMirrorProbe] = useState<GithubMirrorProbeResponse | null>(null);
-  const options = [
-    ...BUILTIN_NETWORK_TRACE_PROVIDERS.map((item) => ({
-      value: item.id,
-      label: item.name,
-      meta: item.url,
-    })),
-    {
-      value: "custom",
-      label: t("networkTrace.custom"),
-      meta: trace.customProviderUrl || t("networkTrace.customHint"),
-    },
-  ];
 
   useEffect(() => {
     let cancelled = false;
@@ -69,11 +58,11 @@ export function NetworkSettingsPanel({
           </div>
         </div>
         <Field label={t("networkTrace.provider")} help={t("networkTrace.providerHelp")}>
-          <SelectMenu
+          <NetworkTraceProviderSelect
             value={trace.providerId}
-            placeholder={t("networkTrace.provider")}
-            options={options}
+            customUrl={trace.customProviderUrl}
             onChange={(providerId) => saveTrace({ providerId })}
+            t={t}
           />
         </Field>
         {trace.providerId === "custom" && (
@@ -122,6 +111,182 @@ export function NetworkSettingsPanel({
       </section>
     </div>
   );
+}
+
+type NetworkTraceOption = {
+  value: string;
+  label: string;
+  meta: string;
+  icon: string;
+  category: NetworkTraceProviderCategory;
+  tags: string[];
+  kind: NetworkTraceProvider["kind"] | "custom";
+};
+
+function NetworkTraceProviderSelect({
+  customUrl,
+  onChange,
+  t,
+  value,
+}: {
+  customUrl: string;
+  onChange: (value: string) => void;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  value: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const options: NetworkTraceOption[] = [
+    ...BUILTIN_NETWORK_TRACE_PROVIDERS.map((provider) => ({
+      value: provider.id,
+      label: provider.name,
+      meta: provider.actualDomain ?? summarizeTraceUrl(provider.url),
+      icon: provider.icon ?? categoryIcon(provider.category),
+      category: provider.category,
+      tags: provider.tags ?? [],
+      kind: provider.kind,
+    })),
+    {
+      value: "custom",
+      label: t("networkTrace.custom"),
+      meta: customUrl || t("networkTrace.customHint"),
+      icon: "*",
+      category: "static",
+      tags: [t("networkTrace.tagCustom"), "trace"],
+      kind: "custom",
+    },
+  ];
+  const selected = options.find((option) => option.value === value) ?? options[0];
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === selected.value));
+  const [activeIndex, setActiveIndex] = useState(selectedIndex);
+
+  function openAt(index: number) {
+    setActiveIndex(clampChoiceIndex(index, options.length));
+    setOpen(true);
+  }
+
+  function commit(index: number) {
+    const option = options[index];
+    if (!option) return;
+    onChange(option.value);
+    setOpen(false);
+  }
+
+  return (
+    <div
+      className={`network-trace-select ${open ? "open" : ""}`}
+      onBlur={(event) => closeOnFocusLeave(event, () => setOpen(false))}
+    >
+      <button
+        aria-label={t("networkTrace.provider")}
+        aria-expanded={open}
+        className="network-trace-trigger"
+        onClick={() => {
+          if (!open) openAt(selectedIndex);
+          else setOpen(false);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            const direction = event.key === "ArrowDown" ? 1 : -1;
+            if (open) {
+              setActiveIndex((current) => nextChoiceIndex(current, options.length, direction));
+            } else {
+              setActiveIndex(nextChoiceIndex(selectedIndex, options.length, direction));
+              setOpen(true);
+            }
+          }
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            if (!open) openAt(selectedIndex);
+            else commit(activeIndex);
+          }
+          if (event.key === "Escape") setOpen(false);
+        }}
+        type="button"
+      >
+        <TraceIcon option={selected} />
+        <span className="network-trace-trigger-main">
+          <strong>{selected.label}</strong>
+          <small>{selected.meta}</small>
+        </span>
+        <span className="network-trace-trigger-side">
+          <CategoryChip category={selected.category} t={t} />
+          <ChevronsUpDown size={16} aria-hidden="true" />
+        </span>
+      </button>
+      {open && (
+        <ChoiceList className="network-trace-list">
+          {options.map((option, index) => {
+            const selectedOption = option.value === value;
+            return (
+              <ChoiceOption
+                active={activeIndex === index || (activeIndex < 0 && selectedOption)}
+                className="network-trace-option"
+                key={option.value}
+                onClick={() => {
+                  onChange(option.value);
+                  setOpen(false);
+                }}
+                keepFocus
+                onMouseEnter={() => setActiveIndex(index)}
+              >
+                <TraceIcon option={option} />
+                <span className="network-trace-option-main">
+                  <span className="network-trace-option-title">
+                    <strong>{option.label}</strong>
+                    <CategoryChip category={option.category} t={t} />
+                    {selectedOption && <span className="mirror-chip primary">{t("githubMirror.currentBadge")}</span>}
+                  </span>
+                  <small>{option.meta}</small>
+                </span>
+                <span className="network-trace-option-tags">
+                  {option.tags.slice(0, 3).map((tag) => (
+                    <span className="trace-tag" key={tag}>{tag}</span>
+                  ))}
+                </span>
+              </ChoiceOption>
+            );
+          })}
+        </ChoiceList>
+      )}
+    </div>
+  );
+}
+
+function TraceIcon({ option }: { option: NetworkTraceOption }) {
+  return (
+    <span className={`trace-provider-icon ${option.category}`} aria-hidden="true">
+      {option.icon}
+    </span>
+  );
+}
+
+function CategoryChip({
+  category,
+  t,
+}: {
+  category: NetworkTraceProviderCategory;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  return <span className={`trace-category-chip ${category}`}>{t(`networkTrace.category.${category}`)}</span>;
+}
+
+function categoryIcon(category: NetworkTraceProviderCategory): string {
+  if (category === "domestic") return "CN";
+  if (category === "international") return "GL";
+  if (category === "ai") return "AI";
+  if (category === "nsfw") return "18";
+  if (category === "crypto") return "₿";
+  return "CDN";
+}
+
+function summarizeTraceUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    return url.hostname;
+  } catch {
+    return value;
+  }
 }
 
 type GithubMirrorOption = {

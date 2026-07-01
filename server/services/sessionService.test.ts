@@ -44,16 +44,16 @@ test("formatNetworkCheckDetail prefers trace endpoint facts over legacy geo fiel
       locale: "ja-JP",
     },
     trace: {
-      providerId: "cloudflare-speed",
-      providerName: "Cloudflare Speed",
-      providerUrl: "https://speed.cloudflare.com/cdn-cgi/trace",
+      providerId: "cloudflare-www",
+      providerName: "Cloudflare",
+      providerUrl: "https://www.cloudflare.com/cdn-cgi/trace",
       loc: "SG",
       colo: "SIN",
     },
     source: "environment-check",
   } satisfies NetworkCheckResult);
 
-  assert.equal(detail, "IP 203.0.113.42 / 地区 SG / 机房 SIN / 端点 Cloudflare Speed / 88ms");
+  assert.equal(detail, "IP 203.0.113.42 / 地区 SG / 机房 SIN / 端点 Cloudflare / 88ms");
 });
 
 test("launchProfile blocks launch when enabled proxy check fails", async () => {
@@ -142,7 +142,7 @@ test("launchProfile does not probe or install GitHub mirrors for Pro binaries", 
     }),
     readSettings: async () => normalizeSettings({
       networkTrace: {
-        providerId: "cloudflare-speed",
+        providerId: "cloudflare-www",
         customProviderUrl: "",
         timeoutSeconds: 8,
         githubMirrorProviderId: "auto-best",

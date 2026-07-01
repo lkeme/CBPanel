@@ -15,7 +15,7 @@ test("applyGithubMirrorFetch rewrites only supported CloakBrowser download URLs"
   try {
     applyGithubMirrorFetch(normalizeSettings({
       networkTrace: {
-        providerId: "cloudflare-speed",
+        providerId: "cloudflare-www",
         customProviderUrl: "",
         timeoutSeconds: 8,
         githubMirrorProviderId: "gh-proxy-com",
@@ -59,7 +59,7 @@ test("auto-best mirror resolution rewrites downloads with the fastest successful
   try {
     const settings = normalizeSettings({
       networkTrace: {
-        providerId: "cloudflare-speed",
+        providerId: "cloudflare-www",
         customProviderUrl: "",
         timeoutSeconds: 8,
         githubMirrorProviderId: "auto-best",

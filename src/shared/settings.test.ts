@@ -61,7 +61,7 @@ test("normalizeSettings returns stable defaults", () => {
 test("normalizeSettings supports optional GitHub mirror prefixes under network settings", () => {
   const settings = normalizeSettings({
     networkTrace: {
-      providerId: "cloudflare-speed",
+      providerId: "chatgpt",
       customProviderUrl: "",
       timeoutSeconds: 8,
       githubMirrorProviderId: "ghproxy-vip",
@@ -93,10 +93,10 @@ test("resolveGithubMirrorPrefix supports custom and disabled modes", () => {
   }), "https://mirror.example.com/");
 });
 
-test("normalizeSettings provides a single default network trace endpoint", () => {
+test("normalizeSettings accepts split-tunnel network trace endpoints", () => {
   const settings = normalizeSettings({
     networkTrace: {
-      providerId: "chatgpt",
+      providerId: "tencent-ip2city",
       customProviderUrl: " https://trace.example.com/cdn-cgi/trace ",
       timeoutSeconds: 99,
       githubMirrorProviderId: "off",
@@ -104,23 +104,75 @@ test("normalizeSettings provides a single default network trace endpoint", () =>
     },
   });
 
-  assert.equal(settings.networkTrace.providerId, "chatgpt");
+  assert.equal(settings.networkTrace.providerId, "tencent-ip2city");
   assert.equal(settings.networkTrace.customProviderUrl, "https://trace.example.com/cdn-cgi/trace");
   assert.equal(settings.networkTrace.timeoutSeconds, 30);
+  assert.ok(BUILTIN_NETWORK_TRACE_PROVIDERS.some((provider) => provider.id === "tencent-ip2city"));
+  assert.ok(BUILTIN_NETWORK_TRACE_PROVIDERS.some((provider) => provider.id === "alibaba-dns-detect"));
   assert.ok(BUILTIN_NETWORK_TRACE_PROVIDERS.some((provider) => provider.id === "chatgpt"));
+});
+
+test("network trace catalog includes visible split-tunnel targets with metadata", () => {
+  const domains = new Set(BUILTIN_NETWORK_TRACE_PROVIDERS.map((provider) => provider.actualDomain ?? new URL(provider.url).hostname));
+  const requiredDomains = [
+    "dns-detect.alicdn.com",
+    "necaptcha.nosdn.127.net",
+    "perfops.byte-test.com",
+    "r.inews.qq.com",
+    "perfops.cloudflareperf.com",
+    "www.qualcomm.cn",
+    "ip.skk.moe",
+    "perfops2.byte-test.com",
+    "gateway.discord.gg",
+    "www.visa.com",
+    "x.com",
+    "medium.com",
+    "chatgpt.com",
+    "sora.com",
+    "openai.com",
+    "claude.ai",
+    "grok.com",
+    "anthropic.com",
+    "www.perplexity.ai",
+    "e-hentai.org",
+    "missav.ws",
+    "missav.ai",
+    "missav.live",
+    "hanime1.me",
+    "hanimeone.me",
+    "hanime1.com",
+    "javchu.com",
+    "av.jkforum.net",
+    "javdb.com",
+    "coinbase.com",
+    "www.okx.com",
+    "testingcf.jsdelivr.net",
+    "cdnjs.cloudflare.com",
+    "cloudflaremirrors.com",
+    "registry.npmjs.org",
+    "kali.download",
+    "app.unpkg.com",
+    "crunchyroll.com",
+    "nodejs.org",
+    "gitlab.com",
+  ];
+
+  for (const domain of requiredDomains) assert.equal(domains.has(domain), true, domain);
+  assert.ok(BUILTIN_NETWORK_TRACE_PROVIDERS.every((provider) => provider.kind && provider.category && provider.icon));
+  assert.notEqual(DEFAULT_NETWORK_TRACE_PROVIDER_ID, "cloudflare-speed");
 });
 
 test("resolveNetworkTraceProvider supports custom trace endpoints", () => {
   assert.equal(resolveNetworkTraceProvider(normalizeNetworkTraceSettings()).id, DEFAULT_NETWORK_TRACE_PROVIDER_ID);
-  assert.deepEqual(resolveNetworkTraceProvider({
+  const provider = resolveNetworkTraceProvider({
     providerId: "custom",
     customProviderUrl: "https://example.com/cdn-cgi/trace",
     timeoutSeconds: 8,
-  }), {
-    id: "custom",
-    name: "Custom",
-    url: "https://example.com/cdn-cgi/trace",
   });
+  assert.equal(provider.id, "custom");
+  assert.equal(provider.name, "Custom");
+  assert.equal(provider.url, "https://example.com/cdn-cgi/trace");
+  assert.equal(provider.kind, "cloudflare-trace");
 });
 
 test("normalizeSettings rejects invalid enums and clamps font sizes", () => {

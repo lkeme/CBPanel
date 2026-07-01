@@ -7,7 +7,7 @@ import { GithubMirrorProbeService, mirrorProbeTargets } from "./githubMirrorProb
 test("mirrorProbeTargets returns built-in mirrors and valid custom mirror for all checks", () => {
   const settings = normalizeSettings({
     networkTrace: {
-      providerId: "cloudflare-speed",
+      providerId: "cloudflare-www",
       customProviderUrl: "",
       timeoutSeconds: 8,
       githubMirrorProviderId: "off",
@@ -39,7 +39,7 @@ test("GithubMirrorProbeService checks checksum and signature URLs before recomme
   });
   const settings = normalizeSettings({
     networkTrace: {
-      providerId: "cloudflare-speed",
+      providerId: "cloudflare-www",
       customProviderUrl: "",
       timeoutSeconds: 8,
       githubMirrorProviderId: "off",
@@ -58,7 +58,7 @@ test("GithubMirrorProbeService checks checksum and signature URLs before recomme
 test("auto-best probe target checks all built-in mirrors", () => {
   const settings = normalizeSettings({
     networkTrace: {
-      providerId: "cloudflare-speed",
+      providerId: "cloudflare-www",
       customProviderUrl: "",
       timeoutSeconds: 8,
       githubMirrorProviderId: "auto-best",
@@ -82,7 +82,7 @@ test("GithubMirrorProbeService records failed mirrors without failing the whole 
   });
   const settings = normalizeSettings({
     networkTrace: {
-      providerId: "cloudflare-speed",
+      providerId: "cloudflare-www",
       customProviderUrl: "",
       timeoutSeconds: 8,
       githubMirrorProviderId: "custom",
@@ -111,7 +111,7 @@ test("GithubMirrorProbeService reuses recent mirror probe results", async () => 
   });
   const settings = normalizeSettings({
     networkTrace: {
-      providerId: "cloudflare-speed",
+      providerId: "cloudflare-www",
       customProviderUrl: "",
       timeoutSeconds: 8,
       githubMirrorProviderId: "off",
@@ -139,7 +139,7 @@ test("GithubMirrorProbeService caches mirror probes by request shape", async () 
   });
   const settings = normalizeSettings({
     networkTrace: {
-      providerId: "cloudflare-speed",
+      providerId: "cloudflare-www",
       customProviderUrl: "",
       timeoutSeconds: 8,
       githubMirrorProviderId: "off",

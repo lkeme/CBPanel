@@ -3504,11 +3504,13 @@ textarea {
   font-family: var(--font-mono);
 }
 
+.network-trace-select,
 .github-mirror-select {
   position: relative;
   min-width: 0;
 }
 
+.network-trace-trigger,
 .github-mirror-trigger {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr) auto;
@@ -3526,23 +3528,31 @@ textarea {
   transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
 }
 
+.network-trace-trigger:hover,
+.network-trace-select.open .network-trace-trigger,
 .github-mirror-trigger:hover,
 .github-mirror-select.open .github-mirror-trigger {
   border-color: color-mix(in srgb, var(--primary) 34%, var(--border));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 10%, transparent), 0 14px 30px color-mix(in srgb, var(--foreground) 7%, transparent);
 }
 
+.network-trace-trigger-main,
+.network-trace-option-main,
+.network-trace-option-title,
 .github-mirror-trigger-main,
 .github-mirror-option-main,
 .github-mirror-option-title {
   min-width: 0;
 }
 
+.network-trace-trigger-main,
 .github-mirror-trigger-main {
   display: grid;
   gap: 3px;
 }
 
+.network-trace-trigger-main strong,
+.network-trace-option-title strong,
 .github-mirror-trigger-main strong,
 .github-mirror-option-title strong {
   overflow: hidden;
@@ -3550,11 +3560,14 @@ textarea {
   white-space: nowrap;
 }
 
+.network-trace-trigger-main strong,
 .github-mirror-trigger-main strong {
   font-size: 14px;
   font-weight: 800;
 }
 
+.network-trace-trigger-main small,
+.network-trace-option-main small,
 .github-mirror-trigger-main small,
 .github-mirror-option-main small {
   overflow: hidden;
@@ -3564,6 +3577,7 @@ textarea {
   font-size: 12px;
 }
 
+.network-trace-trigger-side,
 .github-mirror-trigger-side {
   display: inline-flex;
   gap: 8px;
@@ -3571,14 +3585,24 @@ textarea {
   color: var(--foreground-muted);
 }
 
+.network-trace-list,
 .github-mirror-list {
-  top: auto;
-  bottom: calc(100% + 6px);
   min-width: min(100%, 560px);
   max-height: 420px;
   padding: 6px;
 }
 
+.network-trace-list {
+  top: calc(100% + 6px);
+  bottom: auto;
+}
+
+.github-mirror-list {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+.network-trace-option,
 .github-mirror-option {
   display: grid;
   grid-template-columns: 32px minmax(0, 1fr) minmax(112px, auto);
@@ -3588,14 +3612,113 @@ textarea {
   padding: 8px 10px;
 }
 
-.github-mirror-option.auto {
-  background: color-mix(in srgb, var(--primary-soft) 56%, var(--surface));
-}
-
+.network-trace-option-title,
 .github-mirror-option-title {
   display: flex;
   gap: 6px;
   align-items: center;
+}
+
+.network-trace-option-tags {
+  display: inline-flex;
+  justify-content: flex-end;
+  gap: 5px;
+  align-items: center;
+  min-width: 0;
+  color: var(--foreground-muted);
+}
+
+.trace-provider-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  color: var(--foreground-muted);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.trace-provider-icon.domestic {
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: color-mix(in srgb, var(--primary) 28%, var(--border));
+}
+
+.trace-provider-icon.international,
+.trace-provider-icon.static {
+  color: var(--success);
+  background: var(--success-soft);
+  border-color: color-mix(in srgb, var(--success) 24%, var(--border));
+}
+
+.trace-provider-icon.ai,
+.trace-provider-icon.crypto {
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-color: color-mix(in srgb, var(--warning) 28%, var(--border));
+}
+
+.trace-provider-icon.nsfw {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border));
+}
+
+.trace-category-chip,
+.trace-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.trace-category-chip.domestic {
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: color-mix(in srgb, var(--primary) 28%, var(--border));
+}
+
+.trace-category-chip.international,
+.trace-category-chip.static {
+  color: var(--success);
+  background: var(--success-soft);
+  border-color: color-mix(in srgb, var(--success) 28%, var(--border));
+}
+
+.trace-category-chip.ai,
+.trace-category-chip.crypto {
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-color: color-mix(in srgb, var(--warning) 32%, var(--border));
+}
+
+.trace-category-chip.nsfw {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--border));
+}
+
+.trace-tag {
+  color: var(--foreground-muted);
+  background: var(--surface-muted);
+}
+
+.github-mirror-option.auto {
+  background: color-mix(in srgb, var(--primary-soft) 56%, var(--surface));
 }
 
 .github-mirror-option-metric {

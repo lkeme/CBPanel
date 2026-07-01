@@ -698,9 +698,9 @@ test("profile preflight reports proxy exit trace checks", () => {
       ip: "203.0.113.42",
       latencyMs: 88,
       trace: {
-        providerId: "cloudflare-speed",
-        providerName: "Cloudflare Speed",
-        providerUrl: "https://speed.cloudflare.com/cdn-cgi/trace",
+        providerId: "cloudflare-www",
+        providerName: "Cloudflare",
+        providerUrl: "https://www.cloudflare.com/cdn-cgi/trace",
         loc: "US",
         colo: "LAX",
       },
@@ -709,7 +709,7 @@ test("profile preflight reports proxy exit trace checks", () => {
   });
   assert.equal(withCheck.items.find((item) => item.id === "network-check")?.severity, "pass");
   assert.match(withCheck.items.find((item) => item.id === "network-check")?.detail ?? "", /203\.0\.113\.42/);
-  assert.match(withCheck.items.find((item) => item.id === "network-check")?.detail ?? "", /Cloudflare Speed/);
+  assert.match(withCheck.items.find((item) => item.id === "network-check")?.detail ?? "", /Cloudflare/);
   assert.equal(withCheck.items.some((item) => item.id === "geoip-database"), false);
 });
 
