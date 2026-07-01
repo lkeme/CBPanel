@@ -13,6 +13,7 @@ import {
   type NetworkTraceProviderCategory,
   type NetworkTraceSettings,
 } from "../../shared/settings";
+import { NetworkTraceProviderIcon } from "./networkTraceProviderIcons";
 import { ChoiceList, ChoiceOption, clampChoiceIndex, closeOnFocusLeave, nextChoiceIndex } from "../ui/choice-list";
 import { Field, NumberField } from "../ui/form-controls";
 
@@ -117,9 +118,7 @@ type NetworkTraceOption = {
   value: string;
   label: string;
   meta: string;
-  icon: string;
   category: NetworkTraceProviderCategory;
-  tags: string[];
   kind: NetworkTraceProvider["kind"] | "custom";
 };
 
@@ -140,18 +139,14 @@ function NetworkTraceProviderSelect({
       value: provider.id,
       label: provider.name,
       meta: provider.actualDomain ?? summarizeTraceUrl(provider.url),
-      icon: provider.icon ?? categoryIcon(provider.category),
       category: provider.category,
-      tags: provider.tags ?? [],
       kind: provider.kind,
     })),
     {
       value: "custom",
       label: t("networkTrace.custom"),
       meta: customUrl || t("networkTrace.customHint"),
-      icon: "*",
       category: "static",
-      tags: [t("networkTrace.tagCustom"), "trace"],
       kind: "custom",
     },
   ];
@@ -210,7 +205,7 @@ function NetworkTraceProviderSelect({
           <small>{selected.meta}</small>
         </span>
         <span className="network-trace-trigger-side">
-          <CategoryChip category={selected.category} t={t} />
+          <TraceChips option={selected} t={t} />
           <ChevronsUpDown size={16} aria-hidden="true" />
         </span>
       </button>
@@ -234,15 +229,12 @@ function NetworkTraceProviderSelect({
                 <span className="network-trace-option-main">
                   <span className="network-trace-option-title">
                     <strong>{option.label}</strong>
-                    <CategoryChip category={option.category} t={t} />
                     {selectedOption && <span className="mirror-chip primary">{t("githubMirror.currentBadge")}</span>}
                   </span>
                   <small>{option.meta}</small>
                 </span>
                 <span className="network-trace-option-tags">
-                  {option.tags.slice(0, 3).map((tag) => (
-                    <span className="trace-tag" key={tag}>{tag}</span>
-                  ))}
+                  <TraceChips option={option} t={t} />
                 </span>
               </ChoiceOption>
             );
@@ -255,9 +247,29 @@ function NetworkTraceProviderSelect({
 
 function TraceIcon({ option }: { option: NetworkTraceOption }) {
   return (
-    <span className={`trace-provider-icon ${option.category}`} aria-hidden="true">
-      {option.icon}
+    <span className={`trace-provider-icon ${option.category} ${option.kind === "custom" ? "custom" : ""}`} aria-hidden="true">
+      <NetworkTraceProviderIcon className="trace-provider-icon-svg" category={option.category} providerId={option.value} />
     </span>
+  );
+}
+
+function TraceChips({
+  option,
+  t,
+}: {
+  option: NetworkTraceOption;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  if (option.kind === "custom") {
+    return <span className="trace-category-chip custom">{t("networkTrace.tagCustom")}</span>;
+  }
+  const chips = traceDisplayCategories(option.category);
+  return (
+    <>
+      {chips.map((category) => (
+        <CategoryChip category={category} key={category} t={t} />
+      ))}
+    </>
   );
 }
 
@@ -271,13 +283,10 @@ function CategoryChip({
   return <span className={`trace-category-chip ${category}`}>{t(`networkTrace.category.${category}`)}</span>;
 }
 
-function categoryIcon(category: NetworkTraceProviderCategory): string {
-  if (category === "domestic") return "CN";
-  if (category === "international") return "GL";
-  if (category === "ai") return "AI";
-  if (category === "nsfw") return "18";
-  if (category === "crypto") return "₿";
-  return "CDN";
+function traceDisplayCategories(category: NetworkTraceProviderCategory): NetworkTraceProviderCategory[] {
+  if (category === "domestic") return ["domestic"];
+  if (category === "international") return ["international"];
+  return ["international", category];
 }
 
 function summarizeTraceUrl(value: string): string {

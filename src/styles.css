@@ -3634,42 +3634,48 @@ textarea {
   justify-content: center;
   width: 30px;
   height: 30px;
-  padding: 0 5px;
+  padding: 4px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: 10px;
   color: var(--foreground-muted);
   background: var(--surface-muted);
   border: 1px solid var(--border);
-  font-size: 11px;
-  font-weight: 900;
   line-height: 1;
-  white-space: nowrap;
+}
+
+.trace-provider-icon-svg,
+.trace-provider-icon-svg svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .trace-provider-icon.domestic {
-  color: var(--primary);
-  background: var(--primary-soft);
-  border-color: color-mix(in srgb, var(--primary) 28%, var(--border));
+  background: color-mix(in srgb, var(--primary-soft) 72%, var(--surface));
+  border-color: color-mix(in srgb, var(--primary) 24%, var(--border));
 }
 
 .trace-provider-icon.international,
 .trace-provider-icon.static {
-  color: var(--success);
-  background: var(--success-soft);
-  border-color: color-mix(in srgb, var(--success) 24%, var(--border));
+  background: color-mix(in srgb, var(--success-soft) 68%, var(--surface));
+  border-color: color-mix(in srgb, var(--success) 22%, var(--border));
 }
 
 .trace-provider-icon.ai,
 .trace-provider-icon.crypto {
-  color: var(--warning);
-  background: var(--warning-soft);
-  border-color: color-mix(in srgb, var(--warning) 28%, var(--border));
+  background: color-mix(in srgb, var(--warning-soft) 68%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 26%, var(--border));
 }
 
 .trace-provider-icon.nsfw {
-  color: var(--danger);
-  background: var(--danger-soft);
-  border-color: color-mix(in srgb, var(--danger) 28%, var(--border));
+  background: color-mix(in srgb, var(--danger-soft) 68%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 26%, var(--border));
+}
+
+.trace-provider-icon.custom {
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: color-mix(in srgb, var(--primary) 28%, var(--border));
 }
 
 .trace-category-chip,
@@ -3710,6 +3716,12 @@ textarea {
   color: var(--danger);
   background: var(--danger-soft);
   border-color: color-mix(in srgb, var(--danger) 32%, var(--border));
+}
+
+.trace-category-chip.custom {
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: color-mix(in srgb, var(--primary) 28%, var(--border));
 }
 
 .trace-tag {
