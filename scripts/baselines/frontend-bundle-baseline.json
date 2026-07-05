@@ -1,0 +1,246 @@
+{
+  "generatedAt": "2026-07-05T04:39:52.444Z",
+  "tool": "scripts/check-bundle-baseline.mjs",
+  "limits": {
+    "perChunkBytes": 32768,
+    "roleBytes": 49152,
+    "entryBytes": 24576,
+    "entryGzipBytes": 8192,
+    "vendorRoleBytes": 98304
+  },
+  "chunks": [
+    {
+      "file": "index-BSy1yQC7.js",
+      "role": "entry",
+      "bytes": 257899,
+      "gzipBytes": 73467,
+      "brotliBytes": 57881
+    },
+    {
+      "file": "react-vendor-B3djHIoR.js",
+      "role": "vendor",
+      "bytes": 178363,
+      "gzipBytes": 55717,
+      "brotliBytes": 48340
+    },
+    {
+      "file": "radix-vendor-DT7ifYUB.js",
+      "role": "vendor",
+      "bytes": 94110,
+      "gzipBytes": 30795,
+      "brotliBytes": 27167
+    },
+    {
+      "file": "SettingsDrawer-CAxxRngM.js",
+      "role": "settings",
+      "bytes": 77224,
+      "gzipBytes": 23246,
+      "brotliBytes": 18962
+    },
+    {
+      "file": "ui-vendor-D-XskTpq.js",
+      "role": "vendor",
+      "bytes": 59986,
+      "gzipBytes": 17617,
+      "brotliBytes": 15413
+    },
+    {
+      "file": "ProfileEditorDrawer-DQ_kdinz.js",
+      "role": "profile-editor",
+      "bytes": 30798,
+      "gzipBytes": 7617,
+      "brotliBytes": 6808
+    },
+    {
+      "file": "RegistryModuleView-DEjDcXTE.js",
+      "role": "registry-view",
+      "bytes": 22834,
+      "gzipBytes": 4954,
+      "brotliBytes": 4388
+    },
+    {
+      "file": "icons-vendor-Da0T6vCr.js",
+      "role": "vendor",
+      "bytes": 21783,
+      "gzipBytes": 7902,
+      "brotliBytes": 6874
+    },
+    {
+      "file": "RegistryDialogs-D4_DSZ8_.js",
+      "role": "registry-dialogs",
+      "bytes": 19131,
+      "gzipBytes": 4752,
+      "brotliBytes": 4235
+    },
+    {
+      "file": "SystemStatusContent-Dkqbo0Jh.js",
+      "role": "other",
+      "bytes": 9031,
+      "gzipBytes": 2278,
+      "brotliBytes": 1984
+    },
+    {
+      "file": "ColumnSettingsDrawer-BhOMagLF.js",
+      "role": "settings",
+      "bytes": 4300,
+      "gzipBytes": 1658,
+      "brotliBytes": 1502
+    },
+    {
+      "file": "form-controls-C886L3XN.js",
+      "role": "other",
+      "bytes": 4020,
+      "gzipBytes": 1506,
+      "brotliBytes": 1339
+    },
+    {
+      "file": "BrowserCoreImportDialog-BeFlmuFu.js",
+      "role": "browser-core-import",
+      "bytes": 2869,
+      "gzipBytes": 1190,
+      "brotliBytes": 1046
+    },
+    {
+      "file": "SelectMenu-jmu2OEgt.js",
+      "role": "other",
+      "bytes": 2378,
+      "gzipBytes": 1073,
+      "brotliBytes": 956
+    },
+    {
+      "file": "appBackupClient-CWbmYmSz.js",
+      "role": "other",
+      "bytes": 1990,
+      "gzipBytes": 871,
+      "brotliBytes": 755
+    },
+    {
+      "file": "EnvironmentPackageOperationDialog-BIkOHZtv.js",
+      "role": "other",
+      "bytes": 1879,
+      "gzipBytes": 837,
+      "brotliBytes": 724
+    },
+    {
+      "file": "RuntimeCheckContent-Dme0VLl5.js",
+      "role": "other",
+      "bytes": 1818,
+      "gzipBytes": 733,
+      "brotliBytes": 636
+    },
+    {
+      "file": "ConfirmDialog-BMQ3RMY9.js",
+      "role": "other",
+      "bytes": 1804,
+      "gzipBytes": 775,
+      "brotliBytes": 708
+    },
+    {
+      "file": "tauri-vendor-CHP702pu.js",
+      "role": "vendor",
+      "bytes": 1403,
+      "gzipBytes": 693,
+      "brotliBytes": 565
+    },
+    {
+      "file": "DialogShell-DnNxrlcs.js",
+      "role": "other",
+      "bytes": 1247,
+      "gzipBytes": 560,
+      "brotliBytes": 495
+    },
+    {
+      "file": "choice-list-CgeOJJFu.js",
+      "role": "other",
+      "bytes": 906,
+      "gzipBytes": 491,
+      "brotliBytes": 424
+    },
+    {
+      "file": "rolldown-runtime-QTnfLwEv.js",
+      "role": "other",
+      "bytes": 694,
+      "gzipBytes": 422,
+      "brotliBytes": 373
+    },
+    {
+      "file": "utils-2wYhT6pv.js",
+      "role": "other",
+      "bytes": 322,
+      "gzipBytes": 232,
+      "brotliBytes": 196
+    },
+    {
+      "file": "ModuleHeader-DBKdtWdO.js",
+      "role": "other",
+      "bytes": 293,
+      "gzipBytes": 203,
+      "brotliBytes": 165
+    },
+    {
+      "file": "proxyDisplay-Ctdz4Iif.js",
+      "role": "other",
+      "bytes": 238,
+      "gzipBytes": 205,
+      "brotliBytes": 178
+    }
+  ],
+  "summary": [
+    {
+      "role": "vendor",
+      "files": 5,
+      "bytes": 355645,
+      "gzipBytes": 112724,
+      "brotliBytes": 98359
+    },
+    {
+      "role": "entry",
+      "files": 1,
+      "bytes": 257899,
+      "gzipBytes": 73467,
+      "brotliBytes": 57881
+    },
+    {
+      "role": "settings",
+      "files": 2,
+      "bytes": 81524,
+      "gzipBytes": 24904,
+      "brotliBytes": 20464
+    },
+    {
+      "role": "profile-editor",
+      "files": 1,
+      "bytes": 30798,
+      "gzipBytes": 7617,
+      "brotliBytes": 6808
+    },
+    {
+      "role": "other",
+      "files": 13,
+      "bytes": 26620,
+      "gzipBytes": 10186,
+      "brotliBytes": 8933
+    },
+    {
+      "role": "registry-view",
+      "files": 1,
+      "bytes": 22834,
+      "gzipBytes": 4954,
+      "brotliBytes": 4388
+    },
+    {
+      "role": "registry-dialogs",
+      "files": 1,
+      "bytes": 19131,
+      "gzipBytes": 4752,
+      "brotliBytes": 4235
+    },
+    {
+      "role": "browser-core-import",
+      "files": 1,
+      "bytes": 2869,
+      "gzipBytes": 1190,
+      "brotliBytes": 1046
+    }
+  ]
+}

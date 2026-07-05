@@ -1,0 +1,67 @@
+# Dependencies
+node_modules/
+
+# Frontend / TypeScript build output
+dist/
+*.tsbuildinfo
+
+# Local app runtime data
+data/
+portable-data/
+CloakBrowser/
+
+# Local logs and temp files
+.tmp/
+tmp/
+temp/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+.DS_Store
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Test / analysis output
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+blob-report/
+.vite/
+.cache/
+
+# Local/internal design notes
+docs/
+
+# Tauri / release artifacts
+src-tauri/target/
+src-tauri/.tauri/
+src-tauri/tauri.release.sidecar.conf.json
+release/
+
+# Generated sidecar packaging artifacts
+.cbpanel-sidecar.pkg.config.json
+sidecars/
+
+# Local agent cache
+.ace-tool/
+
+# Local AI / agent workflow files
+.agents/
+.codex/
+.claude/
+.trellis/
+AGENTS.md
+CLAUDE.md
+.cursor/
+.continue/
+.windsurf/
+.augment/

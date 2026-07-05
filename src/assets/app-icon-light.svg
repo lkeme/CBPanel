@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">CBPanel app icon light</title>
+  <desc id="desc">A light theme fingerprint mark for the CBPanel desktop client.</desc>
+  <defs>
+    <linearGradient id="cbpanel-light-bg" x1="154" y1="128" x2="858" y2="886" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" />
+      <stop offset="0.54" stop-color="#F7FAFF" />
+      <stop offset="1" stop-color="#EAF2FF" />
+    </linearGradient>
+    <linearGradient id="cbpanel-light-ring" x1="182" y1="162" x2="844" y2="864" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#06B6D4" />
+      <stop offset="0.58" stop-color="#2F63FF" />
+      <stop offset="1" stop-color="#7C3AED" />
+    </linearGradient>
+    <linearGradient id="cbpanel-light-fingerprint" x1="256" y1="214" x2="760" y2="824" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0891B2" />
+      <stop offset="0.46" stop-color="#06B6D4" />
+      <stop offset="0.78" stop-color="#2F63FF" />
+      <stop offset="1" stop-color="#7C3AED" />
+    </linearGradient>
+    <radialGradient id="cbpanel-light-glow" cx="0" cy="0" r="1" gradientTransform="matrix(0 340 -340 0 512 500)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#67E8F9" stop-opacity="0.38" />
+      <stop offset="1" stop-color="#2F63FF" stop-opacity="0" />
+    </radialGradient>
+    <filter id="cbpanel-light-shadow" x="-12%" y="-12%" width="124%" height="124%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="24" stdDeviation="26" flood-color="#263F75" flood-opacity="0.16" />
+    </filter>
+    <filter id="cbpanel-light-line" x="-18%" y="-18%" width="136%" height="136%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#2F63FF" flood-opacity="0.18" />
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="232" fill="#EAF2FF" />
+  <rect x="88" y="88" width="848" height="848" rx="194" fill="url(#cbpanel-light-bg)" filter="url(#cbpanel-light-shadow)" />
+  <rect x="112" y="112" width="800" height="800" rx="174" fill="url(#cbpanel-light-glow)" />
+  <rect x="118" y="118" width="788" height="788" rx="170" fill="none" stroke="url(#cbpanel-light-ring)" stroke-width="18" opacity="0.78" />
+
+  <g fill="none" stroke="url(#cbpanel-light-fingerprint)" stroke-linecap="round" stroke-linejoin="round" filter="url(#cbpanel-light-line)">
+    <path d="M286 498c0-138 112-250 250-250 132 0 240 101 249 229" stroke-width="48" opacity="0.96" />
+    <path d="M323 668c-35-49-55-109-55-174 0-151 123-274 274-274 117 0 219 74 258 178" stroke-width="34" opacity="0.46" />
+    <path d="M356 438c35-78 113-132 204-132 123 0 223 100 223 223 0 87-48 148-118 148-64 0-112-48-112-112v-34" stroke-width="44" opacity="0.9" />
+    <path d="M410 748c-45-60-72-134-72-215 0-114 92-206 206-206s206 92 206 206" stroke-width="36" opacity="0.64" />
+    <path d="M458 817c-56-73-89-164-89-263 0-97 79-176 176-176 96 0 174 78 174 174 0 59-31 102-77 102-42 0-72-30-72-72v-43" stroke-width="42" opacity="0.94" />
+    <path d="M522 820c-38-70-58-150-58-235v-40c0-45 36-81 81-81s81 36 81 81v43" stroke-width="42" opacity="0.86" />
+  </g>
+
+  <path d="M708 763h64" stroke="#DB2777" stroke-width="34" stroke-linecap="round" opacity="0.76" />
+</svg>
