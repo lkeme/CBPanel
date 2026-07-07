@@ -42,7 +42,7 @@
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@vitejs/plugin-react": "^6.0.3",
     "class-variance-authority": "^0.7.1",
-    "cloakbrowser": "^0.4.7",
+    "cloakbrowser": "^0.4.8",
     "clsx": "^2.1.1",
     "express": "^5.2.1",
     "fflate": "^0.8.3",

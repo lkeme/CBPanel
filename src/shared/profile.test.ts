@@ -235,6 +235,21 @@ test("runtime quick args update extraArgs without duplicates", () => {
 
   assert.deepEqual(enabledAgain.runtime.extraArgs, ["--foo=bar", "--disable-http2"]);
   assert.equal(isRuntimeQuickArgEnabled(enabledAgain, "disable-http2"), true);
+
+  const fingerprintOff = setRuntimeQuickArg(enabledAgain, "fingerprint-off", true);
+  const thirdPartyCookies = setRuntimeQuickArg(fingerprintOff, "allow-3p-cookies", true);
+  const licenseProxy = setRuntimeQuickArg(thirdPartyCookies, "license-through-proxy", true);
+
+  assert.deepEqual(licenseProxy.runtime.extraArgs, [
+    "--foo=bar",
+    "--disable-http2",
+    "--fingerprint=off",
+    "--fingerprint-allow-3p-cookies",
+    "--license-through-proxy",
+  ]);
+  assert.equal(isRuntimeQuickArgEnabled(licenseProxy, "fingerprint-off"), true);
+  assert.equal(isRuntimeQuickArgEnabled(licenseProxy, "allow-3p-cookies"), true);
+  assert.equal(isRuntimeQuickArgEnabled(licenseProxy, "license-through-proxy"), true);
 });
 
 test("manual detection check updates status, notes, and timestamp", () => {
@@ -779,6 +794,59 @@ test("geoip proxy makes WebRTC effectively protected without persisting an expli
   assert.equal(report.items.find((item) => item.id === "webrtc-geoip-effective")?.severity, "pass");
   assert.equal(report.items.some((item) => item.id === "webrtc-auto-without-network-anchor"), false);
   assert.equal(report.items.some((item) => item.id === "webrtc-custom-empty"), false);
+});
+
+test("geoip without proxy follows the current public exit instead of warning", () => {
+  const profile = defaultProfile({
+    runtime: {
+      ...defaultProfile().runtime,
+      geoip: true,
+    },
+    fingerprint: {
+      ...defaultProfile().fingerprint,
+      timezone: "",
+      locale: "",
+      webrtcIp: "off",
+      webrtcIpValue: "",
+    },
+  });
+
+  assert.equal(effectiveWebrtcIpMode(profile), "geoip");
+
+  const report = preflightProfile(profile, { binaryInstalled: true });
+  const geoip = report.items.find((item) => item.id === "geoip-without-proxy");
+  const webrtc = report.items.find((item) => item.id === "webrtc-geoip-effective");
+
+  assert.equal(geoip?.severity, "pass");
+  assert.match(geoip?.detail ?? "", /当前机器公网出口/);
+  assert.equal(webrtc?.severity, "pass");
+  assert.equal(report.items.some((item) => item.id === "webrtc-auto-without-network-anchor"), false);
+});
+
+test("geoip without proxy and explicit timezone locale does not claim WebRTC injection", () => {
+  const profile = defaultProfile({
+    runtime: {
+      ...defaultProfile().runtime,
+      geoip: true,
+    },
+    fingerprint: {
+      ...defaultProfile().fingerprint,
+      timezone: "Asia/Shanghai",
+      locale: "zh-CN",
+      webrtcIp: "off",
+      webrtcIpValue: "",
+    },
+  });
+
+  assert.equal(effectiveWebrtcIpMode(profile), "off");
+
+  const report = preflightProfile(profile, { binaryInstalled: true });
+  const override = report.items.find((item) => item.id === "geoip-explicit-overrides");
+
+  assert.equal(report.items.find((item) => item.id === "geoip-without-proxy")?.severity, "pass");
+  assert.equal(report.items.some((item) => item.id === "webrtc-geoip-effective"), false);
+  assert.equal(override?.severity, "warn");
+  assert.equal(override?.actions?.[0]?.target, "fingerprint");
 });
 
 test("profile snapshot masks proxy credentials and sensitive launch options", () => {

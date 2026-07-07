@@ -19,7 +19,12 @@ export type ColorScheme = "light" | "dark" | "no-preference";
 export type HumanPreset = "default" | "careful";
 export type ViewportMode = "fixed" | "native";
 export type ProfilePresetId = "local-qa" | "residential-proxy" | "returning-session" | "throwaway-session";
-export type RuntimeQuickArgId = "fake-shadow-root" | "disable-http2";
+export type RuntimeQuickArgId =
+  | "fake-shadow-root"
+  | "disable-http2"
+  | "fingerprint-off"
+  | "allow-3p-cookies"
+  | "license-through-proxy";
 export type DetectionCheckStatus = "untested" | "pass" | "warn" | "fail";
 
 export interface ProxySettings {
@@ -378,6 +383,21 @@ export const RUNTIME_QUICK_ARGS: RuntimeQuickArg[] = [
     id: "disable-http2",
     label: "Disable HTTP/2",
     flag: "--disable-http2",
+  },
+  {
+    id: "fingerprint-off",
+    label: "Fingerprint Off",
+    flag: "--fingerprint=off",
+  },
+  {
+    id: "allow-3p-cookies",
+    label: "Allow 3P Cookies",
+    flag: "--fingerprint-allow-3p-cookies",
+  },
+  {
+    id: "license-through-proxy",
+    label: "License via Proxy",
+    flag: "--license-through-proxy",
   },
 ];
 
@@ -907,7 +927,12 @@ export function effectiveWebrtcIpMode(
 ): EffectiveWebrtcIpMode {
   if (profile.fingerprint.webrtcIp === "custom") return "custom";
   if (profile.fingerprint.webrtcIp === "auto") return "auto";
-  if (profile.runtime.geoip && proxyUrl) return "geoip";
+  if (
+    profile.runtime.geoip
+    && (proxyUrl || !profile.fingerprint.timezone.trim() || !profile.fingerprint.locale.trim())
+  ) {
+    return "geoip";
+  }
   return "off";
 }
 
@@ -1269,21 +1294,20 @@ export function preflightProfile(
     pushPreflight(items, {
       id: "geoip-without-proxy",
       category: "network",
-      severity: "warn",
+      severity: "pass",
       title: "GeoIP 联动",
-      detail: "GeoIP 已启用但没有代理出口；时区/语言会按当前机器公网出口推断。",
-      actions: [openTabAction("proxy", "配置代理"), openTabAction("runtime", "关闭 GeoIP")],
+      detail: "GeoIP 已启用且未配置代理；CloakBrowser 会按当前机器公网出口推断时区和语言。",
     });
   }
 
-  if (profile.runtime.geoip && proxyUrl) {
+  if (profile.runtime.geoip) {
     if (profile.fingerprint.timezone.trim() || profile.fingerprint.locale.trim()) {
       pushPreflight(items, {
         id: "geoip-explicit-overrides",
         category: "network",
         severity: "warn",
         title: "GeoIP 显式覆盖",
-        detail: "已启用 GeoIP，但显式 timezone/locale 会优先生效；如需跟随代理出口，请清空这两个字段。",
+        detail: "已启用 GeoIP，但显式 timezone/locale 会优先生效；如需跟随代理或当前公网出口，请清空这两个字段。",
         actions: [openTabAction("fingerprint", "清空时区/语言")],
       });
     }
@@ -1306,7 +1330,9 @@ export function preflightProfile(
       category: "network",
       severity: "pass",
       title: "WebRTC GeoIP",
-      detail: "GeoIP 已启用且代理有效；CloakBrowser 解析到代理出口后会自动注入 WebRTC 出口 IP。",
+      detail: proxyUrl
+        ? "GeoIP 已启用且代理有效；CloakBrowser 解析到代理出口后会自动注入 WebRTC 出口 IP。"
+        : "GeoIP 已启用；CloakBrowser 会按当前机器公网出口解析并保持 WebRTC 出口一致。",
     });
   }
 
@@ -1580,7 +1606,7 @@ export function profileScore(profile: BrowserProfile): Array<{ label: string; ok
     {
       label: "时区/语言",
       ok: profile.runtime.geoip || Boolean(profile.fingerprint.timezone && profile.fingerprint.locale),
-      detail: profile.runtime.geoip ? "由代理出口自动解析" : "建议显式设置或启用 GeoIP",
+      detail: profile.runtime.geoip ? "由代理或当前公网出口自动解析" : "建议显式设置或启用 GeoIP",
     },
     {
       label: "人类化",
@@ -1633,7 +1659,9 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
     severity: profile.runtime.geoip || Boolean(profile.fingerprint.timezone && profile.fingerprint.locale) ? "pass" : "warn",
     title: "时区/语言联动",
     detail: profile.runtime.geoip
-      ? "GeoIP 已启用，会尝试让时区和语言跟代理出口一致。"
+      ? proxy
+        ? "GeoIP 已启用，会尝试让时区和语言跟代理出口一致。"
+        : "GeoIP 已启用，会尝试让时区和语言跟当前机器公网出口一致。"
       : profile.fingerprint.timezone && profile.fingerprint.locale
         ? "已显式设置时区和语言。"
         : "建议启用 GeoIP，或显式填写 timezone 和 locale。",
@@ -1646,7 +1674,9 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
     title: "WebRTC 出口",
     detail:
       webrtcMode === "geoip"
-        ? "GeoIP 已启用且代理有效；CloakBrowser 解析到代理出口后会自动注入 WebRTC 出口 IP。"
+        ? proxy
+          ? "GeoIP 已启用且代理有效；CloakBrowser 解析到代理出口后会自动注入 WebRTC 出口 IP。"
+          : "GeoIP 已启用；CloakBrowser 会按当前机器公网出口保持 WebRTC 出口一致。"
         : webrtcMode === "auto"
         ? "WebRTC IP 会自动跟随代理出口。"
         : webrtcMode === "custom"
