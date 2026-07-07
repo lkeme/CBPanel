@@ -130,10 +130,10 @@ export function BrowserCoreSettingsPanel({
     <div className="settings-stack no-padding">
       <section className="settings-section">
         <div className="settings-section-head browser-core-download-head">
-          <span className="browser-core-section-title">
+          <div className="settings-section-title-with-tip">
             <h2>{t("browserCore.downloadInstall")}</h2>
             <InfoTip text={statusDetail} />
-          </span>
+          </div>
           <div className="row-actions">
             {canApplyUpdate && (
               <button

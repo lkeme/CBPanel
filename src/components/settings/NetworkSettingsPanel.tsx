@@ -15,7 +15,7 @@ import {
 } from "../../shared/settings";
 import { NetworkTraceProviderIcon } from "./networkTraceProviderIcons";
 import { ChoiceList, ChoiceOption, clampChoiceIndex, closeOnFocusLeave, nextChoiceIndex } from "../ui/choice-list";
-import { Field, NumberField } from "../ui/form-controls";
+import { Field, InfoTip, NumberField } from "../ui/form-controls";
 
 export function NetworkSettingsPanel({
   checkGithubMirrors,
@@ -53,9 +53,9 @@ export function NetworkSettingsPanel({
     <div className="settings-stack no-padding">
       <section className="settings-section">
         <div className="settings-section-head">
-          <div>
+          <div className="settings-section-title-with-tip">
             <h2>{t("networkTrace.title")}</h2>
-            <p>{t("networkTrace.description")}</p>
+            <InfoTip text={t("networkTrace.description")} />
           </div>
         </div>
         <Field label={t("networkTrace.provider")} help={t("networkTrace.providerHelp")}>
@@ -86,9 +86,9 @@ export function NetworkSettingsPanel({
 
       <section className="settings-section">
         <div className="settings-section-head">
-          <div>
+          <div className="settings-section-title-with-tip">
             <h2>{t("githubMirror.title")}</h2>
-            <p>{t("githubMirror.description")}</p>
+            <InfoTip text={t("githubMirror.description")} />
           </div>
         </div>
         <Field label={t("githubMirror.provider")} help={t("githubMirror.providerHelp")}>

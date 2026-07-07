@@ -1474,17 +1474,6 @@ code {
   max-width: min(720px, 100%);
 }
 
-.browser-core-section-title {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 6px;
-}
-
-.browser-core-section-title .info-tip {
-  flex: 0 0 auto;
-}
-
 .browser-core-version-value {
   width: 100%;
 }
@@ -4959,6 +4948,17 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.settings-section-title-with-tip {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-section-title-with-tip .info-tip {
+  flex: 0 0 auto;
 }
 
 .settings-action-row {
