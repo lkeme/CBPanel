@@ -54,11 +54,6 @@ async function exists(inputPath) {
   }
 }
 
-async function copyIfExists(source, targetDirectory) {
-  if (!(await exists(source))) return;
-  await fs.copyFile(source, path.join(targetDirectory, path.basename(source)));
-}
-
 async function preparePortableDirectory(targetDirectory, { clean }) {
   if (clean) {
     await fs.rm(targetDirectory, { recursive: true, force: true });
@@ -92,7 +87,56 @@ async function preparePortableDirectory(targetDirectory, { clean }) {
     );
   }
 
-  await copyIfExists(path.join(root, "src-tauri", "target", "release", "WebView2Loader.dll"), targetDirectory);
+  await copyWebView2Loader(targetDirectory);
+}
+
+async function copyWebView2Loader(targetDirectory) {
+  const source = await resolveWebView2Loader();
+  if (!source) {
+    const targetArch = webView2LoaderArchForRustTarget(rustTarget);
+    throw new Error(
+      [
+        `Windows portable release requires WebView2Loader.dll for ${rustTarget}.`,
+        `Expected it at src-tauri/target/release/WebView2Loader.dll or in a webview2-com-sys build output ${targetArch} directory.`,
+        "Run a clean Tauri release build and ensure the webview2-com-sys crate artifacts are available before packaging.",
+      ].join(" "),
+    );
+  }
+  await fs.copyFile(source, path.join(targetDirectory, "WebView2Loader.dll"));
+}
+
+async function resolveWebView2Loader() {
+  const directOutput = path.join(root, "src-tauri", "target", "release", "WebView2Loader.dll");
+  if (await exists(directOutput)) return directOutput;
+
+  const targetArch = webView2LoaderArchForRustTarget(rustTarget);
+  const buildDir = path.join(root, "src-tauri", "target", "release", "build");
+  let entries;
+  try {
+    entries = await fs.readdir(buildDir, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+
+  const candidates = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith("webview2-com-sys-")) continue;
+    const candidate = path.join(buildDir, entry.name, "out", targetArch, "WebView2Loader.dll");
+    if (await exists(candidate)) {
+      const stat = await fs.stat(candidate);
+      candidates.push({ path: candidate, mtimeMs: stat.mtimeMs });
+    }
+  }
+  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  return candidates[0]?.path ?? null;
+}
+
+function webView2LoaderArchForRustTarget(inputRustTarget) {
+  if (inputRustTarget.startsWith("x86_64-")) return "x64";
+  if (inputRustTarget.startsWith("i686-")) return "x86";
+  if (inputRustTarget.startsWith("aarch64-")) return "arm64";
+  throw new Error(`Unsupported Windows WebView2Loader target: ${inputRustTarget}`);
 }
 
 async function removeGeneratedPortableFiles(targetDirectory) {

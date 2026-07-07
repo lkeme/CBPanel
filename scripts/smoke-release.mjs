@@ -28,6 +28,7 @@ if (!Number.isInteger(port) || port <= 0) {
 
 await assertExists(sidecarPath, "Missing generated sidecar executable.");
 await assertExists(path.join(portableDir, "CBPanel.exe"), "Portable CBPanel.exe is missing.");
+await assertExists(path.join(portableDir, "WebView2Loader.dll"), "Portable WebView2Loader.dll is missing.");
 await assertExists(portableSidecarPath, "Portable sidecar is missing.");
 await assertExists(path.join(portableDir, "portable-data"), "Portable data directory is missing.");
 await assertExists(portableZip, "Portable ZIP is missing.");
@@ -195,18 +196,10 @@ async function assertExists(inputPath, message) {
 
 async function prepareSmokePortableDir() {
   await fs.copyFile(path.join(portableDir, "CBPanel.exe"), path.join(smokePortableDir, "CBPanel.exe"));
-  await copyIfExists(path.join(portableDir, "WebView2Loader.dll"), smokePortableDir);
+  await fs.copyFile(path.join(portableDir, "WebView2Loader.dll"), path.join(smokePortableDir, "WebView2Loader.dll"));
   await fs.cp(path.join(portableDir, "sidecars"), path.join(smokePortableDir, "sidecars"), { recursive: true });
   await fs.mkdir(smokeDataDir, { recursive: true });
   await fs.writeFile(path.join(smokeDataDir, ".gitkeep"), "", "utf8");
-}
-
-async function copyIfExists(source, targetDirectory) {
-  try {
-    await fs.copyFile(source, path.join(targetDirectory, path.basename(source)));
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
 }
 
 function sleep(ms) {
