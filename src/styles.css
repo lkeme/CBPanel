@@ -1474,20 +1474,24 @@ code {
   max-width: min(720px, 100%);
 }
 
-.browser-core-version-value {
-  display: flex;
+.browser-core-section-title {
+  display: inline-flex;
   min-width: 0;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
-.browser-core-version-value .browser-core-detail-value {
-  flex: 1 1 auto;
-  width: auto;
+.browser-core-section-title .info-tip {
+  flex: 0 0 auto;
+}
+
+.browser-core-version-value {
+  width: 100%;
 }
 
 .browser-core-version-value .pill {
   flex: 0 0 auto;
+  max-width: none;
 }
 
 dl.browser-core-download-details {
@@ -1540,8 +1544,26 @@ dl.browser-core-download-details .mono-cell {
   padding-right: 2px;
 }
 
+.browser-core-detail-value.has-suffix {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.browser-core-detail-value.copyable.has-suffix {
+  grid-template-columns: minmax(0, 1fr) auto 32px;
+}
+
 .browser-core-detail-value.empty {
   color: var(--foreground-muted);
+}
+
+.browser-core-detail-suffix {
+  display: inline-flex;
+  min-width: 0;
+  justify-self: end;
+}
+
+.browser-core-detail-suffix .pill {
+  min-width: 0;
 }
 
 .browser-core-detail-value .icon-button {
@@ -4974,6 +4996,14 @@ textarea {
   border-color: color-mix(in srgb, var(--warning) 34%, var(--border));
 }
 
+.settings-status-line.browser-core-status-line {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
 .settings-status-line strong {
   color: var(--foreground);
 }
@@ -4981,6 +5011,12 @@ textarea {
 .settings-status-line small {
   color: var(--foreground-muted);
   font-size: 12px;
+}
+
+.settings-status-line.browser-core-status-line small::before {
+  margin-right: 8px;
+  color: var(--foreground-soft);
+  content: "·";
 }
 
 .settings-status-line.warning strong {

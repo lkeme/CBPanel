@@ -51,12 +51,14 @@ export function CopyableValueRow({
   className,
   copyValue,
   empty = "-",
+  suffix,
   t,
   value,
 }: {
   className?: string;
   copyValue?: string | null;
   empty?: string;
+  suffix?: React.ReactNode;
   t?: (key: TranslationKey) => string;
   value?: string | null;
 }) {
@@ -64,10 +66,11 @@ export function CopyableValueRow({
   const copyText = copyValue === undefined ? value?.trim() : copyValue?.trim();
   const canCopy = Boolean(copyText && t);
   return (
-    <span className={cn("browser-core-detail-value", canCopy && "copyable", !value?.trim() && "empty", className)}>
+    <span className={cn("browser-core-detail-value", canCopy && "copyable", suffix && "has-suffix", !value?.trim() && "empty", className)}>
       <span className="mono-cell" title={text}>
         {text}
       </span>
+      {suffix && <span className="browser-core-detail-suffix">{suffix}</span>}
       {canCopy && t && copyText && <CopyButton value={copyText} t={t} />}
     </span>
   );

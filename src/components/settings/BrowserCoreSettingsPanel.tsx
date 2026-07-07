@@ -26,7 +26,7 @@ import {
   browserCoreVersionModeLabel,
   isBrowserCoreBusy,
 } from "../browser-core/BrowserCoreStatusPanels";
-import { Field, Segmented, ToggleField } from "../ui/form-controls";
+import { Field, InfoTip, Segmented, ToggleField } from "../ui/form-controls";
 import { CopyableValueRow, KeyValueList } from "../ui/KeyValueList";
 import { StatusPill } from "../ui/StatusPill";
 import { Switch } from "../ui/switch";
@@ -130,7 +130,10 @@ export function BrowserCoreSettingsPanel({
     <div className="settings-stack no-padding">
       <section className="settings-section">
         <div className="settings-section-head browser-core-download-head">
-          <h2>{t("browserCore.downloadInstall")}</h2>
+          <span className="browser-core-section-title">
+            <h2>{t("browserCore.downloadInstall")}</h2>
+            <InfoTip text={statusDetail} />
+          </span>
           <div className="row-actions">
             {canApplyUpdate && (
               <button
@@ -174,9 +177,8 @@ export function BrowserCoreSettingsPanel({
             </button>
           </div>
         </div>
-        <div className={`settings-status-line ${coreInstalled ? "enabled" : "warning"}`}>
+        <div className={`settings-status-line browser-core-status-line ${coreInstalled ? "enabled" : "warning"}`}>
           <strong>{coreInstalled ? t("browserCore.readyShort") : t("browserCore.missingShort")}</strong>
-          <span>{statusDetail}</span>
           <small>{updateMeta}</small>
         </div>
         {update?.error && <div className="inline-error">{update.error}</div>}
@@ -385,19 +387,14 @@ function VersionValue({
       ? (
           <StatusPill tone="warning" title={t("browserCore.updateAvailable", { version: update.latestVersion })}>
             <Sparkles size={12} aria-hidden="true" />
-            {t("browserCore.newVersionBadge", { version: update.latestVersion })}
+            {t("browserCore.newVersionBadge")}
           </StatusPill>
         )
       : update
         ? <StatusPill tone="running">{t("browserCore.upToDate")}</StatusPill>
         : null;
 
-  return (
-    <span className="browser-core-version-value">
-      <CopyableValueRow value={value} />
-      {badge}
-    </span>
-  );
+  return <CopyableValueRow className="browser-core-version-value" suffix={badge} value={value} />;
 }
 
 async function pickBrowserCoreZip(
