@@ -849,6 +849,35 @@ test("geoip without proxy and explicit timezone locale does not claim WebRTC inj
   assert.equal(override?.actions?.[0]?.target, "fingerprint");
 });
 
+test("webrtc auto warns when geoip cannot provide an exit IP without proxy", () => {
+  const profile = defaultProfile({
+    runtime: {
+      ...defaultProfile().runtime,
+      geoip: true,
+    },
+    fingerprint: {
+      ...defaultProfile().fingerprint,
+      timezone: "Asia/Shanghai",
+      locale: "zh-CN",
+      webrtcIp: "auto",
+      webrtcIpValue: "",
+    },
+  });
+
+  assert.equal(effectiveWebrtcIpMode(profile), "auto");
+
+  const audit = auditProfile(profile);
+  const report = preflightProfile(profile, { binaryInstalled: true });
+  const webrtc = audit.items.find((item) => item.id === "webrtc");
+  const preflight = report.items.find((item) => item.id === "webrtc-auto-without-network-anchor");
+
+  assert.equal(webrtc?.severity, "warn");
+  assert.match(webrtc?.detail ?? "", /不会从 GeoIP 解析/);
+  assert.equal(preflight?.severity, "warn");
+  assert.match(preflight?.detail ?? "", /移除 auto 参数/);
+  assert.equal(report.items.some((item) => item.id === "webrtc-geoip-effective"), false);
+});
+
 test("profile snapshot masks proxy credentials and sensitive launch options", () => {
   const profile = defaultProfile({
     proxy: {

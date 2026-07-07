@@ -927,13 +927,24 @@ export function effectiveWebrtcIpMode(
 ): EffectiveWebrtcIpMode {
   if (profile.fingerprint.webrtcIp === "custom") return "custom";
   if (profile.fingerprint.webrtcIp === "auto") return "auto";
-  if (
-    profile.runtime.geoip
-    && (proxyUrl || !profile.fingerprint.timezone.trim() || !profile.fingerprint.locale.trim())
-  ) {
+  if (profile.runtime.geoip && geoipCanProvideExitIp(profile, proxyUrl)) {
     return "geoip";
   }
   return "off";
+}
+
+export function geoipCanProvideExitIp(
+  profile: BrowserProfile,
+  proxyUrl = buildProxyUrl(profile.proxy),
+): boolean {
+  return Boolean(proxyUrl) || !profile.fingerprint.timezone.trim() || !profile.fingerprint.locale.trim();
+}
+
+function webrtcAutoHasNetworkAnchor(
+  profile: BrowserProfile,
+  proxyUrl = buildProxyUrl(profile.proxy),
+): boolean {
+  return Boolean(proxyUrl) || (profile.runtime.geoip && geoipCanProvideExitIp(profile, proxyUrl));
 }
 
 export function maskProxyUrl(proxyUrl: string | undefined): string {
@@ -1313,13 +1324,13 @@ export function preflightProfile(
     }
   }
 
-  if (profile.fingerprint.webrtcIp === "auto" && !proxyUrl && !profile.runtime.geoip) {
+  if (profile.fingerprint.webrtcIp === "auto" && !webrtcAutoHasNetworkAnchor(profile, proxyUrl)) {
     pushPreflight(items, {
       id: "webrtc-auto-without-network-anchor",
       category: "network",
       severity: "warn",
       title: "WebRTC Auto",
-      detail: "WebRTC auto 没有代理或 GeoIP 作为参照，可能与预期出口不一致。",
+      detail: "WebRTC auto 没有代理，也不会从 GeoIP 解析到可注入的出口 IP；CloakBrowser 会移除 auto 参数。",
       actions: [openTabAction("proxy", "配置代理"), openTabAction("fingerprint", "调整 WebRTC")],
     });
   }
@@ -1620,6 +1631,7 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
   const items: AuditItem[] = [];
   const proxy = buildProxyUrl(profile.proxy);
   const webrtcMode = effectiveWebrtcIpMode(profile, proxy);
+  const webrtcAutoAnchored = webrtcAutoHasNetworkAnchor(profile, proxy);
 
   pushAudit(items, {
     id: "persistent-profile",
@@ -1670,7 +1682,7 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
   pushAudit(items, {
     id: "webrtc",
     category: "network",
-    severity: webrtcMode === "off" ? "warn" : "pass",
+    severity: webrtcMode === "off" || (webrtcMode === "auto" && !webrtcAutoAnchored) ? "warn" : "pass",
     title: "WebRTC 出口",
     detail:
       webrtcMode === "geoip"
@@ -1678,7 +1690,11 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
           ? "GeoIP 已启用且代理有效；CloakBrowser 解析到代理出口后会自动注入 WebRTC 出口 IP。"
           : "GeoIP 已启用；CloakBrowser 会按当前机器公网出口保持 WebRTC 出口一致。"
         : webrtcMode === "auto"
-        ? "WebRTC IP 会自动跟随代理出口。"
+        ? proxy
+          ? "WebRTC IP 会自动跟随代理出口。"
+          : webrtcAutoAnchored
+            ? "WebRTC IP 会通过 GeoIP 解析当前机器公网出口。"
+            : "WebRTC auto 没有代理，也不会从 GeoIP 解析到可注入的出口 IP。"
         : webrtcMode === "custom"
           ? "WebRTC IP 使用手动指定值，确认它与代理出口一致。"
           : "WebRTC IP 未配置；目标站点可能看到本机或不一致的候选地址。",
