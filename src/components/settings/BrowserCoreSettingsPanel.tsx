@@ -390,7 +390,7 @@ function VersionValue({
         )
       : update
         ? <StatusPill tone="running">{t("browserCore.upToDate")}</StatusPill>
-        : <StatusPill tone="stopped">{t("browserCore.updateNotCheckedShort")}</StatusPill>;
+        : null;
 
   return (
     <span className="browser-core-version-value">

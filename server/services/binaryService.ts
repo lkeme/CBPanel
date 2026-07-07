@@ -223,6 +223,7 @@ export class BinaryService {
       }
       this.setOperationProgress("finalizing", "Refreshing browser core state.", 100, 100);
       this.finishOperation("succeeded", version ? `Updated to ${version}.` : "No newer Chromium binary is available.");
+      await this.markUpdateCheckCurrent(target);
       return { version, info: await this.readPublicInfo() };
     } catch (error) {
       this.finishOperation("failed", "CloakBrowser Chromium update failed.", (error as Error).message);
@@ -419,6 +420,20 @@ export class BinaryService {
         lastUpdateCheck: this.updateCheck,
       },
     });
+  }
+
+  private async markUpdateCheckCurrent(target: BrowserCoreTarget): Promise<void> {
+    const current = await this.readInfo();
+    this.updateCheck = {
+      checkedAt: new Date().toISOString(),
+      targetTier: target.tier,
+      versionMode: target.versionMode,
+      currentVersion: current.version,
+      latestVersion: current.version,
+      updateAvailable: false,
+      downloadLinks: this.downloadLinks(current, current.version, target.tier),
+    };
+    await this.persistUpdateCheck();
   }
 
   private runtimeEnv(settings: AppSettings): BrowserCoreEnvRuntimeValue[] {

@@ -495,6 +495,62 @@ test("BinaryService blocks automatic update while browser version is pinned", as
   }
 });
 
+test("BinaryService refreshes cached update state after a successful update", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const oldUpdateCheck = {
+    checkedAt: "2026-06-06T00:00:00.000Z",
+    currentVersion: "146.0.7680.177.5",
+    latestVersion: "147.0.7700.1",
+    updateAvailable: true,
+  };
+  let currentSettings = settings({ lastUpdateCheck: oldUpdateCheck });
+  let runtimeVersion = "146.0.7680.177.5";
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => currentSettings,
+    saveSettings: async (patch) => {
+      currentSettings = normalizeSettings({
+        ...currentSettings,
+        binary: {
+          ...currentSettings.binary,
+          ...(patch.binary ?? {}),
+        },
+      });
+      return currentSettings;
+    },
+    loadCloakBrowser: async () => ({
+      ...fakeCloakBrowserModule({ installed: true }),
+      binaryInfo: () => fakeBinaryInfo({
+        installed: true,
+        version: runtimeVersion,
+        binaryPath: `C:/cache/chromium-${runtimeVersion}/chrome.exe`,
+        cacheDir: `C:/cache/chromium-${runtimeVersion}`,
+      }),
+      checkForUpdate: async () => {
+        runtimeVersion = "147.0.7700.1";
+        return runtimeVersion;
+      },
+    } as CloakBrowserModule),
+  });
+
+  try {
+    const result = await service.update();
+
+    assert.equal(result.version, "147.0.7700.1");
+    assert.equal(result.info.version, "147.0.7700.1");
+    assert.equal(result.info.core.update?.currentVersion, "147.0.7700.1");
+    assert.equal(result.info.core.update?.latestVersion, "147.0.7700.1");
+    assert.equal(result.info.core.update?.updateAvailable, false);
+    assert.equal(result.info.core.update?.blockedReason, undefined);
+    assert.equal(currentSettings.binary.lastUpdateCheck?.currentVersion, "147.0.7700.1");
+    assert.equal(currentSettings.binary.lastUpdateCheck?.updateAvailable, false);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
 test("BinaryService repairs a compatible managed cache directory and reports installed", async () => {
   const originalEnv = captureEnv();
   const directory = await makeTempDir();
