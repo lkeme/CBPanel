@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Activity, Download, ExternalLink, FilePlus2, ListChecks, RefreshCw, Trash2 } from "lucide-react";
+import { Activity, Download, ExternalLink, FilePlus2, ListChecks, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 
 import type { TranslationKey } from "../../i18n";
-import type { BinaryInfo, BrowserCoreEnvRuntimeValue } from "../../shared/browserCore";
+import { formatTime } from "../../lib/utils";
+import type { BinaryInfo, BrowserCoreEnvRuntimeValue, BrowserCoreUpdateCheck } from "../../shared/browserCore";
 import {
   CLOAKBROWSER_ENV_SUGGESTION_KEYS,
   OPTIONAL_CLOAKBROWSER_ENV_KEYS,
@@ -20,7 +21,6 @@ import {
 } from "../../shared/settings";
 import {
   BrowserCoreOperationPanel,
-  BrowserCoreUpdateStatus,
   browserCoreOperationActive,
   browserCoreTierLabel,
   browserCoreVersionModeLabel,
@@ -34,6 +34,7 @@ import { EnvKeyCombobox } from "./EnvKeyCombobox";
 
 const CLOAKBROWSER_CONFIG_DOC_URL = "https://github.com/CloakHQ/CloakBrowser/tree/main#configuration";
 
+type DownloadLinkView = "current" | "latest";
 type ControlledBrowserCoreEnvKey = (typeof OPTIONAL_CLOAKBROWSER_ENV_KEYS)[number];
 
 type OfflineImportDraft = Pick<
@@ -83,6 +84,7 @@ export function BrowserCoreSettingsPanel({
   const binary = settings.binary;
   const [offlineImportDraft, setOfflineImportDraft] = useState<OfflineImportDraft>(() => offlineImportDraftFromBinary(binary));
   const [importPath, setImportPath] = useState("");
+  const [downloadLinkView, setDownloadLinkView] = useState<DownloadLinkView>("current");
   useEffect(() => {
     setOfflineImportDraft(offlineImportDraftFromBinary(binary));
   }, [binary.tierMode, binary.licenseKey, binary.browserVersionMode, binary.pinnedBrowserVersion]);
@@ -94,7 +96,12 @@ export function BrowserCoreSettingsPanel({
   const importBusy = busy === "browser-core-import";
   const actionBusy = operationBusy || checkBusy;
   const coreInstalled = Boolean(binaryInfo?.installed);
-  const updateAvailable = Boolean(binaryInfo?.core?.update?.updateAvailable);
+  const update = binaryInfo?.core?.update;
+  const updateAvailable = Boolean(update?.updateAvailable);
+  const canApplyUpdate = updateAvailable && !update?.blockedReason;
+  const latestDownloadLinks = updateAvailable ? update?.downloadLinks : undefined;
+  const currentDownloadLinks = binaryInfo?.core?.downloads.current;
+  const selectedDownloadLinks = downloadLinkView === "latest" && latestDownloadLinks ? latestDownloadLinks : currentDownloadLinks;
   const targetTier = binaryInfo?.core?.targetTier ?? binary.tierMode;
   const targetVersionMode = binaryInfo?.core?.versionMode ?? binary.browserVersionMode;
   const statusDetail = managedCoreDisabled
@@ -102,6 +109,13 @@ export function BrowserCoreSettingsPanel({
     : coreInstalled
       ? t("browserCore.installedStatusDetail")
       : t("browserCore.missingStatusDetail");
+  const updateMeta = update
+    ? `${t("browserCore.lastCheckedAt")}: ${formatTime(update.checkedAt, "dateTime")}`
+    : t("browserCore.updateNotCheckedShort");
+
+  useEffect(() => {
+    setDownloadLinkView(latestDownloadLinks ? "latest" : "current");
+  }, [latestDownloadLinks?.primaryUrl]);
 
   function saveBinary(patch: Partial<BinarySettings>) {
     void saveSettings({ binary: patch });
@@ -118,6 +132,18 @@ export function BrowserCoreSettingsPanel({
         <div className="settings-section-head browser-core-download-head">
           <h2>{t("browserCore.downloadInstall")}</h2>
           <div className="row-actions">
+            {canApplyUpdate && (
+              <button
+                className="command primary"
+                disabled={managedCoreDisabled || actionBusy}
+                onClick={() => void updateBinary()}
+                title={managedCoreDisabled ? t("browserCore.managedActionsDisabled") : undefined}
+                type="button"
+              >
+                <RefreshCw size={16} aria-hidden="true" />
+                {t("actions.update")}
+              </button>
+            )}
             <button
               className="command success"
               disabled={managedCoreDisabled || actionBusy}
@@ -132,18 +158,6 @@ export function BrowserCoreSettingsPanel({
               <Activity size={16} aria-hidden="true" />
               {t("actions.checkUpdate")}
             </button>
-            {updateAvailable && (
-              <button
-                className="command primary"
-                disabled={managedCoreDisabled || actionBusy}
-                onClick={() => void updateBinary()}
-                title={managedCoreDisabled ? t("browserCore.managedActionsDisabled") : undefined}
-                type="button"
-              >
-                <RefreshCw size={16} aria-hidden="true" />
-                {t("actions.update")}
-              </button>
-            )}
             <button
               className="command danger subtle"
               disabled={managedCoreDisabled || actionBusy}
@@ -163,7 +177,10 @@ export function BrowserCoreSettingsPanel({
         <div className={`settings-status-line ${coreInstalled ? "enabled" : "warning"}`}>
           <strong>{coreInstalled ? t("browserCore.readyShort") : t("browserCore.missingShort")}</strong>
           <span>{statusDetail}</span>
+          <small>{updateMeta}</small>
         </div>
+        {update?.error && <div className="inline-error">{update.error}</div>}
+        {update?.blockedReason && <div className="result-line">{update.blockedReason}</div>}
         {binaryInfo?.core?.env.some((item) => item.requiresRuntimeRestart) && (
           <div className="result-line">{t("browserCore.envChangesRestartShort")}</div>
         )}
@@ -173,18 +190,55 @@ export function BrowserCoreSettingsPanel({
         <KeyValueList
           className="browser-core-download-details"
           items={[
-            { label: coreInstalled ? t("browserCore.installedVersion") : t("browserCore.targetVersion"), value: <CopyableValueRow value={binaryInfo?.version} /> },
+            {
+              label: coreInstalled ? t("browserCore.installedVersion") : t("browserCore.targetVersion"),
+              value: (
+                <VersionValue
+                  t={t}
+                  update={update}
+                  value={binaryInfo?.version}
+                />
+              ),
+            },
             { label: t("browserCore.tier"), value: browserCoreTierLabel(targetTier, t) },
             { label: t("browserCore.versionMode"), value: browserCoreVersionModeLabel(targetVersionMode, t) },
             { label: t("browserCore.bundledVersion"), value: <CopyableValueRow value={binaryInfo?.core?.versions.baselineChromiumVersion} /> },
             { label: t("browserCore.wrapperVersion"), value: <CopyableValueRow value={binaryInfo?.core?.versions.wrapperVersion} /> },
             { label: coreInstalled ? t("browserCore.executablePath") : t("browserCore.expectedExecutablePath"), value: <CopyableValueRow t={t} value={binaryInfo?.binaryPath} /> },
             { label: coreInstalled ? t("browserCore.cacheDirectory") : t("browserCore.expectedCacheDirectory"), value: <CopyableValueRow t={t} value={binaryInfo?.cacheDir} /> },
-            { label: t("browserCore.primaryUrl"), value: <CopyableValueRow t={t} value={binaryInfo?.core?.downloads.current.primaryUrl ?? binaryInfo?.downloadUrl} /> },
-            { label: t("browserCore.fallbackUrl"), value: <CopyableValueRow t={t} value={binaryInfo?.core?.downloads.current.fallbackUrl} /> },
-            { label: t("browserCore.signatureUrl"), value: <CopyableValueRow t={t} value={binaryInfo?.core?.downloads.current.signatureUrl} /> },
           ]}
         />
+        <div className="browser-core-download-links-panel">
+          <div className="browser-core-download-links-head">
+            <strong>{t("browserCore.downloadLinks")}</strong>
+            {latestDownloadLinks && (
+              <div className="segmented compact" role="group" aria-label={t("browserCore.downloadLinks")}>
+                <button
+                  className={downloadLinkView === "current" ? "active" : ""}
+                  onClick={() => setDownloadLinkView("current")}
+                  type="button"
+                >
+                  {t("browserCore.currentDownload")}
+                </button>
+                <button
+                  className={downloadLinkView === "latest" ? "active" : ""}
+                  onClick={() => setDownloadLinkView("latest")}
+                  type="button"
+                >
+                  {t("browserCore.latestDownload")}
+                </button>
+              </div>
+            )}
+          </div>
+          <KeyValueList
+            className="browser-core-download-details compact-links"
+            items={[
+              { label: t("browserCore.primaryUrl"), value: <CopyableValueRow t={t} value={selectedDownloadLinks?.primaryUrl ?? binaryInfo?.downloadUrl} /> },
+              { label: t("browserCore.fallbackUrl"), value: <CopyableValueRow t={t} value={selectedDownloadLinks?.fallbackUrl} /> },
+              { label: t("browserCore.signatureUrl"), value: <CopyableValueRow t={t} value={selectedDownloadLinks?.signatureUrl} /> },
+            ]}
+          />
+        </div>
         <ToggleField
           checked={binary.checkForUpdatesOnStartup}
           help={t("browserCore.startupCheckHelp")}
@@ -198,8 +252,6 @@ export function BrowserCoreSettingsPanel({
           onChange={(preferExistingCache) => saveBinary({ preferExistingCache })}
         />
       </section>
-
-      {binaryInfo?.core?.update && <BrowserCoreUpdateStatus core={binaryInfo.core} t={t} />}
 
       <section className="settings-section">
         <h2>{t("browserCore.offlineImport")}</h2>
@@ -312,6 +364,40 @@ function offlineImportDraftFromBinary(binary: BinarySettings): OfflineImportDraf
     browserVersionMode: binary.browserVersionMode,
     pinnedBrowserVersion: binary.pinnedBrowserVersion,
   };
+}
+
+function VersionValue({
+  t,
+  update,
+  value,
+}: {
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  update?: BrowserCoreUpdateCheck;
+  value?: string;
+}) {
+  const badge = update?.error
+    ? (
+        <StatusPill tone="error" title={update.error}>
+          {t("browserCore.updateCheckFailed")}
+        </StatusPill>
+      )
+    : update?.updateAvailable && update.latestVersion
+      ? (
+          <StatusPill tone="warning" title={t("browserCore.updateAvailable", { version: update.latestVersion })}>
+            <Sparkles size={12} aria-hidden="true" />
+            {t("browserCore.newVersionBadge", { version: update.latestVersion })}
+          </StatusPill>
+        )
+      : update
+        ? <StatusPill tone="running">{t("browserCore.upToDate")}</StatusPill>
+        : <StatusPill tone="stopped">{t("browserCore.updateNotCheckedShort")}</StatusPill>;
+
+  return (
+    <span className="browser-core-version-value">
+      <CopyableValueRow value={value} />
+      {badge}
+    </span>
+  );
 }
 
 async function pickBrowserCoreZip(

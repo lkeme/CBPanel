@@ -1,13 +1,10 @@
 import type { TranslationKey } from "../../i18n";
 import { formatTime } from "../../lib/utils";
 import type {
-  BrowserCoreInfo,
   BrowserCoreOperation,
   BrowserCoreTier,
   BrowserCoreVersionMode,
 } from "../../shared/browserCore";
-import { CopyButton } from "../ui/CopyButton";
-import { KeyValueList } from "../ui/KeyValueList";
 import { StatusPill, type StatusPillTone } from "../ui/StatusPill";
 
 export function BrowserCoreOperationPanel({
@@ -58,63 +55,6 @@ export function BrowserCoreOperationPanel({
           ))
         )}
       </div>
-    </section>
-  );
-}
-
-export function BrowserCoreUpdateStatus({
-  core,
-  t,
-}: {
-  core: BrowserCoreInfo;
-  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
-}) {
-  const update = core.update;
-  if (!update) return null;
-  const tone: StatusPillTone = update.error ? "error" : update.updateAvailable ? "warning" : "running";
-  return (
-    <section className="browser-core-card update-status-card">
-      <div className="settings-section-head">
-        <h2>{t("browserCore.updateStatus")}</h2>
-        <StatusPill tone={tone}>
-          {update.error
-            ? t("browserCore.updateCheckFailed")
-            : update.updateAvailable
-              ? t("browserCore.updateAvailableShort")
-              : t("browserCore.upToDate")}
-        </StatusPill>
-      </div>
-      <KeyValueList
-        items={[
-          { label: t("browserCore.lastCheckedAt"), value: formatTime(update.checkedAt, "dateTime") },
-          { label: t("browserCore.tier"), value: browserCoreTierLabel(update.targetTier ?? core.targetTier, t) },
-          { label: t("browserCore.versionMode"), value: browserCoreVersionModeLabel(update.versionMode ?? core.versionMode, t) },
-          { label: t("browserCore.currentVersion"), value: update.currentVersion },
-          { label: t("browserCore.latestVersion"), value: update.latestVersion ?? "-" },
-          ...(update.blockedReason ? [{ label: t("browserCore.updateBlockedReason"), value: update.blockedReason }] : []),
-          ...(update.error ? [{ label: t("status.error"), value: <span className="inline-error">{update.error}</span> }] : []),
-        ]}
-      />
-      {update.downloadLinks && (
-        <div className="update-download-links">
-          <div className="download-url-row">
-            <span className="mono-cell">{update.downloadLinks.primaryUrl}</span>
-            <CopyButton value={update.downloadLinks.primaryUrl} t={t} />
-          </div>
-          {update.downloadLinks.fallbackUrl && (
-            <div className="download-url-row">
-              <span className="mono-cell">{update.downloadLinks.fallbackUrl}</span>
-              <CopyButton value={update.downloadLinks.fallbackUrl} t={t} />
-            </div>
-          )}
-          {update.downloadLinks.signatureUrl && (
-            <div className="download-url-row">
-              <span className="mono-cell">{update.downloadLinks.signatureUrl}</span>
-              <CopyButton value={update.downloadLinks.signatureUrl} t={t} />
-            </div>
-          )}
-        </div>
-      )}
     </section>
   );
 }
