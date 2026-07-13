@@ -8,6 +8,7 @@ import {
   type SessionEvent,
   type SessionSummary,
   buildLaunchPreview,
+  browserVersionLaunchHints,
   buildPlaywrightContextOptions,
   buildPuppeteerPageSetup,
   buildSessionLaunchPlan,
@@ -33,12 +34,14 @@ type RunningSession = SessionSummary & {
   closingByPanel?: boolean;
 };
 
-type BinaryInfoReader = () => Promise<{
+type BrowserCoreRuntimeInfo = {
   installed: boolean;
   binaryPath: string;
   version: string;
   tier?: BrowserCoreTier;
-}>;
+};
+
+type BinaryInfoReader = () => Promise<BrowserCoreRuntimeInfo>;
 
 type SessionServiceOptions = {
   browserDataDir: string;
@@ -142,7 +145,7 @@ export class SessionService {
       pushSessionEvent(session, "info", "启动计划已生成", `${session.launch.runtimeLauncher} -> ${session.launch.sdkLauncher}`);
       if (session.status === "stopped") return publicSession(session);
 
-      session.runtimePromise = this.startRuntime(runtimeProfile, session);
+      session.runtimePromise = this.startRuntime(runtimeProfile, session, binary);
       const runtime = await session.runtimePromise;
       if (session.status !== "launching") return publicSession(session);
       session.runtime = runtime;
@@ -319,22 +322,30 @@ export class SessionService {
     if (typeof source.on === "function") source.on(eventName, onClosed);
   }
 
-  protected async startRuntime(profile: BrowserProfile, session: RunningSession): Promise<RuntimeHandle> {
+  protected async startRuntime(
+    profile: BrowserProfile,
+    session: RunningSession,
+    binary: BrowserCoreRuntimeInfo,
+  ): Promise<RuntimeHandle> {
     if (profile.runtime.launcher === "puppeteer-browser") {
-      return this.startPuppeteerRuntime(profile, session);
+      return this.startPuppeteerRuntime(profile, session, binary);
     }
 
     if (profile.runtime.launcher === "playwright-browser") {
-      return this.startPlaywrightBrowserRuntime(profile, session);
+      return this.startPlaywrightBrowserRuntime(profile, session, binary);
     }
 
-    return this.startPlaywrightContextRuntime(profile, session);
+    return this.startPlaywrightContextRuntime(profile, session, binary);
   }
 
-  private async startPlaywrightContextRuntime(profile: BrowserProfile, session: RunningSession): Promise<RuntimeHandle> {
+  private async startPlaywrightContextRuntime(
+    profile: BrowserProfile,
+    session: RunningSession,
+    binary: BrowserCoreRuntimeInfo,
+  ): Promise<RuntimeHandle> {
     await this.applyGithubMirrorFetch();
     const runtime = await loadCloakBrowser();
-    const preview = buildLaunchPreview(profile, this.profileDataDir(profile));
+    const preview = buildLaunchPreview(profile, this.profileDataDir(profile), browserVersionLaunchHints(binary.version));
     pushSessionEvent(session, "info", "调用 Playwright Context 启动器", preview.launcher);
     const context =
       preview.launcher === "launchPersistentContext"
@@ -356,10 +367,14 @@ export class SessionService {
     };
   }
 
-  private async startPlaywrightBrowserRuntime(profile: BrowserProfile, session: RunningSession): Promise<RuntimeHandle> {
+  private async startPlaywrightBrowserRuntime(
+    profile: BrowserProfile,
+    session: RunningSession,
+    binary: BrowserCoreRuntimeInfo,
+  ): Promise<RuntimeHandle> {
     await this.applyGithubMirrorFetch();
     const runtime = await loadCloakBrowser();
-    const preview = buildLaunchPreview(profile, this.profileDataDir(profile));
+    const preview = buildLaunchPreview(profile, this.profileDataDir(profile), browserVersionLaunchHints(binary.version));
     pushSessionEvent(session, "info", "调用 Playwright Browser 启动器", preview.launcher);
     const browser = await runtime.launch(preview.options as unknown as Parameters<CloakBrowserModule["launch"]>[0]);
     this.watchExternalClose(profile.id, browser, "disconnected");
@@ -382,10 +397,14 @@ export class SessionService {
     }
   }
 
-  private async startPuppeteerRuntime(profile: BrowserProfile, session: RunningSession): Promise<RuntimeHandle> {
+  private async startPuppeteerRuntime(
+    profile: BrowserProfile,
+    session: RunningSession,
+    binary: BrowserCoreRuntimeInfo,
+  ): Promise<RuntimeHandle> {
     await this.applyGithubMirrorFetch();
     const runtime = await loadCloakBrowserPuppeteer();
-    const preview = buildLaunchPreview(profile, this.profileDataDir(profile));
+    const preview = buildLaunchPreview(profile, this.profileDataDir(profile), browserVersionLaunchHints(binary.version));
     pushSessionEvent(session, "info", "调用 Puppeteer 启动器", preview.launcher);
     const browser =
       preview.launcher === "puppeteerLaunchPersistentContext"

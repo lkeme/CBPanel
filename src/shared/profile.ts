@@ -1082,7 +1082,22 @@ export interface LaunchPreview {
   contextOptions?: Record<string, unknown>;
 }
 
-export function buildLaunchPreview(profile: BrowserProfile, userDataDir?: string): LaunchPreview {
+export interface LaunchRuntimeHints {
+  browserVersion?: string;
+}
+
+const BROWSER_VERSION_HINT_RE = /^[0-9]+(?:\.[0-9]+){3,4}$/;
+
+export function browserVersionLaunchHints(browserVersion: string | undefined): LaunchRuntimeHints {
+  const version = browserVersion?.trim();
+  return version && BROWSER_VERSION_HINT_RE.test(version) ? { browserVersion: version } : {};
+}
+
+export function buildLaunchPreview(
+  profile: BrowserProfile,
+  userDataDir?: string,
+  runtimeHints: LaunchRuntimeHints = {},
+): LaunchPreview {
   const advanced = profile.advanced;
   const proxy = buildProxyUrl(profile.proxy);
   const proxyOption = buildProxyOption(profile.proxy);
@@ -1110,6 +1125,7 @@ export function buildLaunchPreview(profile: BrowserProfile, userDataDir?: string
   if (profile.fingerprint.locale.trim()) options.locale = profile.fingerprint.locale.trim();
   if (profile.runtime.extensionPaths.length) options.extensionPaths = profile.runtime.extensionPaths;
   if (humanConfig) options.humanConfig = humanConfig;
+  Object.assign(options, browserVersionLaunchHints(runtimeHints.browserVersion));
   options.launchOptions = launchOptions;
 
   if (profile.runtime.launcher === "playwright-context") {

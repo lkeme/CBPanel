@@ -4,6 +4,16 @@
   "private": true,
   "license": "MIT",
   "type": "module",
+  "upstream": {
+    "cloakbrowser": {
+      "repository": "https://github.com/CloakHQ/CloakBrowser",
+      "fromCommit": "5a1e2978e4a21054550f83f67cb3627a64fa21db",
+      "syncedCommit": "08415d9b269ae475f794adafd74bbe7ca8b3d8d2",
+      "latestCheckedCommit": "111b725e8ceeecbbfa17ecc28bcaea724672e8b5",
+      "syncedAt": "2026-07-13",
+      "npmPackage": "cloakbrowser@0.4.10"
+    }
+  },
   "scripts": {
     "dev": "tsx server/index.ts",
     "frontend:dev": "vite --host 127.0.0.1",
@@ -42,7 +52,7 @@
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@vitejs/plugin-react": "^6.0.3",
     "class-variance-authority": "^0.7.1",
-    "cloakbrowser": "^0.4.8",
+    "cloakbrowser": "^0.4.10",
     "clsx": "^2.1.1",
     "express": "^5.2.1",
     "fflate": "^0.8.3",

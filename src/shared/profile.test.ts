@@ -286,6 +286,19 @@ test("persistent launch preview always includes userDataDir", () => {
   assert.equal(preview.options.userDataDir, "D:/profiles/profile-test");
 });
 
+test("launch preview accepts numeric browser version runtime hints only", () => {
+  const profile = defaultProfile();
+
+  assert.equal(
+    buildLaunchPreview(profile, undefined, { browserVersion: "148.0.7778.215.5" }).options.browserVersion,
+    "148.0.7778.215.5",
+  );
+  assert.equal(
+    "browserVersion" in buildLaunchPreview(profile, undefined, { browserVersion: "test" }).options,
+    false,
+  );
+});
+
 test("advanced json options are merged into context launch preview", () => {
   const profile = defaultProfile({
     advanced: {
