@@ -481,11 +481,14 @@ test("maskProfileSecrets removes proxy passwords and advanced secrets for JSON e
     },
   });
 
-  const masked = JSON.stringify(maskProfileSecrets(profile));
+  const maskedProfile = maskProfileSecrets(profile);
+  const masked = JSON.stringify(maskedProfile);
+  const maskedLaunchOptions = parseOptionalJsonObject("launchOptions", maskedProfile.advanced.launchOptionsJson);
 
   assert.match(masked, /alice/);
   assert.doesNotMatch(masked, /secret/);
-  assert.doesNotMatch(masked, /abc/);
+  assert.deepEqual(maskedLaunchOptions, { token: "****", safe: true });
+  assert.doesNotMatch(maskedProfile.advanced.launchOptionsJson, /abc/);
   assert.match(masked, /\*\*\*\*/);
 });
 
