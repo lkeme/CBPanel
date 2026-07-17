@@ -408,6 +408,36 @@ test("BinaryService reads wrapper diagnostics through the upstream CLI with mana
   }
 });
 
+test("BinaryService preserves null wrapper diagnostics active session counts", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const loadCloakBrowserDiagnostics: NonNullable<BinaryServiceOptions["loadCloakBrowserDiagnostics"]> = async () => ({
+    collectDiagnostics: async () => ({
+      license: {
+        tier: "team",
+        valid: true,
+        sessions: {
+          active: null,
+        },
+      },
+    }),
+  });
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({}),
+    loadCloakBrowserDiagnostics,
+  });
+
+  try {
+    const result = await service.readWrapperDiagnostics();
+
+    assert.equal(result.license?.sessions?.active, null);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
 test("BinaryService returns a stable error payload when wrapper diagnostics fail", async () => {
   const originalEnv = captureEnv();
   const directory = await makeTempDir();
