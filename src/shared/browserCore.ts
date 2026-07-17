@@ -138,6 +138,9 @@ export interface CloakBrowserDiagnosticsLicense {
   valid?: boolean;
   expires?: string;
   error?: string;
+  sessions?: {
+    active?: number | null;
+  };
 }
 
 export interface CloakBrowserDiagnosticsGeoIp {

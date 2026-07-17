@@ -9,6 +9,7 @@ import { unzipSync } from "fflate";
 import * as tar from "tar";
 import {
   type CloakBrowserDiagnostics,
+  type CloakBrowserDiagnosticsLicense,
   type BrowserCoreDownloadLinks,
   type BrowserCoreEnvRuntimeValue,
   type BrowserCoreImportAnalysis,
@@ -1154,6 +1155,7 @@ function normalizeCloakBrowserDiagnostics(input: unknown, checkedAt: string): Cl
           valid: booleanValue(license.valid),
           expires: stringValue(license.expires),
           error: stringValue(license.error),
+          sessions: diagnosticsLicenseSessions(license.sessions),
         }
       : undefined,
     geoip: geoip
@@ -1208,6 +1210,18 @@ function stringValue(value: unknown): string | undefined {
 
 function booleanValue(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function nullableNumberValue(value: unknown): number | null | undefined {
+  if (value === null) return null;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function diagnosticsLicenseSessions(value: unknown): CloakBrowserDiagnosticsLicense["sessions"] {
+  const sessions = objectValue(value);
+  if (!sessions) return undefined;
+  const active = nullableNumberValue(sessions.active);
+  return active === undefined ? undefined : { active };
 }
 
 function stringArrayValue(value: unknown): string[] | undefined {

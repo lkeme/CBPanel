@@ -188,7 +188,7 @@ export function SystemStatusContent({
               { label: t("browserCore.tier"), value: diagnostics?.browserCoreDiagnostics?.binary?.tier ?? "-" },
               { label: t("form.path"), value: diagnostics?.browserCoreDiagnostics?.binary?.path ?? "-" },
               { label: t("system.launchCheck"), value: formatWrapperLaunch(diagnostics?.browserCoreDiagnostics, t) },
-              { label: t("system.licenseStatus"), value: formatWrapperLicense(diagnostics?.browserCoreDiagnostics) },
+              { label: t("system.licenseStatus"), value: formatWrapperLicense(diagnostics?.browserCoreDiagnostics, t) },
               { label: t("system.geoip"), value: formatWrapperGeoIp(diagnostics?.browserCoreDiagnostics, t) },
               { label: t("system.windowsFonts"), value: diagnostics?.browserCoreDiagnostics?.fonts?.windowsFonts ?? t("settings.notApplicable") },
               { label: t("system.modules"), value: formatWrapperModules(diagnostics?.browserCoreDiagnostics) },
@@ -270,11 +270,18 @@ function formatWrapperLaunch(
   return launch.error ? `Failed: ${launch.error}` : "Failed";
 }
 
-function formatWrapperLicense(diagnostics: SystemDiagnostics["browserCoreDiagnostics"] | undefined): string {
+function formatWrapperLicense(
+  diagnostics: SystemDiagnostics["browserCoreDiagnostics"] | undefined,
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+): string {
   const license = diagnostics?.license;
   if (!license) return "-";
-  if (license.error) return license.tier ? `${license.tier} (${license.error})` : license.error;
-  return license.tier ?? "-";
+  const status = license.error
+    ? license.tier ? `${license.tier} (${license.error})` : license.error
+    : license.tier ?? "-";
+  if (!license.sessions) return status;
+  const active = license.sessions.active;
+  return `${status} / ${t("system.sessions")}: ${active === null || active === undefined ? t("settings.notApplicable") : active}`;
 }
 
 function formatWrapperGeoIp(
