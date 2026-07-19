@@ -8,10 +8,10 @@
     "cloakbrowser": {
       "repository": "https://github.com/CloakHQ/CloakBrowser",
       "fromCommit": "5a1e2978e4a21054550f83f67cb3627a64fa21db",
-      "syncedCommit": "86d1d76b8139e586ec0248d4e12b3a4618007682",
-      "latestCheckedCommit": "86d1d76b8139e586ec0248d4e12b3a4618007682",
-      "syncedAt": "2026-07-17",
-      "npmPackage": "cloakbrowser@0.4.11"
+      "syncedCommit": "fd2b6024c6bf3dfe3c6b48b177aa79265a145295",
+      "latestCheckedCommit": "fd2b6024c6bf3dfe3c6b48b177aa79265a145295",
+      "syncedAt": "2026-07-19",
+      "npmPackage": "cloakbrowser@0.4.12"
     }
   },
   "scripts": {
@@ -52,7 +52,7 @@
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@vitejs/plugin-react": "^6.0.3",
     "class-variance-authority": "^0.7.1",
-    "cloakbrowser": "^0.4.11",
+    "cloakbrowser": "^0.4.12",
     "clsx": "^2.1.1",
     "express": "^5.2.1",
     "fflate": "^0.8.3",
