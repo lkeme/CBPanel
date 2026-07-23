@@ -289,7 +289,70 @@ test("BinaryService passes Pro license and pinned version to CloakBrowser instal
   }
 });
 
-test("BinaryService preserves external Pro license and version env when settings are empty", async () => {
+test("BinaryService passes a Free GitHub key to CloakBrowser install", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const calls: Array<{ licenseKey?: string; browserVersion?: string }> = [];
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({
+      preferExistingCache: false,
+      tierMode: "free",
+      licenseKey: "free-license",
+      browserVersionMode: "pinned",
+      pinnedBrowserVersion: "149.0.0.0",
+    }),
+    loadCloakBrowser: async () => ({
+      ...fakeCloakBrowserModule({ tier: "free" }),
+      ensureBinary: async (licenseKey?: string, browserVersion?: string) => {
+        calls.push({ licenseKey, browserVersion });
+        return "C:/cache/chromium-150.0.0.0-pro/chrome.exe";
+      },
+    } as CloakBrowserModule),
+  });
+
+  try {
+    const result = await service.install();
+
+    assert.deepEqual(calls, [{ licenseKey: "free-license", browserVersion: undefined }]);
+    assert.equal(process.env.CLOAKBROWSER_LICENSE_KEY, "free-license");
+    assert.equal(process.env.CLOAKBROWSER_VERSION, undefined);
+    assert.equal(result.info.core.targetTier, "free");
+    assert.equal(result.info.core.versionMode, "latest");
+    assert.equal(result.info.core.downloads.current.tier, "free");
+    assert.equal(result.info.core.downloads.current.requiresLicense, true);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+test("BinaryService rejects Pro install without a license key", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  let ensureCalls = 0;
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({ tierMode: "pro" }),
+    loadCloakBrowser: async () => ({
+      ...fakeCloakBrowserModule(),
+      ensureBinary: async () => {
+        ensureCalls += 1;
+        return "C:/cache/chrome.exe";
+      },
+    } as CloakBrowserModule),
+  });
+
+  try {
+    await assert.rejects(() => service.install(), /CLOAKBROWSER_LICENSE_KEY/);
+    assert.equal(ensureCalls, 0);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+test("BinaryService preserves an external license and version env when settings are empty", async () => {
   const originalEnv = captureEnv();
   const directory = await makeTempDir();
   process.env.CLOAKBROWSER_VERSION = "147.0.7700.1";
@@ -313,7 +376,7 @@ test("BinaryService preserves external Pro license and version env when settings
 
     assert.equal(process.env.CLOAKBROWSER_VERSION, "147.0.7700.1");
     assert.equal(process.env.CLOAKBROWSER_LICENSE_KEY, "external-license");
-    assert.equal(result.core.targetTier, "pro");
+    assert.equal(result.core.targetTier, "free");
     assert.equal(result.core.versionMode, "pinned");
     assert.equal(result.core.pinnedVersion, "147.0.7700.1");
     assert.equal(version?.source, "external");
@@ -580,6 +643,120 @@ test("BinaryService refreshes cached update state after a successful update", as
     assert.equal(result.info.core.update?.blockedReason, undefined);
     assert.equal(currentSettings.binary.lastUpdateCheck?.currentVersion, "147.0.7700.1");
     assert.equal(currentSettings.binary.lastUpdateCheck?.updateAvailable, false);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+test("BinaryService updates a Free GitHub key through ensureBinary without a version pin", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const ensureCalls: Array<{ licenseKey?: string; browserVersion?: string; autoUpdate?: string }> = [];
+  let checkForUpdateCalls = 0;
+  let runtimeVersion = "146.0.7680.177.5";
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({ tierMode: "free", licenseKey: "free-license" }),
+    fetchImpl: async () => Response.json({ version: "150.0.0.0" }),
+    loadCloakBrowser: async () => ({
+      ...fakeCloakBrowserModule({ installed: true }),
+      binaryInfo: () => fakeBinaryInfo({
+        installed: true,
+        version: runtimeVersion,
+        tier: "pro",
+        binaryPath: `C:/cache/chromium-${runtimeVersion}-pro/chrome.exe`,
+        cacheDir: `C:/cache/chromium-${runtimeVersion}-pro`,
+      }),
+      ensureBinary: async (licenseKey?: string, browserVersion?: string) => {
+        ensureCalls.push({ licenseKey, browserVersion, autoUpdate: process.env.CLOAKBROWSER_AUTO_UPDATE });
+        runtimeVersion = "150.0.0.0";
+        return `C:/cache/chromium-${runtimeVersion}-pro/chrome.exe`;
+      },
+      checkForUpdate: async () => {
+        checkForUpdateCalls += 1;
+        return null;
+      },
+    } as CloakBrowserModule),
+  });
+
+  try {
+    const result = await service.update();
+
+    assert.deepEqual(ensureCalls, [{ licenseKey: "free-license", browserVersion: undefined, autoUpdate: "true" }]);
+    assert.equal(checkForUpdateCalls, 0);
+    assert.equal(result.version, "150.0.0.0");
+    assert.equal(result.info.core.targetTier, "free");
+    assert.equal(process.env.CLOAKBROWSER_AUTO_UPDATE, "false");
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+test("BinaryService passes the checked version to explicit Pro updates", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const ensureCalls: Array<{ licenseKey?: string; browserVersion?: string; autoUpdate?: string }> = [];
+  let runtimeVersion = "146.0.7680.177.5";
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({ tierMode: "pro", licenseKey: "pro-license" }),
+    fetchImpl: async () => Response.json({ version: "150.0.0.0" }),
+    loadCloakBrowser: async () => ({
+      ...fakeCloakBrowserModule({ installed: true }),
+      binaryInfo: () => fakeBinaryInfo({
+        installed: true,
+        version: runtimeVersion,
+        tier: "pro",
+        binaryPath: `C:/cache/chromium-${runtimeVersion}-pro/chrome.exe`,
+        cacheDir: `C:/cache/chromium-${runtimeVersion}-pro`,
+      }),
+      ensureBinary: async (licenseKey?: string, browserVersion?: string) => {
+        ensureCalls.push({ licenseKey, browserVersion, autoUpdate: process.env.CLOAKBROWSER_AUTO_UPDATE });
+        runtimeVersion = "150.0.0.0";
+        return `C:/cache/chromium-${runtimeVersion}-pro/chrome.exe`;
+      },
+    } as CloakBrowserModule),
+  });
+
+  try {
+    const result = await service.update();
+
+    assert.deepEqual(ensureCalls, [{ licenseKey: "pro-license", browserVersion: "150.0.0.0", autoUpdate: "true" }]);
+    assert.equal(result.version, "150.0.0.0");
+    assert.equal(process.env.CLOAKBROWSER_AUTO_UPDATE, "false");
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+test("BinaryService does not report an authenticated update when the cached binary remains current", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({ tierMode: "free", licenseKey: "free-license" }),
+    fetchImpl: async () => Response.json({ version: "150.0.0.0" }),
+    loadCloakBrowser: async () => ({
+      ...fakeCloakBrowserModule({ installed: true }),
+      binaryInfo: () => fakeBinaryInfo({
+        installed: true,
+        version: "146.0.7680.177.5",
+        tier: "pro",
+        binaryPath: "C:/cache/chromium-146.0.7680.177.5-pro/chrome.exe",
+        cacheDir: "C:/cache/chromium-146.0.7680.177.5-pro",
+      }),
+      ensureBinary: async () => "C:/cache/chromium-146.0.7680.177.5-pro/chrome.exe",
+    } as CloakBrowserModule),
+  });
+
+  try {
+    const result = await service.update();
+
+    assert.equal(result.version, null);
+    assert.equal(result.info.core.operation?.logs.at(-1)?.message, "No newer Chromium binary is available.");
   } finally {
     restoreEnv(originalEnv);
   }
@@ -892,6 +1069,73 @@ test("BinaryService checks Linux tar.gz release assets", async () => {
       result.update.downloadLinks?.fallbackUrl,
       "https://github.com/CloakHQ/cloakbrowser/releases/download/chromium-v147.0.7700.1/cloakbrowser-linux-x64.tar.gz",
     );
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+test("BinaryService checks Free GitHub key releases through the authenticated API", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const seen: Array<{ url: string; platform?: string }> = [];
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({ tierMode: "free", licenseKey: "free-license" }),
+    fetchImpl: async (input, init) => {
+      seen.push({
+        url: String(input),
+        platform: init?.headers instanceof Headers
+          ? init.headers.get("X-Platform") ?? undefined
+          : (init?.headers as Record<string, string> | undefined)?.["X-Platform"],
+      });
+      return Response.json({ version: "150.0.0.0" });
+    },
+    loadCloakBrowser: async () => fakeCloakBrowserModule({
+      installed: true,
+      tier: "pro",
+      platform: "linux-x64",
+      version: "146.0.7680.177.5",
+      binaryPath: "/cache/chromium-146.0.7680.177.5-pro/chrome",
+      cacheDir: "/cache/chromium-146.0.7680.177.5-pro",
+    }),
+  });
+
+  try {
+    const result = await service.checkUpdate();
+
+    assert.deepEqual(seen, [{ url: "https://cloakbrowser.dev/api/download/version", platform: "linux-x64" }]);
+    assert.equal(result.update.targetTier, "free");
+    assert.equal(result.update.latestVersion, "150.0.0.0");
+    assert.equal(result.update.downloadLinks?.tier, "free");
+    assert.equal(result.update.downloadLinks?.primaryUrl, "https://cloakbrowser.dev/api/download/150.0.0.0");
+    assert.equal(result.update.downloadLinks?.requiresLicense, true);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+test("BinaryService reports a missing Pro license before checking releases", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  let fetchCalls = 0;
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({ tierMode: "pro" }),
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      return Response.json({ version: "150.0.0.0" });
+    },
+    loadCloakBrowser: async () => fakeCloakBrowserModule({ installed: true }),
+  });
+
+  try {
+    const result = await service.checkUpdate();
+
+    assert.equal(fetchCalls, 0);
+    assert.equal(result.update.targetTier, "pro");
+    assert.match(result.update.error ?? "", /CLOAKBROWSER_LICENSE_KEY/);
   } finally {
     restoreEnv(originalEnv);
   }

@@ -173,6 +173,9 @@ export class BinaryService {
     try {
       const settings = normalizeSettings(await this.options.readSettings());
       const target = browserCoreTarget(settings, this.initialBuiltinEnv);
+      if (target.tier === "pro" && !usesLicensedDownloads(target)) {
+        throw Object.assign(new Error("CloakBrowser Pro requires CLOAKBROWSER_LICENSE_KEY."), { status: 400 });
+      }
       this.setOperationProgress("checking-cache", "Checking existing CloakBrowser cache.");
       const runtime = await this.cloakbrowser();
       const before = await this.withCustomBinaryOverride(await runtime.binaryInfo(target.pinnedVersion));
@@ -205,18 +208,20 @@ export class BinaryService {
 
       const runtime = await this.cloakbrowser();
       let version: string | null = null;
-      if (target.tier === "pro") {
-        if (!target.licenseKey) {
-          throw Object.assign(new Error("CloakBrowser Pro requires CLOAKBROWSER_LICENSE_KEY."), { status: 400 });
-        }
-        this.setOperationProgress("checking-update", "Checking CloakBrowser Pro release metadata.");
+      if (target.tier === "pro" && !usesLicensedDownloads(target)) {
+        throw Object.assign(new Error("CloakBrowser Pro requires CLOAKBROWSER_LICENSE_KEY."), { status: 400 });
+      }
+      if (usesLicensedDownloads(target)) {
+        this.setOperationProgress("checking-update", "Checking authenticated CloakBrowser release metadata.");
         const current = await this.withCustomBinaryOverride(await runtime.binaryInfo(target.pinnedVersion));
         const latest = await this.latestProChromiumVersion(current.platform);
         if (latest && compareVersions(latest, current.version) > 0) {
-          this.setOperationProgress("installing", `Calling cloakbrowser.ensureBinary() for Pro ${latest}.`);
-          await this.captureCloakbrowserOperationLogs(() => runtime.ensureBinary(target.licenseKey, latest));
-          await this.writeProVersionMarker(latest);
-          version = latest;
+          this.setOperationProgress("installing", `Calling cloakbrowser.ensureBinary() for ${latest}.`);
+          await this.captureCloakbrowserOperationLogs(() => this.runExplicitCloakbrowserUpdate(
+            () => runtime.ensureBinary(target.licenseKey, target.tier === "pro" ? latest : undefined),
+          ));
+          const refreshedVersion = (await this.withCustomBinaryOverride(await runtime.binaryInfo())).version;
+          version = compareVersions(refreshedVersion, current.version) > 0 ? refreshedVersion : null;
         }
       } else {
         this.setOperationProgress("checking-update", "Checking CloakBrowser release metadata.");
@@ -253,7 +258,11 @@ export class BinaryService {
     const current = await this.readInfo();
     const checkedAt = new Date().toISOString();
     try {
-      const latestVersion = target.tier === "pro"
+      const authenticatedDownload = usesLicensedDownloads(target);
+      if (target.tier === "pro" && !authenticatedDownload) {
+        throw Object.assign(new Error("CloakBrowser Pro requires CLOAKBROWSER_LICENSE_KEY."), { status: 400 });
+      }
+      const latestVersion = authenticatedDownload
         ? await this.latestProChromiumVersion(current.platform)
         : await this.latestChromiumVersion(current.platform);
       const updateAvailable = Boolean(latestVersion && compareVersions(latestVersion, current.version) > 0);
@@ -264,7 +273,7 @@ export class BinaryService {
         currentVersion: current.version,
         latestVersion,
         updateAvailable,
-        downloadLinks: latestVersion ? this.downloadLinks(current, latestVersion, target.tier) : undefined,
+        downloadLinks: latestVersion ? this.downloadLinks(current, latestVersion, target.tier, authenticatedDownload) : undefined,
         blockedReason: target.versionMode === "pinned" && updateAvailable
           ? "Pinned browser version is enabled; automatic update will not replace it."
           : undefined,
@@ -377,7 +386,7 @@ export class BinaryService {
     this.updateCheck ??= settings.binary.lastUpdateCheck;
     const env = this.runtimeEnv(settings);
     const status = info.installed ? "installed" : "not-installed";
-    const current = this.downloadLinks(info, info.version, info.tier ?? target.tier);
+    const current = this.downloadLinks(info, info.version, target.tier, usesLicensedDownloads(target));
     return {
       status,
       installed: info.installed,
@@ -432,7 +441,7 @@ export class BinaryService {
       currentVersion: current.version,
       latestVersion: current.version,
       updateAvailable: false,
-      downloadLinks: this.downloadLinks(current, current.version, target.tier),
+      downloadLinks: this.downloadLinks(current, current.version, target.tier, usesLicensedDownloads(target)),
     };
     await this.persistUpdateCheck();
   }
@@ -467,7 +476,7 @@ export class BinaryService {
       enabled: Boolean(envValues.downloadUrl),
       source: envValues.downloadUrlSource,
       valueKind: "url",
-      detail: envValues.downloadUrl ? "Custom source disables CloakBrowser's GitHub fallback and Pro download routing." : undefined,
+      detail: envValues.downloadUrl ? "Custom source disables CloakBrowser's GitHub fallback and authenticated download routing." : undefined,
     });
     this.setRuntimeEnv(values, {
       key: "CLOAKBROWSER_AUTO_UPDATE",
@@ -509,7 +518,7 @@ export class BinaryService {
       source: envValues.licenseKeySource,
       valueKind: "secret",
       sensitive: true,
-      detail: envValues.licenseKey ? "Enables CloakBrowser Pro downloads unless a custom download URL is set." : undefined,
+      detail: envValues.licenseKey ? "Enables authenticated CloakBrowser downloads unless a custom download URL is set." : undefined,
     });
 
     for (const item of binary.customEnvVars) {
@@ -564,7 +573,7 @@ export class BinaryService {
   private async applyGithubMirrorFetch(runtime: CloakBrowserModule): Promise<void> {
     const settings = normalizeSettings(await this.options.readSettings());
     const target = browserCoreTarget(settings, this.initialBuiltinEnv);
-    const resolution = target.tier === "pro"
+    const resolution = target.tier === "pro" || usesLicensedDownloads(target)
       ? undefined
       : await this.githubMirrorProbeService.resolvePrefix(settings, runtime.binaryInfo(target.pinnedVersion).version);
     applyGithubMirrorFetch(settings, resolution?.prefix);
@@ -725,11 +734,16 @@ export class BinaryService {
     await fs.writeFile(path.join(cacheRoot, `latest_pro_version_${info.platform}`), version, "utf8");
   }
 
-  private downloadLinks(info: CloakBinaryInfo, version: string, tier: BrowserCoreTier): BrowserCoreDownloadLinks {
+  private downloadLinks(
+    info: CloakBinaryInfo,
+    version: string,
+    tier: BrowserCoreTier,
+    authenticatedDownload = false,
+  ): BrowserCoreDownloadLinks {
     const customBase = process.env.CLOAKBROWSER_DOWNLOAD_URL?.replace(/\/+$/, "");
     const platform = info.platform;
     const archiveName = archiveNameForPlatform(platform);
-    if (tier === "pro" && !customBase) {
+    if (authenticatedDownload && !customBase) {
       const manifestBase = `${CLOAKBROWSER_DEFAULT_BASE_URL}/releases/pro/chromium-v${version}`;
       return {
         tier,
@@ -762,7 +776,7 @@ export class BinaryService {
       headers: { "X-Platform": platform },
       signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) throw new Error(`CloakBrowser Pro version check failed: HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`CloakBrowser authenticated version check failed: HTTP ${response.status}`);
     const data = await response.json() as { version?: unknown };
     return typeof data.version === "string" && data.version.trim() ? data.version.trim() : undefined;
   }
@@ -884,6 +898,16 @@ export class BinaryService {
     }
   }
 
+  private async runExplicitCloakbrowserUpdate<T>(work: () => Promise<T>): Promise<T> {
+    const previousAutoUpdate = process.env.CLOAKBROWSER_AUTO_UPDATE;
+    writeProcessEnv("CLOAKBROWSER_AUTO_UPDATE", "true");
+    try {
+      return await work();
+    } finally {
+      writeProcessEnv("CLOAKBROWSER_AUTO_UPDATE", previousAutoUpdate);
+    }
+  }
+
   private ingestCloakbrowserLog(level: BrowserCoreOperationLog["level"], message: string): void {
     const normalized = message.trim();
     if (!normalized) return;
@@ -944,22 +968,26 @@ function browserCoreTarget(
     initialBuiltinEnv,
     envUrlBaseValue,
   ).value;
-  const licenseKey = resolveOptionalEnvValue(
+  const licenseKeyResolution = resolveOptionalEnvValue(
     "CLOAKBROWSER_LICENSE_KEY",
     customRows,
     enabledCustom,
-    binary.tierMode === "pro" ? envStringValue(binary.licenseKey) : undefined,
+    envStringValue(binary.licenseKey),
     initialBuiltinEnv,
     envStringValue,
-  ).value;
-  const pinnedVersion = resolveOptionalEnvValue(
+  );
+  const licenseKey = licenseKeyResolution.value;
+  const configuredPinnedVersion = resolveOptionalEnvValue(
     "CLOAKBROWSER_VERSION",
     customRows,
     enabledCustom,
     binary.browserVersionMode === "pinned" ? envStringValue(binary.pinnedBrowserVersion) : undefined,
     initialBuiltinEnv,
     envStringValue,
-  ).value;
+  );
+  const pinnedVersion = freeKeyForcesLatest(binary.tierMode, licenseKeyResolution, customDownloadBaseUrl)
+    ? undefined
+    : configuredPinnedVersion.value;
   const customBinaryPath = resolveOptionalEnvValue(
     "CLOAKBROWSER_BINARY_PATH",
     customRows,
@@ -969,13 +997,28 @@ function browserCoreTarget(
     envStringValue,
   ).value;
   return {
-    tier: customDownloadBaseUrl ? "free" : licenseKey ? "pro" : binary.tierMode,
+    tier: customDownloadBaseUrl ? "free" : binary.tierMode,
     versionMode: pinnedVersion ? "pinned" : "latest",
     pinnedVersion,
     licenseKey,
     customBinaryPath,
     customDownloadBaseUrl,
   };
+}
+
+function usesLicensedDownloads(target: BrowserCoreTarget): boolean {
+  return Boolean(target.licenseKey && !target.customDownloadBaseUrl);
+}
+
+function freeKeyForcesLatest(
+  tier: BrowserCoreTier,
+  licenseKey: BrowserCoreEnvResolution,
+  customDownloadBaseUrl: string | undefined,
+): boolean {
+  return tier === "free"
+    && Boolean(licenseKey.value)
+    && licenseKey.source !== "external"
+    && !customDownloadBaseUrl;
 }
 
 function browserCoreEnvValues(
@@ -1022,7 +1065,15 @@ function browserCoreEnvValues(
   const geoipTimeoutSeconds = geoipRow
     ? numberEnvValue(geoipRow.value, 12, 1, 60)
     : undefined;
-  const version = resolveOptionalEnvValue(
+  const licenseKey = resolveOptionalEnvValue(
+    "CLOAKBROWSER_LICENSE_KEY",
+    customRows,
+    custom,
+    envStringValue(binary.licenseKey),
+    initialBuiltinEnv,
+    envStringValue,
+  );
+  const configuredVersion = resolveOptionalEnvValue(
     "CLOAKBROWSER_VERSION",
     customRows,
     custom,
@@ -1030,14 +1081,9 @@ function browserCoreEnvValues(
     initialBuiltinEnv,
     envStringValue,
   );
-  const licenseKey = resolveOptionalEnvValue(
-    "CLOAKBROWSER_LICENSE_KEY",
-    customRows,
-    custom,
-    binary.tierMode === "pro" ? envStringValue(binary.licenseKey) : undefined,
-    initialBuiltinEnv,
-    envStringValue,
-  );
+  const version = freeKeyForcesLatest(binary.tierMode, licenseKey, downloadUrl.value)
+    ? { source: configuredVersion.source }
+    : configuredVersion;
 
   return {
     binaryPath: binaryPath.value,

@@ -112,6 +112,17 @@ export function BrowserCoreSettingsPanel({
   const updateMeta = update
     ? `${t("browserCore.lastCheckedAt")}: ${formatTime(update.checkedAt, "dateTime")}`
     : t("browserCore.updateNotCheckedShort");
+  const customLicenseKey = binary.customEnvVars.find((item) => item.key === "CLOAKBROWSER_LICENSE_KEY");
+  const managedLicenseKey = customLicenseKey
+    ? customLicenseKey.enabled ? customLicenseKey.value.trim() : ""
+    : offlineImportDraft.licenseKey.trim();
+  const customDownloadUrl = binary.customEnvVars.find((item) => item.key === "CLOAKBROWSER_DOWNLOAD_URL");
+  const customDownloadSource = customDownloadUrl
+    ? Boolean(customDownloadUrl.enabled && customDownloadUrl.value.trim())
+    : binary.downloadSourceMode === "custom" && Boolean(binary.customDownloadBaseUrl.trim());
+  const freeKeyUsesLatest = !customDownloadSource
+    && offlineImportDraft.tierMode === "free"
+    && Boolean(managedLicenseKey);
 
   useEffect(() => {
     setDownloadLinkView(latestDownloadLinks ? "latest" : "current");
@@ -267,18 +278,16 @@ export function BrowserCoreSettingsPanel({
             onChange={(tierMode) => saveOfflineImportDraft({ tierMode })}
           />
         </Field>
-        {offlineImportDraft.tierMode === "pro" && (
-          <Field label={t("browserCore.licenseKey")} help={t("browserCore.licenseKeyHelp")} wide>
-            <input
-              autoComplete="off"
-              type="password"
-              value={offlineImportDraft.licenseKey}
-              onChange={(event) => saveOfflineImportDraft({ licenseKey: event.target.value })}
-              placeholder="cb_xxxxxxxx"
-            />
-          </Field>
-        )}
-        <Field label={t("browserCore.versionMode")}>
+        <Field label={t("browserCore.licenseKey")} help={t("browserCore.licenseKeyHelp")} wide>
+          <input
+            autoComplete="off"
+            type="password"
+            value={offlineImportDraft.licenseKey}
+            onChange={(event) => saveOfflineImportDraft({ licenseKey: event.target.value })}
+            placeholder="cb_xxxxxxxx"
+          />
+        </Field>
+        {!freeKeyUsesLatest && <Field label={t("browserCore.versionMode")}>
           <Segmented
             value={offlineImportDraft.browserVersionMode}
             options={[
@@ -287,8 +296,8 @@ export function BrowserCoreSettingsPanel({
             ]}
             onChange={(browserVersionMode) => saveOfflineImportDraft({ browserVersionMode })}
           />
-        </Field>
-        {offlineImportDraft.browserVersionMode === "pinned" && (
+        </Field>}
+        {!freeKeyUsesLatest && offlineImportDraft.browserVersionMode === "pinned" && (
           <Field label={t("browserCore.pinnedVersion")} help={t("browserCore.pinnedVersionHelp")} wide>
             <input
               value={offlineImportDraft.pinnedBrowserVersion}
@@ -297,7 +306,7 @@ export function BrowserCoreSettingsPanel({
             />
           </Field>
         )}
-        {binary.downloadSourceMode === "custom" && offlineImportDraft.tierMode === "pro" && (
+        {binary.downloadSourceMode === "custom" && offlineImportDraft.licenseKey.trim() && (
           <div className="result-line">{t("browserCore.customSourceDisablesPro")}</div>
         )}
         <Field label={t("browserCore.cacheDirMode")}>
