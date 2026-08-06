@@ -1,4 +1,4 @@
-import { Activity, Copy, Network, Save } from "lucide-react";
+import { Activity, Copy, Globe, Network, Save } from "lucide-react";
 
 import type { TranslationKey } from "../../i18n";
 import type { BrowserProfile, ProxyScheme, ProxySettings } from "../../shared/profile";
@@ -105,6 +105,7 @@ export function ProxyCheckPanel({
   currentProxyUrl,
   proxyEnabled,
   proxyUrlError,
+  resolveProxyGeoip,
   saveDraftProxyToLibrary,
   selectedManagedProxy,
   t,
@@ -117,6 +118,7 @@ export function ProxyCheckPanel({
   currentProxyUrl: string;
   proxyEnabled: boolean;
   proxyUrlError: string;
+  resolveProxyGeoip: () => Promise<void>;
   saveDraftProxyToLibrary: () => Promise<void>;
   selectedManagedProxy: ProxyEntity | undefined;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
@@ -158,6 +160,16 @@ export function ProxyCheckPanel({
             {t("actions.saveToProxyLibrary")}
           </button>
         )}
+        <button
+          className="command subtle"
+          disabled={Boolean(proxyUrlError) || !currentProxyUrl || busy === "proxy-geoip"}
+          onClick={() => void resolveProxyGeoip()}
+          title={t("tips.resolveGeoip")}
+          type="button"
+        >
+          <Globe size={16} aria-hidden="true" />
+          {t("actions.resolveGeoip")}
+        </button>
         <button
           className="command"
           disabled={Boolean(proxyUrlError) || !currentProxyUrl || busy === "proxy"}

@@ -26,6 +26,7 @@ export function ProfileEditorProxyTab({
   proxyLibraryDraftIds,
   proxyCheck,
   checkProxy,
+  resolveProxyGeoip,
   saveDraftProxyToLibrary,
   t,
 }: {
@@ -41,6 +42,7 @@ export function ProfileEditorProxyTab({
   proxyLibraryDraftIds: Record<string, string>;
   proxyCheck: string;
   checkProxy: () => Promise<void>;
+  resolveProxyGeoip: () => Promise<void>;
   saveDraftProxyToLibrary: () => Promise<void>;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }) {
@@ -181,6 +183,7 @@ export function ProfileEditorProxyTab({
         currentProxyUrl={currentProxyUrl}
         proxyEnabled={proxyEnabled}
         proxyUrlError={proxyUrlError}
+        resolveProxyGeoip={resolveProxyGeoip}
         saveDraftProxyToLibrary={saveDraftProxyToLibrary}
         selectedManagedProxy={selectedManagedProxy}
         t={t}

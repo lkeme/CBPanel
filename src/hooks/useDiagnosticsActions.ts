@@ -19,8 +19,11 @@ export function useDiagnosticsActions({
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
   toast: (kind: "success" | "error" | "info", text: string) => void;
 }) {
-  async function fetchDiagnostics(): Promise<SystemDiagnostics> {
-    const next = await api<SystemDiagnostics>("/api/system/diagnostics");
+  // `proxyId`, never a proxy URL: the credentials stay server-side, and an empty id reads as "do not
+  // resolve" so the routine load stays free of network calls.
+  async function fetchDiagnostics(proxyId?: string): Promise<SystemDiagnostics> {
+    const query = proxyId?.trim() ? `?proxyId=${encodeURIComponent(proxyId.trim())}` : "";
+    const next = await api<SystemDiagnostics>(`/api/system/diagnostics${query}`);
     setDiagnostics(next);
     return next;
   }
@@ -33,10 +36,10 @@ export function useDiagnosticsActions({
     }
   }
 
-  async function refreshDiagnostics() {
+  async function refreshDiagnostics(proxyId?: string) {
     setBusy("diagnostics-refresh");
     try {
-      await fetchDiagnostics();
+      await fetchDiagnostics(proxyId);
       toast("success", t("actions.refresh"));
     } catch (error) {
       toast("error", (error as Error).message);

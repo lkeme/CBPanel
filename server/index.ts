@@ -6,11 +6,13 @@ import { fileURLToPath } from "node:url";
 import {
   type BrowserProfile,
   type PanelState,
+  type ProxySettings,
+  buildProxyUrl,
   defaultProfile,
   maskProfileSecrets,
   normalizeProfile,
 } from "../src/shared/profile";
-import type { NetworkCheckResult, SystemDiagnostics } from "../src/shared/entities";
+import type { NetworkCheckResult, ProxyEntity, SystemDiagnostics } from "../src/shared/entities";
 import { resolveNetworkTraceProvider } from "../src/shared/settings";
 import {
   payloadTooLargeMessage,
@@ -69,6 +71,20 @@ const binaryService = new BinaryService({
   saveSettings: (patch) => repository.saveSettings(patch),
   // Read lazily: sessionService is constructed below, and the prune needs the answer at call time.
   hasActiveSessions: () => activeEnvironmentIds().size > 0,
+  // Also lazy, for the same reason: proxyService is constructed below. Injected rather than imported so
+  // BinaryService owns only the GeoLite2 cache path and ProxyService owns only the exit probe.
+  resolveLaunchGeo: async (proxyUrl) => {
+    const result = await proxyService.resolveLaunchGeo({ enabled: true, raw: proxyUrl }, {
+      traceSettings: (await repository.getSettings()).networkTrace,
+      geoipDbPath: await binaryService.resolveGeoipDbPath(),
+    });
+    return {
+      exitIp: result.ip,
+      timezone: result.geo?.timezone,
+      locale: result.geo?.locale,
+      unresolvedReason: result.geoUnresolvedReason,
+    };
+  },
 });
 
 // One definition for every service that rm's or renames a file a browser may have open: the browser
@@ -170,13 +186,45 @@ async function panelState(): Promise<PanelState> {
   };
 }
 
-async function systemDiagnostics(): Promise<SystemDiagnostics> {
+// A stored proxy with its credentials, or a 404. One lookup for every route that needs the real values.
+async function findProxyWithSecrets(proxyId: string): Promise<ProxyEntity> {
+  const proxy = (await repository.listProxies({ includeSecrets: true })).find((item) => item.id === proxyId);
+  if (!proxy) throw Object.assign(new Error("代理不存在"), { status: 404 });
+  return proxy;
+}
+
+// A stored proxy as the profile-shaped patch the proxy service takes. `raw` is cleared on purpose: the
+// entity carries discrete parts, and a stale raw URL would win over them in buildProxyUrl.
+function proxySettingsFrom(proxy: ProxyEntity): Partial<ProxySettings> {
+  return {
+    enabled: true,
+    raw: "",
+    scheme: proxy.scheme,
+    host: proxy.host,
+    port: proxy.port,
+    username: proxy.username,
+    password: proxy.password,
+    bypass: proxy.bypass,
+  };
+}
+
+async function proxyUrlForEntity(proxyId: string): Promise<string> {
+  const proxy = await findProxyWithSecrets(proxyId);
+  const proxyUrl = buildProxyUrl({ ...defaultProfile().proxy, ...proxySettingsFrom(proxy) });
+  if (!proxyUrl) throw Object.assign(new Error("代理配置不完整"), { status: 400 });
+  return proxyUrl;
+}
+
+// `proxyUrl` mirrors `cloakbrowser info --proxy <url>`: given one, the diagnostics also report the exit
+// IP, timezone and locale a `geoip: true` launch through that proxy would apply. Without one nothing is
+// resolved and no network call is made, which is how upstream leaves plain `info`.
+async function systemDiagnostics(proxyUrl?: string): Promise<SystemDiagnostics> {
   const [storage, extensionSources, extensions, settings, browserCoreDiagnostics] = await Promise.all([
     repository.getInfo(),
     repository.listExtensionSources(),
     repository.listExtensions(),
     repository.getSettings(),
-    binaryService.readWrapperDiagnostics({ quick: true }),
+    binaryService.readWrapperDiagnostics({ quick: true, proxy: proxyUrl }),
   ]);
   const traceProvider = resolveNetworkTraceProvider(settings.networkTrace);
   const sessions = sessionService.listSessions();
@@ -937,20 +985,10 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/proxies/:id/check", async (request, response) => {
     try {
-      const proxy = (await repository.listProxies({ includeSecrets: true })).find((item) => item.id === request.params.id);
-      if (!proxy) throw Object.assign(new Error("代理不存在"), { status: 404 });
+      const proxy = await findProxyWithSecrets(request.params.id);
       try {
         const settings = await repository.getSettings();
-        const result = await proxyService.check({
-          enabled: true,
-          raw: "",
-          scheme: proxy.scheme,
-          host: proxy.host,
-          port: proxy.port,
-          username: proxy.username,
-          password: proxy.password,
-          bypass: proxy.bypass,
-        }, {
+        const result = await proxyService.check(proxySettingsFrom(proxy), {
           traceSettings: settings.networkTrace,
           source: "proxy-check",
         });
@@ -1255,9 +1293,13 @@ async function createApp(): Promise<express.Express> {
     }
   });
 
-  app.get("/api/system/diagnostics", async (_request, response) => {
+  app.get("/api/system/diagnostics", async (request, response) => {
     try {
-      response.json(await systemDiagnostics());
+      // A proxy id, never a proxy URL: the id is not a secret and is safe in a query string, while the
+      // credentials stay server-side. Absent means "do not resolve", which keeps this route free of
+      // network calls exactly as before.
+      const proxyId = typeof request.query.proxyId === "string" ? request.query.proxyId.trim() : "";
+      response.json(await systemDiagnostics(proxyId ? await proxyUrlForEntity(proxyId) : undefined));
     } catch (error) {
       sendError(response, error);
     }
@@ -1444,6 +1486,21 @@ async function createApp(): Promise<express.Express> {
       response.json(await proxyService.check(request.body?.proxy, {
         traceSettings: (await repository.getSettings()).networkTrace,
         source: "proxy-check",
+      }));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  // The panel's `cloakbrowser info --proxy <url>`: the exit IP plus the timezone and locale a
+  // `geoip: true` launch would inject, read from the browser core's own GeoLite2 cache rather than from
+  // the trace provider's opinion about the IP. Credentials travel in the body, never a query string, and
+  // the result is not persisted — it answers a question about a draft, it is not the proxy's status.
+  app.post("/api/proxy/geoip", async (request, response) => {
+    try {
+      response.json(await proxyService.resolveLaunchGeo(request.body?.proxy, {
+        traceSettings: (await repository.getSettings()).networkTrace,
+        geoipDbPath: await binaryService.resolveGeoipDbPath(),
       }));
     } catch (error) {
       sendError(response, error);

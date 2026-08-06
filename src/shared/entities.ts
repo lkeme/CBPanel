@@ -1,4 +1,5 @@
 import type { CloakBrowserDiagnostics } from "./browserCore";
+import type { LaunchGeoUnresolvedReason } from "./launchGeoip";
 import type { BrowserProfile, ProfileMode, ProxyScheme } from "./profile";
 
 export type EntityStatus = "enabled" | "disabled";
@@ -93,7 +94,13 @@ export interface NetworkCheckResult {
   latencyMs?: number;
   geo?: NetworkGeoResult;
   trace?: NetworkTraceResult;
+  // `launch-geoip` is not another exit probe: it reports what a `geoip: true` launch would inject,
+  // read from the browser core's own GeoLite2 database. `proxy-check` reports what the configured
+  // trace provider sees. The two can legitimately disagree, so the source is never inferred from
+  // the shape of the result.
   source?: "proxy-check" | "environment-check" | "launch-geoip";
+  /** Set only when `source === "launch-geoip"` and an exit IP resolved but the GeoIP database could not supply the timezone/locale. `ok` stays true — the exit IP is a real answer, and upstream's resolver returns it with a missing database too. Same value as `CloakBrowserDiagnosticsGeoIpResolved.unresolvedReason`. */
+  geoUnresolvedReason?: LaunchGeoUnresolvedReason;
   error?: string;
 }
 

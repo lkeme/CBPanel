@@ -50,7 +50,7 @@ type RegistryModuleViewProps = {
   diagnostics: SystemDiagnostics | null;
   exportDiagnostics: () => void;
   refreshBinary: () => Promise<void>;
-  refreshDiagnostics: () => Promise<void>;
+  refreshDiagnostics: (proxyId?: string) => Promise<void>;
   runtime: DesktopRuntimeInfo | null;
   storage?: StorageInfo;
   stats: ModuleStats;
@@ -488,6 +488,7 @@ export function RegistryModuleView({
             copyDiagnostics={copyDiagnostics}
             diagnostics={diagnostics}
             exportDiagnostics={exportDiagnostics}
+            proxies={state?.proxies ?? []}
             pruneBrowserData={pruneBrowserData}
             refreshBinary={refreshBinary}
             refreshDiagnostics={refreshDiagnostics}

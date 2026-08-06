@@ -750,6 +750,261 @@ test("BinaryService returns a stable error payload when wrapper diagnostics fail
   }
 });
 
+// Upstream keys the payload `exit_ip`; every other diagnostics field is camelCased on the way in and
+// this one is no different. A UI reading `exit_ip` straight off the payload is exactly what the
+// normalizer exists to prevent.
+test("BinaryService camelCases the resolved GeoIP payload from the upstream CLI", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const proxiesSeen: Array<string | undefined> = [];
+  const loadCloakBrowserDiagnostics: NonNullable<BinaryServiceOptions["loadCloakBrowserDiagnostics"]> = async () => ({
+    collectDiagnostics: async (_quick, proxy) => {
+      proxiesSeen.push(proxy);
+      return {
+        geoip: {
+          db_present: true,
+          path: "C:/cache/geoip/GeoLite2-City.mmdb",
+          resolved: { exit_ip: "203.0.113.42", timezone: "Asia/Tokyo", locale: "ja-JP" },
+        },
+      };
+    },
+  });
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({}),
+    loadCloakBrowserDiagnostics,
+  });
+
+  try {
+    const result = await service.readWrapperDiagnostics({ proxy: "http://proxy.example.test:8080" });
+
+    assert.deepEqual(proxiesSeen, ["http://proxy.example.test:8080"]);
+    assert.equal(result.geoip?.resolved?.exitIp, "203.0.113.42");
+    assert.equal(result.geoip?.resolved?.timezone, "Asia/Tokyo");
+    assert.equal(result.geoip?.resolved?.locale, "ja-JP");
+    assert.equal(result.geoip?.resolved?.error, undefined);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+// Upstream keeps the key with null fields when it resolves nothing and prints `(unknown)` for each.
+// Collapsing it to absent would tell the panel "no proxy was given", so an operator who just clicked
+// resolve would see an unchanged view with nothing explaining it.
+test("BinaryService keeps a resolved GeoIP payload whose fields all came back null", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const loadCloakBrowserDiagnostics: NonNullable<BinaryServiceOptions["loadCloakBrowserDiagnostics"]> = async () => ({
+    collectDiagnostics: async () => ({
+      geoip: {
+        db_present: false,
+        resolved: { exit_ip: null, timezone: null, locale: null },
+      },
+    }),
+  });
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({}),
+    loadCloakBrowserDiagnostics,
+  });
+
+  try {
+    const result = await service.readWrapperDiagnostics({ proxy: "http://proxy.example.test:8080" });
+
+    assert.equal(result.geoip?.dbPresent, false);
+    assert.ok(result.geoip?.resolved, "resolved must survive a payload of nulls");
+    assert.equal(result.geoip?.resolved?.exitIp, undefined);
+    assert.equal(result.geoip?.resolved?.timezone, undefined);
+    assert.equal(result.geoip?.resolved?.locale, undefined);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+// Still absent when no proxy was supplied — that is the distinction the key carries.
+test("BinaryService reports no resolved GeoIP key at all when the wrapper wrote none", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const loadCloakBrowserDiagnostics: NonNullable<BinaryServiceOptions["loadCloakBrowserDiagnostics"]> = async () => ({
+    collectDiagnostics: async () => ({ geoip: { db_present: true, path: "C:/cache/geoip/GeoLite2-City.mmdb" } }),
+  });
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({}),
+    loadCloakBrowserDiagnostics,
+  });
+
+  try {
+    const result = await service.readWrapperDiagnostics();
+
+    assert.equal(result.geoip?.dbPresent, true);
+    assert.equal(result.geoip?.resolved, undefined);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+// The panel's own diagnostics path, not the injected CLI. Without a proxy it must resolve nothing and
+// call nothing — upstream keeps plain `info` free of network calls and so does this.
+test("BinaryService resolves launch GeoIP only when a proxy is supplied", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const resolverCalls: string[] = [];
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({}),
+    resolveLaunchGeo: async (proxyUrl) => {
+      resolverCalls.push(proxyUrl);
+      return { exitIp: "198.51.100.7", timezone: "Europe/Berlin", locale: "de-DE" };
+    },
+  });
+
+  try {
+    const withoutProxy = await service.readWrapperDiagnostics({ quick: true });
+    assert.equal(withoutProxy.geoip?.resolved, undefined);
+    assert.deepEqual(resolverCalls, []);
+
+    const withProxy = await service.readWrapperDiagnostics({ quick: true, proxy: "socks5://proxy.example.test:1080" });
+    assert.deepEqual(resolverCalls, ["socks5://proxy.example.test:1080"]);
+    assert.equal(withProxy.geoip?.resolved?.exitIp, "198.51.100.7");
+    assert.equal(withProxy.geoip?.resolved?.timezone, "Europe/Berlin");
+    assert.equal(withProxy.geoip?.resolved?.locale, "de-DE");
+    assert.equal(withProxy.geoip?.resolved?.unresolvedReason, undefined);
+    // The database row is independent of the resolution and keeps reporting the cache as it stands.
+    assert.match(withProxy.geoip?.path ?? "", /GeoLite2-City\.mmdb$/);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+// The reason is not part of upstream's payload, and it has to survive anyway: CBPanel never downloads the
+// database, so "not downloaded yet" is the outcome an operator will hit most often and the one that would
+// otherwise show as an exit IP beside two unexplained blanks.
+test("BinaryService carries the unresolved reason into the diagnostics payload", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({}),
+    resolveLaunchGeo: async () => ({ exitIp: "203.0.113.9", unresolvedReason: "geoip-db-missing" }),
+  });
+
+  try {
+    const result = await service.readWrapperDiagnostics({ quick: true, proxy: "http://proxy.example.test:8080" });
+
+    assert.equal(result.geoip?.resolved?.exitIp, "203.0.113.9");
+    assert.equal(result.geoip?.resolved?.timezone, undefined);
+    assert.equal(result.geoip?.resolved?.unresolvedReason, "geoip-db-missing");
+    // Not an error: the exit IP resolved. The two must never be reported together.
+    assert.equal(result.geoip?.resolved?.error, undefined);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+// A reason the panel cannot translate would render as a blank note, so an unknown value is dropped rather
+// than passed through to a lookup that has no key for it.
+test("BinaryService ignores an unrecognized unresolved reason", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const loadCloakBrowserDiagnostics: NonNullable<BinaryServiceOptions["loadCloakBrowserDiagnostics"]> = async () => ({
+    collectDiagnostics: async () => ({
+      geoip: { db_present: true, resolved: { exit_ip: "203.0.113.9", unresolved_reason: "something-new" } },
+    }),
+  });
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({}),
+    loadCloakBrowserDiagnostics,
+  });
+
+  try {
+    const result = await service.readWrapperDiagnostics({ proxy: "http://proxy.example.test:8080" });
+
+    assert.equal(result.geoip?.resolved?.exitIp, "203.0.113.9");
+    assert.equal(result.geoip?.resolved?.unresolvedReason, undefined);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+// A proxy that cannot be reached must not blank the binary, launch and license sections alongside it —
+// the resolution is one row, and upstream isolates its failure to `{ error }` for the same reason.
+test("BinaryService keeps the rest of the diagnostics when launch GeoIP resolution fails", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({}),
+    resolveLaunchGeo: async () => {
+      throw new Error("代理连接已关闭，出口检测失败。");
+    },
+  });
+
+  try {
+    const result = await service.readWrapperDiagnostics({ quick: true, proxy: "http://proxy.example.test:8080" });
+
+    assert.equal(result.available, true);
+    assert.equal(result.geoip?.resolved?.error, "代理连接已关闭，出口检测失败。");
+    assert.equal(result.geoip?.resolved?.exitIp, undefined);
+    assert.ok(result.environment?.node);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+// The path both the diagnostics row and the launch-geoip lookup read. If they ever disagree the panel
+// reports on a file the browser does not use. Async on purpose: nothing applies the managed env at boot,
+// so a caller arriving before the first browser-core read has to get the configured cache root, not the
+// default one.
+test("BinaryService resolves the GeoLite2 cache path from the configured cache dir", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const customCacheDir = path.join(directory, "elsewhere", "core-cache");
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({ cacheDirMode: "custom", customCacheDir }),
+  });
+
+  try {
+    // Deliberately the very first call on a fresh service: this is the cold path POST /api/proxy/geoip
+    // takes, and reading process.env before anything wrote it returned the default cache dir.
+    const dbPath = await service.resolveGeoipDbPath();
+
+    assert.equal(dbPath, path.join(customCacheDir, "geoip", "GeoLite2-City.mmdb"));
+    assert.equal((await service.readWrapperDiagnostics({ quick: true })).geoip?.path, dbPath);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
+test("BinaryService falls back to the managed cache root for the GeoLite2 path", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({}),
+  });
+
+  try {
+    const dbPath = await service.resolveGeoipDbPath();
+
+    assert.equal(dbPath, path.join(directory, "cloakbrowser-cache", "geoip", "GeoLite2-City.mmdb"));
+    assert.equal((await service.readWrapperDiagnostics({ quick: true })).geoip?.path, dbPath);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
 test("BinaryService resolves target tier and version mode from updated settings", async () => {
   const originalEnv = captureEnv();
   const directory = await makeTempDir();

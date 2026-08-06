@@ -766,6 +766,7 @@ function App() {
     deleteProfile: deleteProfileAction,
     duplicateProfile,
     launchProfile,
+    resolveProxyGeoip,
     saveDraft,
     showBrowserCoreMissing,
     stopProfile,
@@ -1532,6 +1533,7 @@ function App() {
           proxyLibraryDraftIds={draftProxyLibraryIds}
           browserCoreMissing={browserCoreMissing}
           running={draftRunning}
+          resolveProxyGeoip={resolveProxyGeoip}
           saveDraft={saveDraft}
           saveDraftProxyToLibrary={saveDraftProxyToLibrary}
           setActiveTab={setActiveTab}

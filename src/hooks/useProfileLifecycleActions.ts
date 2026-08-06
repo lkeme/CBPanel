@@ -7,6 +7,7 @@ import type { ConfirmDialogState } from "../components/ui/ConfirmDialog";
 import type { WorkbenchView } from "../components/registry/registryStats";
 import { api, launchErrorMessage, profileErrorMessage } from "../lib/apiClient";
 import { omitKeys, withoutIds } from "../lib/collectionState";
+import { launchGeoSummary } from "../lib/launchGeoDisplay";
 import type { BrowserEnvironment, NetworkCheckResult } from "../shared/entities";
 import { networkCheckSummaryText } from "../shared/networkCheckDisplay";
 import {
@@ -383,6 +384,32 @@ export function useProfileLifecycleActions({
     }
   }
 
+  // Deliberately does not persist the draft first, unlike checkProxy: nothing is stored, so there is no
+  // saved environment to attach the answer to. That also keeps the draft's proxy the thing being asked
+  // about — saving first would answer for whatever the save normalized it into.
+  async function resolveProxyGeoip() {
+    if (!draft) return;
+    setBusy("proxy-geoip");
+    setProxyCheck("");
+    try {
+      const result = await api<NetworkCheckResult>("/api/proxy/geoip", {
+        method: "POST",
+        body: JSON.stringify({ proxy: draft.proxy }),
+      });
+      const summary = launchGeoSummary(result, t);
+      setProxyCheck(summary);
+      // A resolution that reached the exit but got no timezone/locale is not a failure — the reason is
+      // already in the summary, so the toast follows the reason rather than the ok flag alone.
+      toast(result.geoUnresolvedReason ? "info" : "success", summary);
+    } catch (error) {
+      const message = profileErrorMessage(error, t);
+      setProxyCheck(message);
+      toast("error", message);
+    } finally {
+      setBusy("");
+    }
+  }
+
   return {
     checkPreflight,
     checkProxy,
@@ -390,6 +417,7 @@ export function useProfileLifecycleActions({
     duplicateProfile,
     launchProfile,
     persistDraft,
+    resolveProxyGeoip,
     saveDraft,
     showBrowserCoreMissing,
     stopProfile,

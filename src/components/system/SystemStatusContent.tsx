@@ -1,11 +1,14 @@
-import { Copy, Download, RefreshCw, Trash2 } from "lucide-react";
+import { Copy, Download, Globe, RefreshCw, Trash2 } from "lucide-react";
+import { useState } from "react";
 
 import type { TranslationKey } from "../../i18n";
-import type { SystemDiagnostics } from "../../shared/entities";
+import type { ProxyEntity, SystemDiagnostics } from "../../shared/entities";
 import type { BinaryInfo, CloakBrowserEnvInfo } from "../../shared/browserCore";
 import type { PanelState } from "../../shared/profile";
 import type { DesktopRuntimeInfo, StorageInfo } from "../../shared/settings";
+import { LAUNCH_GEO_REASON_KEYS } from "../../lib/launchGeoDisplay";
 import { KeyValueList } from "../ui/KeyValueList";
+import { SelectMenu } from "../ui/SelectMenu";
 
 const binaryEnvRows: Array<{ key: keyof CloakBrowserEnvInfo; label: string }> = [
   { key: "binaryPath", label: "CLOAKBROWSER_BINARY_PATH" },
@@ -24,6 +27,7 @@ export function SystemStatusContent({
   copyDiagnostics,
   diagnostics,
   exportDiagnostics,
+  proxies,
   pruneBrowserData,
   refreshBinary,
   refreshDiagnostics,
@@ -37,14 +41,21 @@ export function SystemStatusContent({
   copyDiagnostics: () => Promise<void>;
   diagnostics: SystemDiagnostics | null;
   exportDiagnostics: () => void;
+  proxies: ProxyEntity[];
   pruneBrowserData: () => Promise<void>;
   refreshBinary: () => Promise<void>;
-  refreshDiagnostics: () => Promise<void>;
+  refreshDiagnostics: (proxyId?: string) => Promise<void>;
   runtime: DesktopRuntimeInfo | null;
   state: PanelState | null;
   storage?: StorageInfo;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }) {
+  const [geoipProxyId, setGeoipProxyId] = useState("");
+  // Validated against the current library rather than trusted: the id survives in state after the proxy
+  // it names is deleted, and resolving it then would 404 the whole diagnostics payload.
+  const geoipProxy = proxies.find((proxy) => proxy.id === geoipProxyId);
+  const resolvedGeoip = diagnostics?.browserCoreDiagnostics?.geoip?.resolved;
+
   return (
     <div className="system-status-scroll">
       <div className="settings-stack system-status-stack">
@@ -181,7 +192,38 @@ export function SystemStatusContent({
         </section>
 
         <section className="settings-section">
-          <h2>{t("system.cloakbrowserDiagnostics")}</h2>
+          <div className="settings-section-head">
+            <h2>{t("system.cloakbrowserDiagnostics")}</h2>
+            {/* The panel's `cloakbrowser info --proxy <url>`. Left unset the diagnostics resolve nothing and
+                make no network call, which is why the picker defaults to "do not resolve" rather than to the
+                first proxy in the library. */}
+            <div className="row-actions">
+              <SelectMenu
+                disabled={proxies.length === 0 || busy === "diagnostics-refresh"}
+                value={geoipProxy?.id ?? ""}
+                placeholder={t("system.geoipNoProxySelected")}
+                options={[
+                  { value: "", label: t("system.geoipNoProxySelected") },
+                  ...proxies.map((proxy) => ({
+                    value: proxy.id,
+                    label: proxy.name,
+                    meta: `${proxy.scheme}://${proxy.host}:${proxy.port}`,
+                  })),
+                ]}
+                onChange={setGeoipProxyId}
+              />
+              <button
+                className="command subtle"
+                disabled={!geoipProxy || busy === "diagnostics-refresh"}
+                onClick={() => void refreshDiagnostics(geoipProxy?.id)}
+                title={t("system.geoipResolveHint")}
+                type="button"
+              >
+                <Globe size={16} aria-hidden="true" />
+                {t("system.geoipResolveProxy")}
+              </button>
+            </div>
+          </div>
           <KeyValueList
             items={[
               {
@@ -209,6 +251,23 @@ export function SystemStatusContent({
               { label: t("system.modules"), value: formatWrapperModules(diagnostics?.browserCoreDiagnostics) },
             ]}
           />
+          {/* Only rendered once a proxy has actually been resolved — an absent block means nothing was asked
+              for, never that the resolution came back empty. */}
+          {resolvedGeoip && (
+            <KeyValueList
+              items={[
+                { label: t("system.exitIp"), value: resolvedGeoip.exitIp ?? "-" },
+                { label: t("system.timezone"), value: resolvedGeoip.timezone ?? "-" },
+                { label: t("system.locale"), value: resolvedGeoip.locale ?? "-" },
+              ]}
+            />
+          )}
+          {/* Why the two dashes above are dashes. CBPanel does not download the GeoIP database on the
+              operator's behalf, so "not downloaded yet" is the common outcome and has to say so. */}
+          {resolvedGeoip?.unresolvedReason && (
+            <div className="result-line">{t(LAUNCH_GEO_REASON_KEYS[resolvedGeoip.unresolvedReason])}</div>
+          )}
+          {resolvedGeoip?.error && <div className="inline-error">{resolvedGeoip.error}</div>}
           {diagnostics?.browserCoreDiagnostics?.error && <div className="inline-error">{diagnostics.browserCoreDiagnostics.error}</div>}
           {diagnostics?.browserCoreDiagnostics?.binary?.error && <div className="inline-error">{diagnostics.browserCoreDiagnostics.binary.error}</div>}
           {diagnostics?.browserCoreDiagnostics?.launch?.tested &&

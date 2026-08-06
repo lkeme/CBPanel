@@ -3,7 +3,7 @@ import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
-import type { NetworkCheckResult, NetworkGeoResult } from "../../src/shared/entities";
+import type { NetworkCheckResult, NetworkGeoResult, NetworkTraceResult } from "../../src/shared/entities";
 import { buildProxyUrl, defaultProfile, type ProxySettings } from "../../src/shared/profile";
 import {
   DEFAULT_APP_SETTINGS,
@@ -12,10 +12,19 @@ import {
   type NetworkTraceProviderMethod,
   type NetworkTraceSettings,
 } from "../../src/shared/settings";
+import { readLaunchGeoFromDb, type LaunchGeoDbLookup } from "./launchGeoipService";
 
 export type ProxyCheckOptions = {
   source?: NetworkCheckResult["source"];
   traceSettings?: NetworkTraceSettings;
+};
+
+// Mirrors `cloakbrowser info --proxy <url>`: what a `geoip: true` launch through this proxy would
+// actually inject, which is a different question from `check()`'s "what does the trace provider see".
+export type LaunchGeoOptions = {
+  traceSettings?: NetworkTraceSettings;
+  /** The browser core's own GeoLite2 cache path, supplied by the caller from BinaryService. Reading the same file the wrapper reads is what makes the answer match the launch; absent means the database has not been downloaded yet. */
+  geoipDbPath?: string;
 };
 
 export type ProxyTraceRequest = {
@@ -54,45 +63,85 @@ export class ProxyService {
       request: ProxyTraceRequest,
     ) => Promise<string | Partial<ProxyTraceResponse>>;
     geoLookup?: (ip: string, timeoutSeconds: number) => Promise<NetworkGeoResult | undefined>;
+    readLaunchGeo?: (dbPath: string | undefined, ip: string) => Promise<LaunchGeoDbLookup>;
   } = {}) {}
 
   async check(proxy: unknown, options: ProxyCheckOptions = {}): Promise<NetworkCheckResult> {
-    const proxyPatch = proxy && typeof proxy === "object" ? (proxy as Partial<ProxySettings>) : {};
-    const profile = defaultProfile();
-    const proxyUrl = buildProxyUrl({ ...profile.proxy, ...proxyPatch });
-    if (!proxyUrl) throw Object.assign(new Error("代理未启用或不完整"), { status: 400 });
-
+    const proxyUrl = proxyUrlFrom(proxy);
     const traceSettings = options.traceSettings ?? DEFAULT_APP_SETTINGS.networkTrace;
-    const provider = resolveNetworkTraceProvider(traceSettings);
-    const traceRequest = buildTraceRequest(provider);
-    const started = Date.now();
-    const traceResponse = await this.readTrace(proxyUrl, traceRequest, traceSettings.timeoutSeconds);
-    const traceValues = parseNetworkTraceResponse(provider, traceResponse, traceRequest.callbackName);
-    if (!traceValues.ip) throw Object.assign(new Error(`出口检测响应缺少 ip 字段：${provider.name}`), { status: 502 });
-    const enrichedGeo = await this.lookupGeo(traceValues.ip, traceSettings.timeoutSeconds, traceValues.needsGeo === true);
-    const geo = mergeGeo(traceValues.geo, enrichedGeo);
+    const exit = await this.resolveExit(proxyUrl, traceSettings);
+    const enrichedGeo = await this.lookupGeo(exit.ip, traceSettings.timeoutSeconds, exit.values.needsGeo === true);
+    const geo = mergeGeo(exit.values.geo, enrichedGeo);
 
     return {
       checkedAt: new Date().toISOString(),
       ok: true,
-      ip: traceValues.ip,
-      latencyMs: Date.now() - started,
+      ip: exit.ip,
+      // Measured to here, not to the end of resolveExit: this check has always reported the whole
+      // round trip including the geo enrichment, and narrowing it to the trace alone would silently
+      // change every latency the proxy table shows.
+      latencyMs: Date.now() - exit.startedAt,
       geo,
-      trace: {
-        providerId: provider.id,
-        providerName: provider.name,
-        providerUrl: provider.url,
-        host: traceValues.host,
-        loc: traceValues.loc,
-        colo: traceValues.colo,
-        http: traceValues.http,
-        tls: traceValues.tls,
-        warp: traceValues.warp,
-        gateway: traceValues.gateway,
-        raw: traceValues.raw,
-      },
+      trace: traceResultFrom(exit.provider, exit.values),
       source: options.source ?? "proxy-check",
     };
+  }
+
+  // The exit-IP half is `check()`'s, verbatim — same providers, protocols, timeout and error
+  // normalization. Only the timezone/locale half differs: it comes from the browser core's GeoLite2
+  // cache rather than a third-party geo service, because the point is to report what the launch will
+  // inject, not what a lookup service believes about the IP.
+  async resolveLaunchGeo(proxy: unknown, options: LaunchGeoOptions = {}): Promise<NetworkCheckResult> {
+    const proxyUrl = proxyUrlFrom(proxy);
+    const traceSettings = options.traceSettings ?? DEFAULT_APP_SETTINGS.networkTrace;
+    const exit = await this.resolveExit(proxyUrl, traceSettings);
+    const lookup = await this.readLaunchGeo(options.geoipDbPath, exit.ip);
+
+    return {
+      checkedAt: new Date().toISOString(),
+      // True even when the database supplied nothing: the exit IP is a real answer, and upstream's
+      // resolver returns it with a missing database too. `geoUnresolvedReason` carries the rest.
+      ok: true,
+      ip: exit.ip,
+      // Mirrors check(): the whole round trip. The database read is local, so in practice this is the
+      // proxy's latency either way.
+      latencyMs: Date.now() - exit.startedAt,
+      // Deliberately not merged with the trace's own country: the locale has to follow the country the
+      // GeoLite2 database reports, since that is the one the launch maps to a locale. The trace block
+      // below still carries the provider's view for display.
+      geo: compactGeo({
+        countryCode: lookup.countryCode,
+        timezone: lookup.timezone,
+        locale: lookup.locale,
+      }),
+      trace: traceResultFrom(exit.provider, exit.values),
+      source: "launch-geoip",
+      geoUnresolvedReason: lookup.reason,
+    };
+  }
+
+  /**
+   * The proxy's exit IP plus the raw trace it came from. One path for every caller, so a protocol or
+   * timeout fix lands everywhere. Returns `startedAt` rather than an elapsed time: the callers measure
+   * different spans, and letting this one decide would quietly redefine what `check()`'s latency means.
+   */
+  private async resolveExit(
+    proxyUrl: string,
+    traceSettings: NetworkTraceSettings,
+  ): Promise<{ ip: string; provider: NetworkTraceProvider; values: ParsedNetworkTrace; startedAt: number }> {
+    const provider = resolveNetworkTraceProvider(traceSettings);
+    const traceRequest = buildTraceRequest(provider);
+    const startedAt = Date.now();
+    const traceResponse = await this.readTrace(proxyUrl, traceRequest, traceSettings.timeoutSeconds);
+    const values = parseNetworkTraceResponse(provider, traceResponse, traceRequest.callbackName);
+    if (!values.ip) throw Object.assign(new Error(`出口检测响应缺少 ip 字段：${provider.name}`), { status: 502 });
+    return { ip: values.ip, provider, values, startedAt };
+  }
+
+  private async readLaunchGeo(dbPath: string | undefined, ip: string): Promise<LaunchGeoDbLookup> {
+    return this.options.readLaunchGeo
+      ? await this.options.readLaunchGeo(dbPath, ip)
+      : await readLaunchGeoFromDb(dbPath, ip);
   }
 
   private async readTrace(
@@ -216,6 +265,30 @@ export class ProxyService {
 function destroySocksAgent(agent: SocksProxyAgent): void {
   const maybeDestroyable = agent as { destroy?: () => void };
   maybeDestroyable.destroy?.();
+}
+
+/** A proxy patch as the panel sends it, resolved against the default profile so partial input still yields a complete URL. */
+function proxyUrlFrom(proxy: unknown): string {
+  const proxyPatch = proxy && typeof proxy === "object" ? (proxy as Partial<ProxySettings>) : {};
+  const proxyUrl = buildProxyUrl({ ...defaultProfile().proxy, ...proxyPatch });
+  if (!proxyUrl) throw Object.assign(new Error("代理未启用或不完整"), { status: 400 });
+  return proxyUrl;
+}
+
+function traceResultFrom(provider: NetworkTraceProvider, values: ParsedNetworkTrace): NetworkTraceResult {
+  return {
+    providerId: provider.id,
+    providerName: provider.name,
+    providerUrl: provider.url,
+    host: values.host,
+    loc: values.loc,
+    colo: values.colo,
+    http: values.http,
+    tls: values.tls,
+    warp: values.warp,
+    gateway: values.gateway,
+    raw: values.raw,
+  };
 }
 
 export function normalizeProxyCheckError(error: unknown): Error {

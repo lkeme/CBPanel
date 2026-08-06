@@ -1,4 +1,5 @@
 import type { NetworkCheckResult } from "./entities";
+import type { LaunchGeoUnresolvedReason } from "./launchGeoip";
 import { flagEmojiFromRegionCode, formatRegionLabel, normalizeRegionCode, type RegionDisplayLocale } from "./regionDisplay";
 
 type NetworkCheckSuccessPartOptions = {
@@ -100,3 +101,46 @@ export function networkCheckSummaryText(
   if (!summary) return emptyText;
   return successPrefix ? `${successPrefix} ${summary}` : summary;
 }
+
+export type LaunchGeoSummaryOptions = {
+  emptyText?: string;
+  failedText?: string;
+  labels: {
+    exitIp: string;
+    timezone: string;
+    locale: string;
+  };
+  /** Renders `geoUnresolvedReason`. Returning an empty string drops the note. */
+  reasonText: (reason: LaunchGeoUnresolvedReason) => string;
+  separator?: string;
+};
+
+// Its own summary rather than a flag on networkCheckSummaryText: that one answers "is this proxy usable"
+// with a region and a latency, while this one answers "what will the browser inject" — three labelled
+// values, and a reason when two of them are missing. Folding both into one formatter would mean the caller
+// deciding which of two unrelated shapes it gets.
+export function launchGeoSummaryText(
+  check: NetworkCheckResult | undefined,
+  options: LaunchGeoSummaryOptions,
+): string {
+  const { emptyText = "", failedText = "", labels, reasonText, separator = " · " } = options;
+
+  if (!check) return emptyText;
+  if (!check.ok) return check.error?.trim() || failedText || emptyText;
+
+  const parts: string[] = [];
+  const exitIp = check.ip?.trim();
+  if (exitIp) parts.push(`${labels.exitIp}: ${exitIp}`);
+  const timezone = check.geo?.timezone?.trim();
+  if (timezone) parts.push(`${labels.timezone}: ${timezone}`);
+  const localeValue = check.geo?.locale?.trim();
+  if (localeValue) parts.push(`${labels.locale}: ${localeValue}`);
+
+  // The reason is why the timezone/locale are absent, so it belongs beside the exit IP that did resolve —
+  // not in place of it, which is the whole point of the resolution still reporting `ok`.
+  const reason = check.geoUnresolvedReason ? reasonText(check.geoUnresolvedReason).trim() : "";
+  if (reason) parts.push(reason);
+
+  return parts.length ? parts.join(separator) : emptyText;
+}
+

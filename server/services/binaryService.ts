@@ -10,6 +10,7 @@ import * as tar from "tar";
 import { safeJoin } from "./archiveUtils";
 import {
   type CloakBrowserDiagnostics,
+  type CloakBrowserDiagnosticsGeoIpResolved,
   type CloakBrowserDiagnosticsLicense,
   type BrowserCoreEnvRuntimeValue,
   type BrowserCoreImportAnalysis,
@@ -24,6 +25,7 @@ import {
   type BrowserCoreVersionMode,
   maskEnvValue,
 } from "../../src/shared/browserCore";
+import { launchGeoUnresolvedReasonFrom, type LaunchGeoUnresolvedReason } from "../../src/shared/launchGeoip";
 import {
   type AppSettings,
   type AppSettingsPatch,
@@ -59,8 +61,18 @@ export type PublicBinaryInfo = CloakBinaryInfo & {
 };
 
 type CloakBrowserCliModule = {
-  collectDiagnostics: (quick: boolean) => Promise<Record<string, unknown>>;
+  collectDiagnostics: (quick: boolean, proxy?: string) => Promise<Record<string, unknown>>;
 };
+
+/** What a `geoip: true` launch through one proxy would resolve. Injected rather than imported so BinaryService keeps knowing nothing about ProxyService — the exit probe lives there, the GeoLite2 cache path lives here. */
+export type LaunchGeoResolver = (proxyUrl: string) => Promise<{
+  exitIp?: string;
+  timezone?: string;
+  locale?: string;
+  /** Why the timezone/locale are empty although the exit IP resolved. Carried through so the panel can explain the common "database not downloaded yet" case. */
+  unresolvedReason?: LaunchGeoUnresolvedReason;
+  error?: string;
+}>;
 
 export type BinaryServiceOptions = {
   dataDir: string;
@@ -70,6 +82,7 @@ export type BinaryServiceOptions = {
   fetchImpl?: typeof fetch;
   loadCloakBrowser?: () => Promise<CloakBrowserModule>;
   loadCloakBrowserDiagnostics?: () => Promise<CloakBrowserCliModule>;
+  resolveLaunchGeo?: LaunchGeoResolver;
   // Read at call time, never at construction: BinaryService is built before SessionService, and the
   // prune has to know whether a build is being executed right now. Mirrors how ExtensionService
   // receives activeEnvironmentIds in server/index.ts.
@@ -282,13 +295,16 @@ export class BinaryService {
     };
   }
 
-  async readWrapperDiagnostics(options: { quick?: boolean } = {}): Promise<CloakBrowserDiagnostics> {
+  // `proxy` mirrors upstream's `info --proxy <url>`: given one, the timezone and locale a launch would
+  // apply are resolved live. Without one nothing is resolved and no network call is made, exactly as
+  // upstream leaves plain `info`.
+  async readWrapperDiagnostics(options: { quick?: boolean; proxy?: string } = {}): Promise<CloakBrowserDiagnostics> {
     const checkedAt = new Date().toISOString();
     try {
       await this.applyBrowserCoreEnv();
       const diagnostics = this.options.loadCloakBrowserDiagnostics
-        ? await (await this.options.loadCloakBrowserDiagnostics()).collectDiagnostics(Boolean(options.quick))
-        : await this.collectWrapperDiagnostics(Boolean(options.quick));
+        ? await (await this.options.loadCloakBrowserDiagnostics()).collectDiagnostics(Boolean(options.quick), options.proxy)
+        : await this.collectWrapperDiagnostics(Boolean(options.quick), options.proxy);
       return normalizeCloakBrowserDiagnostics(diagnostics, checkedAt);
     } catch (error) {
       return {
@@ -1323,12 +1339,11 @@ export class BinaryService {
     for (const key of desiredCustom.keys()) this.appliedCustomEnvKeys.add(key);
   }
 
-  private async collectWrapperDiagnostics(quick: boolean): Promise<Record<string, unknown>> {
+  private async collectWrapperDiagnostics(quick: boolean, proxy?: string): Promise<Record<string, unknown>> {
     const settings = await this.readManagedSettings();
     const target = this.managedTarget(settings);
     const info = await this.readInfo();
-    const cacheRoot = this.managedCacheRoot();
-    const geoipPath = path.join(cacheRoot, "geoip", "GeoLite2-City.mmdb");
+    const geoipPath = await this.resolveGeoipDbPath();
 
     return {
       environment: {
@@ -1354,6 +1369,9 @@ export class BinaryService {
       geoip: {
         db_present: await pathExists(geoipPath),
         path: geoipPath,
+        // Snake case and the `exit_ip` key are upstream's, not a slip: normalizeCloakBrowserDiagnostics
+        // parses the wrapper's own payload too, so both producers have to speak the same shape.
+        resolved: proxy ? await this.resolveLaunchGeoForDiagnostics(proxy) : undefined,
       },
       modules: {
         "playwright-core": Boolean(PACKAGE_VERSIONS.playwrightCore),
@@ -1361,6 +1379,38 @@ export class BinaryService {
         "mmdb-lib": true,
       },
     };
+  }
+
+  // The GeoLite2 cache the wrapper itself downloads into and reads at launch. Everything that reports
+  // on it — the diagnostics row and the launch-geoip resolution — derives the path here, so a change to
+  // the cache layout cannot leave one of them pointing somewhere else.
+  //
+  // Async because managedCacheRoot() reads CLOAKBROWSER_CACHE_DIR, and nothing applies the managed env
+  // at boot: a caller that arrives before the first browser-core read would otherwise get the default
+  // cache dir while the operator has a custom one configured, and report the database as missing.
+  async resolveGeoipDbPath(): Promise<string> {
+    await this.applyBrowserCoreEnv();
+    return path.join(this.managedCacheRoot(), "geoip", "GeoLite2-City.mmdb");
+  }
+
+  // A resolution failure is reported inside the payload, never thrown: the rest of the diagnostics is
+  // still worth returning, and upstream's own `catch` writes `{ error }` here for the same reason.
+  private async resolveLaunchGeoForDiagnostics(proxy: string): Promise<Record<string, unknown>> {
+    if (!this.options.resolveLaunchGeo) {
+      return { error: "Launch GeoIP resolution is unavailable in this runtime." };
+    }
+    try {
+      const resolved = await this.options.resolveLaunchGeo(proxy);
+      if (resolved.error) return { error: resolved.error };
+      return {
+        exit_ip: resolved.exitIp ?? null,
+        timezone: resolved.timezone ?? null,
+        locale: resolved.locale ?? null,
+        unresolved_reason: resolved.unresolvedReason ?? null,
+      };
+    } catch (error) {
+      return { error: diagnosticsErrorMessage(error) };
+    }
   }
 
   private async withCustomBinaryOverride(info: CloakBinaryInfo): Promise<CloakBinaryInfo> {
@@ -1903,6 +1953,7 @@ function normalizeCloakBrowserDiagnostics(input: unknown, checkedAt: string): Cl
       ? {
           dbPresent: booleanValue(geoip.db_present),
           path: stringValue(geoip.path),
+          resolved: diagnosticsGeoIpResolved(geoip.resolved),
         }
       : undefined,
     fonts: fonts
@@ -1982,6 +2033,22 @@ function diagnosticsLicenseSessions(value: unknown): CloakBrowserDiagnosticsLice
   if (!sessions) return undefined;
   const active = nullableNumberValue(sessions.active);
   return active === undefined ? undefined : { active };
+}
+
+// Upstream writes this key only when the caller passed a proxy, and writes `exit_ip` in snake case like
+// the rest of its payload. The key is kept even when every field came back null: upstream does the same
+// and prints `(unknown)` for each, so collapsing it would turn "asked and got nothing" into "never
+// asked" — and leave an operator who just clicked resolve looking at an unchanged panel.
+function diagnosticsGeoIpResolved(value: unknown): CloakBrowserDiagnosticsGeoIpResolved | undefined {
+  const resolved = objectValue(value);
+  if (!resolved) return undefined;
+  return {
+    exitIp: stringValue(resolved.exit_ip),
+    timezone: stringValue(resolved.timezone),
+    locale: stringValue(resolved.locale),
+    error: stringValue(resolved.error),
+    unresolvedReason: launchGeoUnresolvedReasonFrom(resolved.unresolved_reason),
+  };
 }
 
 function stringArrayValue(value: unknown): string[] | undefined {

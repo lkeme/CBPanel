@@ -206,6 +206,98 @@ test("ProxyService rejects incomplete proxy settings", async () => {
   );
 });
 
+// The launch-geoip path answers a different question from check(): not "what does the trace provider
+// see" but "what would a geoip: true launch inject". So the timezone and locale must come from the
+// browser core's own GeoLite2 cache, and geoLookup — the third-party service check() enriches with —
+// must not be consulted at all.
+test("ProxyService resolves the timezone and locale a geoip launch would inject", async () => {
+  let geoLookupCalls = 0;
+  let requestedDbPath: string | undefined = "unset";
+  const service = new ProxyService({
+    checkTrace: async () => "ip=203.0.113.42\nloc=JP\ncolo=NRT\n",
+    geoLookup: async () => {
+      geoLookupCalls += 1;
+      return { countryCode: "US", timezone: "America/New_York" };
+    },
+    readLaunchGeo: async (dbPath, ip) => {
+      requestedDbPath = dbPath;
+      assert.equal(ip, "203.0.113.42");
+      return { timezone: "Asia/Tokyo", locale: "ja-JP", countryCode: "JP" };
+    },
+  });
+
+  const result = await service.resolveLaunchGeo({
+    enabled: true,
+    raw: "http://proxy.example.test:8080",
+  }, {
+    traceSettings: { ...DEFAULT_APP_SETTINGS.networkTrace, providerId: "cloudflare-www" },
+    geoipDbPath: "C:/cache/geoip/GeoLite2-City.mmdb",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.source, "launch-geoip");
+  assert.equal(result.ip, "203.0.113.42");
+  assert.equal(result.geo?.timezone, "Asia/Tokyo");
+  assert.equal(result.geo?.locale, "ja-JP");
+  assert.equal(result.geo?.countryCode, "JP");
+  assert.equal(result.geoUnresolvedReason, undefined);
+  assert.equal(requestedDbPath, "C:/cache/geoip/GeoLite2-City.mmdb");
+  assert.equal(geoLookupCalls, 0);
+  // The provider that produced the exit IP stays on the result, so the panel can still say where the
+  // IP came from even though the timezone/locale did not come from there.
+  assert.equal(result.trace?.providerId, "cloudflare-www");
+  assert.equal(result.trace?.loc, "JP");
+});
+
+// Upstream returns the exit IP with a missing database rather than failing, because the IP is a real
+// answer on its own — and behind a proxy it is the one that matters for WebRTC. `ok` therefore stays
+// true and the reason code explains the empty timezone/locale.
+test("ProxyService still reports the exit IP when the GeoIP database is absent", async () => {
+  const service = new ProxyService({
+    checkTrace: async () => "ip=198.51.100.7\n",
+    readLaunchGeo: async () => ({ reason: "geoip-db-missing" as const }),
+  });
+
+  const result = await service.resolveLaunchGeo({ enabled: true, raw: "http://proxy.example.test:8080" }, {
+    traceSettings: { ...DEFAULT_APP_SETTINGS.networkTrace, providerId: "cloudflare-www" },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.ip, "198.51.100.7");
+  assert.equal(result.geo, undefined);
+  assert.equal(result.geoUnresolvedReason, "geoip-db-missing");
+  assert.equal(result.error, undefined);
+});
+
+test("ProxyService normalizes an exit probe failure on the launch-geoip path too", async () => {
+  const service = new ProxyService({
+    checkTrace: async () => {
+      throw new Error("Socket closed");
+    },
+  });
+
+  await assert.rejects(
+    service.resolveLaunchGeo({ enabled: true, raw: "http://proxy.example.test:8080" }),
+    (error) => {
+      assert.equal((error as { code?: string }).code, "PROXY_CHECK_FAILED");
+      assert.match((error as Error).message, /代理连接已关闭/);
+      return true;
+    },
+  );
+});
+
+test("ProxyService rejects incomplete proxy settings on the launch-geoip path", async () => {
+  const service = new ProxyService();
+
+  await assert.rejects(
+    service.resolveLaunchGeo({ enabled: true, host: "", port: "" }),
+    (error) => {
+      assert.equal((error as { status?: number }).status, 400);
+      return true;
+    },
+  );
+});
+
 test("normalizeProxyCheckError hides low-level socket failures", () => {
   const error = normalizeProxyCheckError(new Error("Socket closed"));
 

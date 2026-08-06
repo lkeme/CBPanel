@@ -53,6 +53,7 @@ export function ProfileEditorDrawer(props: {
   proxyLibraryDraftIds: Record<string, string>;
   browserCoreMissing: boolean;
   running: boolean;
+  resolveProxyGeoip: () => Promise<void>;
   saveDraft: () => Promise<BrowserProfile | null>;
   saveDraftProxyToLibrary: () => Promise<void>;
   setActiveTab: (tab: ProfileEditorTab) => void;
@@ -152,6 +153,7 @@ export function ProfileEditorDrawer(props: {
                 proxyCheck={props.proxyCheck}
                 proxyLibraryDraftIds={props.proxyLibraryDraftIds}
                 checkProxy={props.checkProxy}
+                resolveProxyGeoip={props.resolveProxyGeoip}
                 saveDraftProxyToLibrary={props.saveDraftProxyToLibrary}
                 setDraftProxyLibraryId={props.setDraftProxyLibraryId}
                 setDraftProxyLocal={props.setDraftProxyLocal}
