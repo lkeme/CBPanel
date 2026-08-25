@@ -8,6 +8,7 @@ import { zipSync, unzipSync } from "fflate";
 import { ENVIRONMENT_PACKAGE_KIND } from "../../src/shared/environmentPackage";
 import { defaultProfile } from "../../src/shared/profile";
 import { SqlitePanelRepository } from "../storage/sqliteStore";
+import { ExtensionService } from "./extensionService";
 import { EnvironmentPackageService } from "./environmentPackageService";
 
 test("environment package export includes dependency closure and materializes proxy references", async () => {
@@ -39,6 +40,8 @@ test("environment package export includes dependency closure and materializes pr
   await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
   await fs.mkdir(path.join(directory, "browser-data", profile.id), { recursive: true });
   await fs.writeFile(path.join(directory, "browser-data", profile.id, "Cookies"), "cookie-db", "utf8");
+  await fs.mkdir(path.join(directory, "extension-runtimes", profile.id, extension.id), { recursive: true });
+  await fs.writeFile(path.join(directory, "extension-runtimes", profile.id, extension.id, "sentinel"), "derived", "utf8");
   const outputPath = path.join(directory, "export.cbpe");
 
   const result = await service.exportToPackage({ outputPath });
@@ -53,6 +56,7 @@ test("environment package export includes dependency closure and materializes pr
   assert.equal(manifest.kind, ENVIRONMENT_PACKAGE_KIND);
   assert.ok(entries[`browser-data/${profile.id}/Cookies`]);
   assert.ok(entries[`extensions/${extension.id}/manifest.json`]);
+  assert.equal(Object.keys(entries).some((entry) => entry.startsWith("extension-runtimes/")), false);
   assert.equal(data.environments[0].proxyId, undefined);
   assert.equal(data.environments[0].runtimeProfile.proxy.password, "secret");
   assert.equal(data.environments[0].runtimeProfile.proxy.raw, "http://user:secret@proxy.example.test:8080");
@@ -145,17 +149,26 @@ test("environment package import creates new environments and restores browser d
     (await targetRepository.listEnvironmentExtensionBindings(newEnvironmentId))[0]?.lifecycleRevision,
     sourceLifecycleRevision,
   );
+  const extensionService = new ExtensionService({
+    repository: targetRepository,
+    extensionCacheDir: path.join(targetDir, "extensions"),
+    browserDataDir: path.join(targetDir, "browser-data"),
+  });
+  const ensured = await extensionService.ensureExtensionsInstalled(newEnvironmentId);
+  assert.deepEqual(ensured.paths, [path.join(targetDir, "extensions", newExtensionId)]);
+  assert.match(ensured.warnings[0]?.reason ?? "", /固定插件身份/);
 
   targetRepository.close();
 });
 
-test("environment package import reuses installed extensions without copying orphan directories", async () => {
+test("environment package import reuses only a package with matching pinned on-disk identity", async () => {
   const sourceDir = await makeTempDir();
   const sourceRepository = new SqlitePanelRepository({ dataDir: sourceDir, seed: () => [] });
   const sourceService = makeService(sourceDir, sourceRepository);
   const sourceProfile = await sourceRepository.createProfile({ name: "Source Env", group: "Extensions" });
   const extensionHash = sha256Hex(Buffer.from("reusable-extension"));
-  const sourceExtensionDir = await writeExtensionDirectory(sourceDir, "source-extension");
+  const portableKey = "portable-manifest-key";
+  const sourceExtensionDir = await writeExtensionDirectory(sourceDir, "source-extension", { key: portableKey });
   const extension = await sourceRepository.createExtension({
     name: "Reusable Extension",
     sourceKind: "local-directory",
@@ -166,15 +179,18 @@ test("environment package import reuses installed extensions without copying orp
     installState: "installed",
     localPath: sourceExtensionDir,
     sha256: extensionHash,
+    manifestKey: portableKey,
   });
   await sourceRepository.bindExtensionToEnvironments(extension.id, [sourceProfile.id]);
+  await fs.mkdir(path.join(sourceDir, "browser-data", sourceProfile.id), { recursive: true });
+  await fs.writeFile(path.join(sourceDir, "browser-data", sourceProfile.id, "Preferences"), "state", "utf8");
   const packagePath = path.join(sourceDir, "reusable.cbpe");
   await sourceService.exportToPackage({ outputPath: packagePath });
   sourceRepository.close();
 
   const targetDir = await makeTempDir();
   const targetRepository = new SqlitePanelRepository({ dataDir: targetDir, seed: () => [] });
-  const existingExtensionDir = await writeExtensionDirectory(targetDir, "existing-extension");
+  const existingExtensionDir = await writeExtensionDirectory(targetDir, "existing-extension", { key: portableKey });
   const existingExtension = await targetRepository.createExtension({
     name: "Reusable Extension",
     sourceKind: "local-directory",
@@ -196,11 +212,51 @@ test("environment package import reuses installed extensions without copying orp
 
   const importedProfile = await targetRepository.getProfile(importedEnvironmentId);
   assert.deepEqual(importedProfile?.runtime.extensionPaths, [existingExtensionDir]);
-  assert.equal(
-    (await targetRepository.listEnvironmentExtensionBindings(importedEnvironmentId))[0]?.lifecycleRevision,
-    undefined,
-  );
+  const importedRevision = (await targetRepository.listEnvironmentExtensionBindings(importedEnvironmentId))[0]?.lifecycleRevision;
+  assert.match(importedRevision ?? "", /^preserve:binding-/);
+  assert.equal((await targetRepository.getExtension(existingExtension.id))?.manifestKey, portableKey);
 
+  targetRepository.close();
+});
+
+test("environment package import does not claim portable reuse for matching keyless packages", async () => {
+  const sourceDir = await makeTempDir();
+  const sourceRepository = new SqlitePanelRepository({ dataDir: sourceDir, seed: () => [] });
+  const sourceProfile = await sourceRepository.createProfile({ name: "Keyless Source" });
+  const packageHash = sha256Hex(Buffer.from("same-keyless-package"));
+  const sourceExtensionDir = await writeExtensionDirectory(sourceDir, "keyless-source");
+  const sourceExtension = await sourceRepository.createExtension({
+    name: "Keyless Extension",
+    sourceKind: "local-directory",
+    sourceUrl: sourceExtensionDir,
+    localPath: sourceExtensionDir,
+    installState: "installed",
+    sha256: packageHash,
+  });
+  await sourceRepository.bindExtensionToEnvironments(sourceExtension.id, [sourceProfile.id]);
+  const packagePath = path.join(sourceDir, "keyless.cbpe");
+  await makeService(sourceDir, sourceRepository).exportToPackage({ outputPath: packagePath });
+  sourceRepository.close();
+
+  const targetDir = await makeTempDir();
+  const targetRepository = new SqlitePanelRepository({ dataDir: targetDir, seed: () => [] });
+  const localPath = await writeExtensionDirectory(targetDir, "keyless-local");
+  const localExtension = await targetRepository.createExtension({
+    name: "Keyless Extension",
+    sourceKind: "local-directory",
+    sourceUrl: localPath,
+    localPath,
+    installState: "installed",
+    sha256: packageHash,
+  });
+
+  const imported = await makeService(targetDir, targetRepository).importFromPackage({ inputPath: packagePath });
+  const importedExtensionId = imported.idMap?.extensions[sourceExtension.id];
+
+  assert.ok(importedExtensionId);
+  assert.notEqual(importedExtensionId, localExtension.id);
+  assert.equal(imported.warnings.some((warning) => /no pinned portable identity/.test(warning)), true);
+  assert.equal(await fileExists(path.join(targetDir, "extensions", importedExtensionId, "manifest.json")), true);
   targetRepository.close();
 });
 
@@ -258,6 +314,45 @@ test("environment package import does not reuse a local extension pinned to a di
   targetRepository.close();
 });
 
+test("environment package import rolls back copied files when metadata names an unbound pair without a revision", async () => {
+  const sourceDir = await makeTempDir();
+  const sourceRepository = new SqlitePanelRepository({ dataDir: sourceDir, seed: () => [] });
+  const environment = await sourceRepository.createEnvironment({ name: "Invalid Binding Package" });
+  const extensionPath = await writeExtensionDirectory(sourceDir, "invalid-binding-extension");
+  const extension = await sourceRepository.createExtension({
+    name: "Invalid Binding Extension",
+    sourceKind: "local-directory",
+    sourceUrl: extensionPath,
+    localPath: extensionPath,
+    installState: "installed",
+  });
+  await sourceRepository.bindExtensionToEnvironments(extension.id, [environment.id]);
+  await fs.mkdir(path.join(sourceDir, "browser-data", environment.id), { recursive: true });
+  await fs.writeFile(path.join(sourceDir, "browser-data", environment.id, "sentinel"), "browser", "utf8");
+  const packagePath = path.join(sourceDir, "invalid-binding.cbpe");
+  await makeService(sourceDir, sourceRepository).exportToPackage({ outputPath: packagePath });
+  sourceRepository.close();
+
+  const entries = unzipSync(await fs.readFile(packagePath));
+  const data = JSON.parse(Buffer.from(entries["data.json"]).toString("utf8"));
+  data.environments[0].extensionIds = [];
+  delete data.environmentExtensionBindings[0].lifecycleRevision;
+  entries["data.json"] = Buffer.from(JSON.stringify(data));
+  await fs.writeFile(packagePath, zipSync(entries));
+
+  const targetDir = await makeTempDir();
+  const targetRepository = new SqlitePanelRepository({ dataDir: targetDir, seed: () => [] });
+  const targetService = makeService(targetDir, targetRepository);
+
+  await assert.rejects(targetService.importFromPackage({ inputPath: packagePath }), /unbound entity pair/);
+
+  assert.deepEqual(await fs.readdir(path.join(targetDir, "browser-data")).catch(() => []), []);
+  assert.deepEqual(await fs.readdir(path.join(targetDir, "extensions")).catch(() => []), []);
+  assert.deepEqual(await targetRepository.listEnvironments(), []);
+  assert.deepEqual(await targetRepository.listExtensions(), []);
+  targetRepository.close();
+});
+
 test("environment package import rejects unsafe archive paths", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
@@ -292,24 +387,33 @@ test("an import is in flight from the moment it starts until it settles, which i
   const service = makeService(directory, repository);
 
   assert.equal(service.hasImportInFlight(), false);
+  assert.equal(service.hasOperationInFlight(), false);
   const imported = service.startImport({ inputPath: path.join(directory, "missing.cbpe") });
   assert.equal(service.hasImportInFlight(), true);
+  assert.equal(service.hasOperationInFlight(), true);
 
   await settleOperation(service, imported.id);
 
   assert.equal(service.getOperation(imported.id)?.status, "failed");
   assert.equal(service.hasImportInFlight(), false);
+  assert.equal(service.hasOperationInFlight(), false);
 
   // An export is not reported: it only reads, and only the directories registered environments name, which
   // a prune never treats as candidates. Blocking on it would refuse a cleanup for no reason.
   const exported = service.startExport({ outputPath: path.join(directory, "in-flight.cbpe") });
   assert.equal(service.hasImportInFlight(), false);
+  assert.equal(service.hasOperationInFlight(), true);
   await settleOperation(service, exported.id);
+  assert.equal(service.hasOperationInFlight(), false);
 
   repository.close();
 });
 
-async function writeExtensionDirectory(root: string, name: string): Promise<string> {
+async function writeExtensionDirectory(
+  root: string,
+  name: string,
+  manifestPatch: Record<string, unknown> = {},
+): Promise<string> {
   const directory = path.join(root, name);
   await fs.mkdir(directory, { recursive: true });
   await fs.writeFile(
@@ -319,6 +423,7 @@ async function writeExtensionDirectory(root: string, name: string): Promise<stri
       name: "Test Extension",
       version: "1.0.0",
       permissions: ["storage"],
+      ...manifestPatch,
     }, null, 2)}\n`,
     "utf8",
   );

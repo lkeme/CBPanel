@@ -451,6 +451,15 @@ export class SqlitePanelRepository implements PanelRepository {
         if (!environmentId || !extensionId) {
           throw Object.assign(new Error("Environment package binding metadata references an unknown entity"), { status: 400 });
         }
+        const mappedPair = db.prepare(`
+          SELECT 1 AS present
+          FROM environment_extensions
+          WHERE environment_id = ? AND extension_id = ?
+          LIMIT 1
+        `).get(environmentId, extensionId);
+        if (!mappedPair) {
+          throw Object.assign(new Error("Environment package binding metadata references an unbound entity pair"), { status: 400 });
+        }
         if (!binding.lifecycleRevision) continue;
         db.prepare(`
           UPDATE environment_extensions
@@ -865,6 +874,11 @@ export class SqlitePanelRepository implements PanelRepository {
     const affected = environmentIds
       ? uniqueStrings(environmentIds)
       : rowsToIds(this.database(), "environment_extensions", "extension_id", id, "environment_id");
+    // Validate the complete explicit request before the first DELETE. Previously a mixed valid/missing
+    // list committed the valid deletion and only threw while building the response after COMMIT.
+    if (environmentIds) {
+      for (const environmentId of affected) this.getEnvironmentOrThrow(environmentId);
+    }
     const db = this.database();
     db.exec("BEGIN IMMEDIATE");
     try {

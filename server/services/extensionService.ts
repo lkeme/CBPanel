@@ -17,6 +17,7 @@ import {
   type ExtensionSourceEntity,
   type ExtensionSourceRefreshResult,
   type ExtensionSourceKind,
+  isPreserveLifecycleRevision,
 } from "../../src/shared/entities";
 import { createId, nowIso } from "../../src/shared/profile";
 import type { PanelRepository } from "../storage/types";
@@ -66,6 +67,11 @@ export type ExtensionLaunchWarning = {
 export type EnsureExtensionsResult = {
   paths: string[];
   warnings: ExtensionLaunchWarning[];
+};
+
+export type EnsureExtensionsOptions = {
+  /** False when an older browser close was not confirmed and may still hold the published runtime. */
+  allowRuntimeReplacement?: boolean;
 };
 
 type InUseGuardOptions = {
@@ -512,6 +518,22 @@ export class ExtensionService {
     }
     try {
       const manifest = await readManifestFromDirectory(extension.localPath);
+      const manifestKey = typeof manifest.key === "string" && manifest.key.trim() ? manifest.key.trim() : undefined;
+      if (
+        extension.directoryMode === "reference"
+        && extension.manifestKey
+        && manifestKey !== extension.manifestKey
+      ) {
+        const message = "Reference extension manifest.key does not match its pinned browser identity";
+        await this.options.repository.updateExtension(id, {
+          lastCheckedAt: nowIso(),
+          lastError: message,
+        });
+        throw Object.assign(new Error(message), {
+          status: 409,
+          code: "EXTENSION_REFERENCE_IDENTITY_MISMATCH",
+        });
+      }
       // The entity may claim a pinned identity that a half-finished install never wrote to
       // disk; check() runs before every launch, so heal the manifest here. Reference mode is
       // excluded because localPath is the user's own directory and must stay untouched.
@@ -525,21 +547,23 @@ export class ExtensionService {
       // points staying complete forever. Falling back to the stored value is a hard requirement: a
       // manifest that cannot be read must never blank an established digest.
       const manifestSha256 = (await readManifestFingerprint(extension.localPath)) ?? extension.manifestSha256;
-      const referenceManifestKey = extension.directoryMode === "reference"
-        && !extension.manifestKey
-        && typeof manifest.key === "string"
-        && manifest.key.trim()
-        ? manifest.key.trim()
+      const diskManifestKey = !extension.manifestKey
+        && manifestKey
+        ? manifestKey
         : undefined;
       return this.options.repository.updateExtension(id, {
         ...extensionFieldsFromManifest(manifest),
-        ...(referenceManifestKey ? { manifestKey: referenceManifestKey } : {}),
+        // Backups/packages can re-home a formerly unkeyed reference as a managed copy. If its files do
+        // contain a key, recover that identity for every directory mode; this is metadata-only and never
+        // mutates a user's reference directory.
+        ...(diskManifestKey ? { manifestKey: diskManifestKey } : {}),
         manifestSha256,
         installState: extension.installState === "update-available" ? "update-available" : "installed",
         lastCheckedAt: nowIso(),
         lastError: undefined,
       });
     } catch (error) {
+      if ((error as { code?: string }).code === "EXTENSION_REFERENCE_IDENTITY_MISMATCH") throw error;
       // No manifestSha256 in this patch on purpose: the failure branch must not carry the field at
       // all, otherwise an unreadable directory would clear the digest on its way to local-missing.
       return this.options.repository.updateExtension(id, {
@@ -697,7 +721,10 @@ export class ExtensionService {
     }
   }
 
-  async ensureExtensionsInstalled(environmentId: string): Promise<EnsureExtensionsResult> {
+  async ensureExtensionsInstalled(
+    environmentId: string,
+    options: EnsureExtensionsOptions = {},
+  ): Promise<EnsureExtensionsResult> {
     const environment = await this.options.repository.getEnvironment(environmentId);
     if (!environment) throw Object.assign(new Error("Environment does not exist"), { status: 404 });
 
@@ -733,10 +760,28 @@ export class ExtensionService {
         warnings.push({ name: installed.name, reason: "有可用更新未安装，本次启动仍使用当前版本" });
       }
       if (protectsLifecycle) {
+        if (!installed.manifestKey) {
+          paths.push(path.resolve(installed.localPath));
+          warnings.push({
+            name: installed.name,
+            reason: installed.directoryMode === "reference"
+              ? "引用模式扩展缺少稳定 manifest.key，无法启用启动生命周期保护；请重新以复制模式导入。"
+              : "扩展缺少稳定 manifest.key，启动生命周期保护已禁用，重复初始化仍可能发生；请先停止相关环境，再执行“固定身份”以固定插件身份。此操作会改变插件 ID，并可能使已有插件数据不可见。",
+          });
+          if (!this.options.activeEnvironmentIds?.().has(environmentId)) {
+            await this.runtimeService.removeExtension(installed.id, [environmentId]);
+          }
+          loaded.push(installed);
+          continue;
+        }
         const runtime = await this.runtimeService.materialize({
           environmentId,
           extension: installed,
           lifecycleRevision: bindingByExtensionId.get(installed.id)?.lifecycleRevision,
+          initialBehavior: isPreserveLifecycleRevision(bindingByExtensionId.get(installed.id)?.lifecycleRevision)
+            ? "preserve"
+            : undefined,
+          allowReplaceExisting: options.allowRuntimeReplacement,
         });
         paths.push(runtime.path);
         if (runtime.warning) warnings.push({ name: installed.name, reason: runtime.warning });

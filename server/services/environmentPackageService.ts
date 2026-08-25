@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import {
   normalizeExtensionBindingMetadata,
+  PRESERVE_LIFECYCLE_REVISION_PREFIX,
+  isPreserveLifecycleRevision,
   type BrowserEnvironment,
   type ExtensionEntity,
   type GroupEntity,
@@ -81,6 +83,11 @@ export class EnvironmentPackageService {
     return this.operations.get(id);
   }
 
+  hasOperationInFlight(): boolean {
+    return [...this.operations.values()].some((operation) =>
+      operation.status === "queued" || operation.status === "running");
+  }
+
   /**
    * Whether an import may already have copied browser data into place. `importFromPackage` copies every
    * `browser-data/<new id>` before `importEnvironmentPackage` writes the rows that name them, so in that
@@ -141,15 +148,44 @@ export class EnvironmentPackageService {
       }
 
       this.setProgress(operationId, "importing-database", 0, prepared.data.environments.length, "Writing imported environments.");
-      const importedBindings = prepared.data.environmentExtensionBindings?.map((binding) => ({
-        ...binding,
-        // The imported browser state describes the exported package revision, while a reused local
-        // entity may have an unrelated reinstall timestamp. Leave that pair legacy-null so the first
-        // protected launch rebases it as a preserve-mode startup instead of synthesizing an update.
-        lifecycleRevision: reusedExtensionIds.has(prepared.extensionIdMap[binding.extensionId] ?? "")
-          ? undefined
-          : binding.lifecycleRevision,
-      }));
+      const restoredBrowserState = new Set(copiedEnvironmentIds);
+      const importedBindings = (prepared.data.environmentExtensionBindings ?? []).map((binding) => {
+        const hasRestoredBrowserState = restoredBrowserState.has(prepared.environmentIdMap[binding.environmentId] ?? "");
+        const reusesLocalPackage = reusedExtensionIds.has(prepared.extensionIdMap[binding.extensionId] ?? "");
+        return {
+          ...binding,
+          // The imported browser state describes the exported package revision, while a reused local
+          // entity may have an unrelated reinstall timestamp. Give that pair a fresh, persistent token
+          // whose prefix asks the first protected launch to adopt the existing browser state. A null/
+          // "legacy" revision cannot express a second import after the stored state is already legacy.
+          lifecycleRevision: hasRestoredBrowserState && reusesLocalPackage
+            ? `${PRESERVE_LIFECYCLE_REVISION_PREFIX}${createId("binding")}`
+            // A preserve token exported without its browser state must not suppress this genuinely new
+            // installation. Rebase it to an ordinary new binding revision.
+            : !hasRestoredBrowserState && isPreserveLifecycleRevision(binding.lifecycleRevision)
+              ? createId("binding")
+              : binding.lifecycleRevision,
+        };
+      });
+      const importedBindingPairs = new Set(importedBindings.map((binding) =>
+        `${binding.environmentId}\0${binding.extensionId}`));
+      // Old packages omitted binding metadata. Reused extensions still need an explicit token: otherwise
+      // a copied browser profile whose stored lifecycle state is already "legacy" cannot distinguish this
+      // import's one-time preserve rebase from an actual package update.
+      for (const environment of prepared.data.environments) {
+        for (const extensionId of environment.extensionIds) {
+          const mappedExtensionId = prepared.extensionIdMap[extensionId];
+          const pair = `${environment.id}\0${extensionId}`;
+          const hasRestoredBrowserState = restoredBrowserState.has(prepared.environmentIdMap[environment.id] ?? "");
+          if (!hasRestoredBrowserState || !reusedExtensionIds.has(mappedExtensionId ?? "") || importedBindingPairs.has(pair)) continue;
+          importedBindings.push({
+            environmentId: environment.id,
+            extensionId,
+            lifecycleRevision: `${PRESERVE_LIFECYCLE_REVISION_PREFIX}${createId("binding")}`,
+          });
+          importedBindingPairs.add(pair);
+        }
+      }
       const imported = await this.options.repository.importEnvironmentPackage({
         ...prepared.data,
         environmentExtensionBindings: importedBindings,
@@ -348,7 +384,8 @@ export class EnvironmentPackageService {
       const data = parsePackageData(await readJsonArchiveFile(path.join(stagingDir, DATA_ENTRY)));
       validateManifestData(manifest, data);
       const environmentIdMap = Object.fromEntries(data.environments.map((environment) => [environment.id, createId()]));
-      const { extensionIdMap, reusedExtensionIds } = await this.resolveExtensionIdMap(data.extensions);
+      const { extensionIdMap, reusedExtensionIds, warnings: identityWarnings } =
+        await this.resolveExtensionIdMap(data.extensions, stagingDir);
       const browserDataCount = await countExistingDirectories(
         data.environments.map((environment) => path.join(stagingDir, "browser-data", environment.id)),
       );
@@ -356,7 +393,7 @@ export class EnvironmentPackageService {
         data.extensions.map((extension) => path.join(stagingDir, "extensions", extension.id)),
       );
       this.setProgress(operationId, "validating", data.environments.length, data.environments.length, "Validated environment package.");
-      const warnings = [];
+      const warnings = [...identityWarnings];
       if (manifest.counts.browserData > browserDataCount) {
         warnings.push("Package metadata references browser data that is missing from the archive.");
       }
@@ -401,42 +438,62 @@ export class EnvironmentPackageService {
     return operation;
   }
 
-  private async resolveExtensionIdMap(extensions: ExtensionEntity[]): Promise<{
+  private async resolveExtensionIdMap(extensions: ExtensionEntity[], stagingDir: string): Promise<{
     extensionIdMap: Record<string, string>;
     reusedExtensionIds: string[];
+    warnings: string[];
   }> {
-    const installed: ExtensionEntity[] = [];
+    const installed: Array<{ extension: ExtensionEntity; diskManifestKey: string }> = [];
     for (const extension of await this.options.repository.listExtensions()) {
       if (extension.installState !== "installed" || !extension.localPath) continue;
-      if (await pathExists(extension.localPath)) installed.push(extension);
+      if (!(await pathExists(extension.localPath))) continue;
+      const diskManifestKey = await readManifestKey(extension.localPath);
+      if (!diskManifestKey) continue;
+      const current = extension.manifestKey
+        ? extension
+        : await this.options.repository.updateExtension(extension.id, { manifestKey: diskManifestKey });
+      if (current.manifestKey !== diskManifestKey) continue;
+      installed.push({ extension: current, diskManifestKey });
     }
     const bySha = new Map(installed
-      .filter((extension) => extension.sha256)
-      .map((extension) => [extension.sha256 as string, extension]));
+      .filter(({ extension }) => extension.sha256)
+      .map((candidate) => [candidate.extension.sha256 as string, candidate]));
     const byStoreVersion = new Map(installed
-      .filter((extension) => extension.storeId)
-      .map((extension) => [`${extension.storeId}:${extension.version}`, extension]));
+      .filter(({ extension }) => extension.storeId)
+      .map((candidate) => [`${candidate.extension.storeId}:${candidate.extension.version}`, candidate]));
     const extensionIdMap: Record<string, string> = {};
     const reusedExtensionIds: string[] = [];
+    const warnings: string[] = [];
 
     for (const extension of extensions) {
+      const packageDiskManifestKey = await readManifestKey(path.join(stagingDir, "extensions", extension.id));
       const candidate = extension.sha256
         ? bySha.get(extension.sha256)
         : extension.storeId
           ? byStoreVersion.get(`${extension.storeId}:${extension.version}`)
           : undefined;
-      // A different pinned key means a different browser-side ID, so the imported browser data
-      // would reference an extension the reused local entity can never become.
-      const reusable = candidate?.manifestKey === extension.manifestKey ? candidate : undefined;
+      // Portable reuse is an identity decision, not merely a package-content match. Require the archive
+      // entity, archive bytes, local entity and local bytes to agree on one nonempty browser key.
+      const reusable = extension.manifestKey
+        && packageDiskManifestKey === extension.manifestKey
+        && candidate?.extension.manifestKey === extension.manifestKey
+        && candidate.diskManifestKey === extension.manifestKey
+        ? candidate.extension
+        : undefined;
       if (reusable) {
         extensionIdMap[extension.id] = reusable.id;
         reusedExtensionIds.push(reusable.id);
       } else {
         extensionIdMap[extension.id] = createId("extension");
+        if (!extension.manifestKey || !packageDiskManifestKey) {
+          warnings.push(`Extension ${extension.name} has no pinned portable identity and will be imported as a separate copy.`);
+        } else if (packageDiskManifestKey !== extension.manifestKey) {
+          warnings.push(`Extension ${extension.name} has mismatched package identity and will not reuse a local extension.`);
+        }
       }
     }
 
-    return { extensionIdMap, reusedExtensionIds };
+    return { extensionIdMap, reusedExtensionIds, warnings };
   }
 
   private markRunning(id: string, phase: string, message: string): void {
@@ -538,6 +595,15 @@ async function countExistingDirectories(paths: string[]): Promise<number> {
     if (await pathExists(itemPath)) count += 1;
   }
   return count;
+}
+
+async function readManifestKey(directory: string): Promise<string | undefined> {
+  try {
+    const manifest = JSON.parse(await fs.readFile(path.join(directory, "manifest.json"), "utf8")) as { key?: unknown };
+    return typeof manifest.key === "string" && manifest.key.trim() ? manifest.key.trim() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function ensurePackageExtension(filePath: string): string {

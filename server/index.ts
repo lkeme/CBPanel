@@ -96,6 +96,21 @@ function activeEnvironmentIds(): Set<string> {
   return sessionService.profileIdsHoldingRuntime();
 }
 
+function activeDataOperation(): string | undefined {
+  if (appBackupService.hasOperationInFlight()) return "执行应用备份或恢复";
+  if (environmentPackageService.hasOperationInFlight()) return "导入或导出环境包";
+  return undefined;
+}
+
+function assertNoDataOperationInFlight(): void {
+  const operation = activeDataOperation();
+  if (!operation) return;
+  throw Object.assign(new Error(`环境数据正在${operation}，请等它完成后再开始其他数据操作。`), {
+    status: 409,
+    code: "ENVIRONMENT_DATA_OPERATION_IN_PROGRESS",
+  });
+}
+
 const extensionService = new ExtensionService({
   repository,
   extensionCacheDir: path.join(DATA_DIR, "extensions"),
@@ -114,6 +129,7 @@ const sessionService = new SessionService({
   readSettings: () => repository.getSettings(),
   // Read at call time, not captured: an operation can start after a launch has begun.
   activeCacheOperation: () => binaryService.activeCacheOperation(),
+  activeDataOperation,
 });
 const proxyService = new ProxyService();
 const environmentDataService = new EnvironmentDataService({
@@ -586,6 +602,7 @@ async function createApp(): Promise<express.Express> {
         return [
           ...environments.map((environment) => environment.id),
           ...trashed.map((item) => item.environment.id),
+          ...sessionService.profileIdsHoldingRuntime(),
         ];
       }));
     } catch (error) {
@@ -688,6 +705,7 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/environment-packages/export", (request, response) => {
     try {
+      assertNoDataOperationInFlight();
       const outputPath = typeof request.body?.outputPath === "string" ? request.body.outputPath.trim() : "";
       if (!outputPath) throw Object.assign(new Error("Environment package output path is required."), { status: 400 });
       const environmentIds = Array.isArray(request.body?.environmentIds)
@@ -702,6 +720,7 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/environment-packages/import", (request, response) => {
     try {
+      assertNoDataOperationInFlight();
       const inputPath = typeof request.body?.inputPath === "string" ? request.body.inputPath.trim() : "";
       if (!inputPath) throw Object.assign(new Error("Environment package input path is required."), { status: 400 });
       const operation = environmentPackageService.startImport({ inputPath });
@@ -722,6 +741,7 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/app-backups/export", (request, response) => {
     try {
+      assertNoDataOperationInFlight();
       const outputPath = typeof request.body?.outputPath === "string" ? request.body.outputPath.trim() : "";
       if (!outputPath) throw Object.assign(new Error("App backup output path is required."), { status: 400 });
       const operation = appBackupService.startExport({ outputPath });
@@ -733,6 +753,7 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/app-backups/restore", (request, response) => {
     try {
+      assertNoDataOperationInFlight();
       const inputPath = typeof request.body?.inputPath === "string" ? request.body.inputPath.trim() : "";
       if (!inputPath) throw Object.assign(new Error("App backup input path is required."), { status: 400 });
       const operation = appBackupService.startRestore({ inputPath });

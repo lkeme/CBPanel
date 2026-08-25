@@ -79,6 +79,11 @@ export class AppBackupService {
     return this.operations.get(id);
   }
 
+  hasOperationInFlight(): boolean {
+    return [...this.operations.values()].some((operation) =>
+      operation.status === "queued" || operation.status === "running");
+  }
+
   /**
    * Whether a restore may already have written into the managed directories. `restoreFilesystem` replaces
    * `browser-data` wholesale before `restoreFullBackupData` commits the rows, so between those two steps
@@ -115,7 +120,12 @@ export class AppBackupService {
     const inputPath = path.resolve(request.inputPath);
     const prepared = await this.prepareRestore(inputPath, operationId);
     const rollback = await this.createRollbackSnapshot(operationId);
+    let publicationStarted = false;
     try {
+      // Preparation and rollback snapshotting are both asynchronous. Re-read the runtime hold at the
+      // publication boundary so a browser that appeared in that interval cannot have its files replaced.
+      this.assertNoActiveEnvironment("Stop running environments before restoring a full backup.");
+      publicationStarted = true;
       await this.restoreFilesystem(prepared, operationId);
       this.setProgress(operationId, "restoring-database", 0, prepared.data.environments.length, "Replacing app data.");
       await this.options.repository.restoreFullBackupData(prepared.data);
@@ -126,7 +136,9 @@ export class AppBackupService {
         warnings: prepared.warnings,
       };
     } catch (error) {
-      await this.rollbackRestore(rollback).catch(() => undefined);
+      // The boundary recheck can fail before a single managed path was touched. Rolling back in that case
+      // is itself a destructive publication under the browser that just appeared.
+      if (publicationStarted) await this.rollbackRestore(rollback).catch(() => undefined);
       throw error;
     } finally {
       await Promise.all([

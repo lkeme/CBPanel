@@ -3,11 +3,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { zipSync } from "fflate";
+import { unzipSync, zipSync } from "fflate";
 import { APP_BACKUP_KIND } from "../../src/shared/appBackup";
 import { defaultProfile } from "../../src/shared/profile";
 import { SqlitePanelRepository } from "../storage/sqliteStore";
 import { AppBackupService } from "./appBackupService";
+import { ExtensionService } from "./extensionService";
 
 test("app backup export and restore replaces app data, browser data, and extension files", async () => {
   const directory = await makeTempDir();
@@ -50,12 +51,15 @@ test("app backup export and restore replaces app data, browser data, and extensi
   assert.ok(lifecycleRevision);
   await fs.mkdir(path.join(directory, "browser-data", profile.id), { recursive: true });
   await fs.writeFile(path.join(directory, "browser-data", profile.id, "Cookies"), "cookie-db", "utf8");
+  await fs.mkdir(path.join(directory, "extension-runtimes", profile.id, extension.id), { recursive: true });
+  await fs.writeFile(path.join(directory, "extension-runtimes", profile.id, extension.id, "sentinel"), "derived", "utf8");
   const backupPath = path.join(directory, "backup.cbpb");
 
   const exported = await service.exportToBackup({ outputPath: backupPath });
   assert.equal(exported.counts.environments, 1);
   assert.equal(exported.counts.browserData, 1);
   assert.equal(exported.counts.runtimeExtensions, 1);
+  assert.equal(Object.keys(unzipSync(await fs.readFile(backupPath))).some((entry) => entry.startsWith("extension-runtimes/")), false);
 
   await repository.createProfile({ name: "Will Be Removed" });
   await fs.rm(path.join(directory, "browser-data", profile.id), { recursive: true, force: true });
@@ -123,6 +127,14 @@ test("app backup restore warns that a reference-mode extension is re-homed into 
   assert.equal(restoredExtension?.directoryMode, "copy");
   assert.equal(restoredExtension?.localPath, path.join(directory, "extensions", extension.id));
   assert.equal(restored.warnings.some((warning) => warning.includes("Dev Extension")), true);
+  const extensionService = new ExtensionService({
+    repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    browserDataDir: path.join(directory, "browser-data"),
+  });
+  const ensured = await extensionService.ensureExtensionsInstalled(profile.id);
+  assert.deepEqual(ensured.paths, [path.join(directory, "extensions", extension.id)]);
+  assert.match(ensured.warnings[0]?.reason ?? "", /固定插件身份/);
 
   repository.close();
 });
@@ -197,6 +209,37 @@ test("app backup restore rejects unsafe archive paths", async () => {
   repository.close();
 });
 
+test("app backup restore rechecks runtime holds immediately before publishing restored files", async (context) => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const profile = await repository.createProfile({ name: "Restore Publication Race" });
+  await fs.mkdir(path.join(directory, "browser-data", profile.id), { recursive: true });
+  await fs.writeFile(path.join(directory, "browser-data", profile.id, "sentinel"), "backup", "utf8");
+  const backupPath = path.join(directory, "race.cbpb");
+  await makeService(directory, repository).exportToBackup({ outputPath: backupPath });
+  await fs.writeFile(path.join(directory, "browser-data", profile.id, "sentinel"), "current", "utf8");
+  let holdReads = 0;
+  const restore = new AppBackupService({
+    repository,
+    browserDataDir: path.join(directory, "browser-data"),
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionRuntimeDir: path.join(directory, "extension-runtimes"),
+    activeEnvironmentIds: () => (++holdReads >= 2 ? new Set([profile.id]) : new Set()),
+  });
+  let databaseRestoreCalls = 0;
+  context.mock.method(repository, "restoreFullBackupData", async () => {
+    databaseRestoreCalls += 1;
+  });
+
+  await assert.rejects(
+    restore.restoreFromBackup({ inputPath: backupPath }),
+    (error) => (error as { status?: number }).status === 409,
+  );
+  assert.equal(databaseRestoreCalls, 0);
+  assert.equal(await fs.readFile(path.join(directory, "browser-data", profile.id, "sentinel"), "utf8"), "current");
+  repository.close();
+});
+
 // What the browser-data prune has to be able to see. restoreFilesystem replaces `browser-data` while the
 // rows still describe the old data, so a prune running in that window finds every restored directory
 // unaccounted for and deletes it. The window opens before the first await, which is why the assertion sits
@@ -208,19 +251,24 @@ test("a restore is in flight from the moment it starts until it settles, which i
   const service = makeService(directory, repository);
 
   assert.equal(service.hasRestoreInFlight(), false);
+  assert.equal(service.hasOperationInFlight(), false);
   const restore = service.startRestore({ inputPath: path.join(directory, "missing.cbpb") });
   assert.equal(service.hasRestoreInFlight(), true);
+  assert.equal(service.hasOperationInFlight(), true);
 
   await settleOperation(service, restore.id);
 
   assert.equal(service.getOperation(restore.id)?.status, "failed");
   assert.equal(service.hasRestoreInFlight(), false);
+  assert.equal(service.hasOperationInFlight(), false);
 
   // An export is not reported: it only reads, and only the directories registered environments name, which
   // a prune never treats as candidates. Blocking on it would refuse a cleanup for no reason.
   const exported = service.startExport({ outputPath: path.join(directory, "in-flight.cbpb") });
   assert.equal(service.hasRestoreInFlight(), false);
+  assert.equal(service.hasOperationInFlight(), true);
   await settleOperation(service, exported.id);
+  assert.equal(service.hasOperationInFlight(), false);
 
   repository.close();
 });

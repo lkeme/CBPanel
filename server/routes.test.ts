@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import type net from "node:net";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test, { after, before } from "node:test";
 import type { BrowserEnvironment, TrashEnvironment } from "../src/shared/entities";
 import type { SessionSummary } from "../src/shared/profile";
@@ -162,8 +163,61 @@ test("emptying the trash answers exactly { deleted, dataRemoved, warnings }", as
   assert.deepEqual(await trashedIds(), []);
 });
 
+test("a prune preserves a runtime-held id after clearing the last database row that names it", async () => {
+  const held = await startPanelHarness();
+  let stalled: StalledDownload | undefined;
+  let launching: Promise<unknown> = Promise.resolve();
+  try {
+    stalled = await startStalledDownload();
+    const environment = jsonBody<BrowserEnvironment>(await held.request("POST", "/api/environments", {
+      name: "Held After Trash Clear",
+    }));
+    const extension = jsonBody<{ id: string }>(await held.request("POST", "/api/extensions", {
+      name: "Held Runtime Extension",
+      sourceKind: "remote-zip",
+      sourceUrl: stalled.url,
+      sha256: "c".repeat(64),
+    }));
+    assert.equal((await held.request("POST", `/api/extensions/${extension.id}/bind-environments`, {
+      environmentIds: [environment.id],
+    })).status, 200);
+    await fs.mkdir(path.join(held.dataDir, "browser-data", environment.id), { recursive: true });
+    await fs.writeFile(path.join(held.dataDir, "browser-data", environment.id, "Cookies"), "held", "utf8");
+    await fs.mkdir(path.join(held.dataDir, "extension-runtimes", environment.id, extension.id), { recursive: true });
+    await fs.writeFile(path.join(held.dataDir, "extension-runtimes", environment.id, extension.id, "sentinel"), "held", "utf8");
+    await fs.mkdir(path.join(held.dataDir, "browser-data", "orphan-next-to-held"), { recursive: true });
+
+    launching = held.request("POST", `/api/environments/${environment.id}/launch`).catch(() => undefined);
+    await waitForSessionStatus(held, environment.id, "launching");
+
+    // Stage the same state a close-unconfirmed session can reach, without spending six seconds on the
+    // production close timeout: the session still holds files while its environment is now in trash.
+    const database = new DatabaseSync(path.join(held.dataDir, "cbpanel.sqlite"));
+    database.prepare("UPDATE browser_environments SET deleted_at = ?, delete_reason = ? WHERE id = ?")
+      .run(new Date().toISOString(), "test", environment.id);
+    database.close();
+
+    const cleared = await held.request("DELETE", "/api/trash/environments");
+    assert.equal(cleared.status, 200);
+    assert.equal(await pathExists(path.join(held.dataDir, "browser-data", environment.id, "Cookies")), true);
+    assert.equal(await pathExists(path.join(held.dataDir, "extension-runtimes", environment.id, extension.id, "sentinel")), true);
+
+    const pruned = await held.request("POST", "/api/storage/browser-data/prune");
+    assert.equal(pruned.status, 200);
+    assert.ok(cleanupResult(pruned).removed.includes("orphan-next-to-held"));
+    assert.ok(!cleanupResult(pruned).removed.includes(environment.id));
+    assert.equal(await pathExists(path.join(held.dataDir, "browser-data", environment.id, "Cookies")), true);
+    assert.equal(await pathExists(path.join(held.dataDir, "extension-runtimes", environment.id, extension.id, "sentinel")), true);
+  } finally {
+    await stalled?.close();
+    await held.dispose();
+    await launching;
+  }
+});
+
 test("the browser-data prune refuses with 409 while an environment package import is in flight", async () => {
   const orphanId = "orphan-during-import";
+  const launchCandidate = await createEnvironment("Blocked During Data Import");
   await writeBrowserData(orphanId);
   // An import whose window is wide enough to send a request into. `extractZipArchive` streams the whole
   // input through the unzip in chunks, yielding to the event loop between them, so a file of this size
@@ -175,10 +229,21 @@ test("the browser-data prune refuses with 409 while an environment package impor
 
   const started = await panel.request("POST", "/api/environment-packages/import", { inputPath: archivePath });
   const refused = await panel.request("POST", "/api/storage/browser-data/prune");
+  const launchRefused = await panel.request("POST", `/api/environments/${launchCandidate.id}/launch`);
+  const backupRefused = await panel.request("POST", "/api/app-backups/export", {
+    outputPath: path.join(panel.dataDir, "overlapping.cbpb"),
+  });
+  const packageRefused = await panel.request("POST", "/api/environment-packages/export", {
+    outputPath: path.join(panel.dataDir, "overlapping.cbpe"),
+  });
 
   assert.equal(started.status, 202);
   assert.equal(refused.status, 409);
   assert.equal((refused.body as { code?: string }).code, "ENVIRONMENT_DATA_OPERATION_IN_PROGRESS");
+  for (const response of [launchRefused, backupRefused, packageRefused]) {
+    assert.equal(response.status, 409);
+    assert.equal((response.body as { code?: string }).code, "ENVIRONMENT_DATA_OPERATION_IN_PROGRESS");
+  }
   // The point of the refusal: an import copies `browser-data/<new id>` into place before the rows that
   // name it exist, so in that window every directory it has laid down looks exactly like this orphan.
   assert.equal(await pathExists(browserDataPath(orphanId, "Cookies")), true);

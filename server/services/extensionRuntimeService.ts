@@ -4,7 +4,7 @@ import path from "node:path";
 import type { ExtensionEntity } from "../../src/shared/entities";
 import { pathExists } from "./archiveUtils";
 
-export const EXTENSION_LIFECYCLE_INJECTOR_VERSION = 1;
+export const EXTENSION_LIFECYCLE_INJECTOR_VERSION = 2;
 export const EXTENSION_LIFECYCLE_NAMESPACE = "__cbpanel_lifecycle__";
 
 type RuntimeManifest = {
@@ -20,12 +20,16 @@ type RuntimeManifest = {
   [key: string]: unknown;
 };
 
-type InitialBehavior = "install" | "preserve";
+export type ExtensionRuntimeInitialBehavior = "install" | "preserve";
 
 export type ExtensionRuntimeMaterializeInput = {
   environmentId: string;
   extension: ExtensionEntity;
   lifecycleRevision?: string;
+  /** Overrides legacy browser-state inference for restore/import rebases. */
+  initialBehavior?: ExtensionRuntimeInitialBehavior;
+  /** Allows first creation but rejects replacement when a prior browser close is unconfirmed. */
+  allowReplaceExisting?: boolean;
 };
 
 export type ExtensionRuntimeMaterializeResult = {
@@ -44,22 +48,54 @@ type RuntimeConfig = {
   version: string;
   packageRevision: string;
   bindingRevision: string;
-  initialBehavior: InitialBehavior;
+  initialBehavior: ExtensionRuntimeInitialBehavior;
 };
 
 const CONFIG_FILE = "config.js";
 const BOOTSTRAP_FILE = "bootstrap.js";
 const SIGNATURE_FILE = "materialization.json";
 const CLASSIC_ORIGINAL_WORKER_FILE = "__cbpanel_lifecycle_original__.js";
+const MATERIALIZATION_METADATA_PATH = `${EXTENSION_LIFECYCLE_NAMESPACE}/${SIGNATURE_FILE}`;
 
 /**
  * Creates disposable per-environment extension copies. Only these copies are adapted; the canonical
  * cache and reference-mode source directories are read-only inputs.
  */
 export class ExtensionRuntimeService {
+  /** Serializes preflight/launch races for the same derived directory without blocking other pairs. */
+  private readonly materializations = new Map<string, Promise<void>>();
+  /** Keeps destructive environment sweeps from crossing a publish that starts immediately after a probe. */
+  private readonly environmentOperations = new Map<string, Promise<void>>();
+
   constructor(private readonly options: ExtensionRuntimeServiceOptions) {}
 
   async materialize(input: ExtensionRuntimeMaterializeInput): Promise<ExtensionRuntimeMaterializeResult> {
+    const outputDir = this.resolveRuntimePath(input.environmentId, input.extension.id);
+    assertPathHasNoComma(outputDir);
+    const previous = this.materializations.get(outputDir) ?? Promise.resolve();
+    const work = previous.then(
+      () => this.runEnvironmentOperation(
+        path.dirname(outputDir),
+        () => this.materializeOnce(input, outputDir),
+      ),
+      () => this.runEnvironmentOperation(
+        path.dirname(outputDir),
+        () => this.materializeOnce(input, outputDir),
+      ),
+    );
+    const tail = work.then(() => undefined, () => undefined);
+    this.materializations.set(outputDir, tail);
+    try {
+      return await work;
+    } finally {
+      if (this.materializations.get(outputDir) === tail) this.materializations.delete(outputDir);
+    }
+  }
+
+  private async materializeOnce(
+    input: ExtensionRuntimeMaterializeInput,
+    outputDir: string,
+  ): Promise<ExtensionRuntimeMaterializeResult> {
     const sourcePath = path.resolve(input.extension.localPath ?? "");
     if (!input.extension.localPath) throw new Error(`Extension ${input.extension.name} has no local path`);
     assertPathHasNoComma(sourcePath);
@@ -84,9 +120,9 @@ export class ExtensionRuntimeService {
       });
     }
 
-    const initialBehavior = input.lifecycleRevision
+    const initialBehavior = input.initialBehavior ?? (input.lifecycleRevision
       ? "install"
-      : await this.legacyInitialBehavior(input.environmentId);
+      : await this.legacyInitialBehavior(input.environmentId));
     const config: RuntimeConfig = {
       schemaVersion: 1,
       version: input.extension.version,
@@ -97,22 +133,47 @@ export class ExtensionRuntimeService {
     const sourceRevision = input.extension.directoryMode === "reference"
       ? await fingerprintDirectory(sourcePath)
       : input.extension.manifestSha256 ?? input.extension.lastInstalledAt ?? input.extension.version;
+    if (input.extension.directoryMode === "reference") {
+      const verifiedManifest = await readRuntimeManifest(sourcePath);
+      if (JSON.stringify(verifiedManifest) !== JSON.stringify(manifest)) throw sourceChangedDuringMaterialization();
+    }
     const signature = materializationSignature(manifest, config, background, sourceRevision);
-    const outputDir = this.resolveRuntimePath(input.environmentId, input.extension.id);
-    assertPathHasNoComma(outputDir);
+    await assertRuntimePathIsSafe(this.options.runtimeDir, outputDir, "extension runtime output");
     if (await hasMaterializationSignature(outputDir, signature)) {
+      // Integrity verification can take long enough for a reference-mode source to change after its
+      // signature was computed. Recheck at the reuse boundary so this launch never selects runtime A
+      // after the user has already changed the canonical source to B.
+      if (
+        input.extension.directoryMode === "reference"
+        && await fingerprintDirectory(sourcePath) !== sourceRevision
+      ) throw sourceChangedDuringMaterialization();
       return { path: outputDir, protected: true };
     }
+    if (input.allowReplaceExisting === false && await lstatIfExists(outputDir)) throw replacementForbidden();
 
-    await this.publishRuntimeCopy(sourcePath, outputDir, manifest, config, background, signature);
+    await this.publishRuntimeCopy(
+      sourcePath,
+      outputDir,
+      manifest,
+      config,
+      background,
+      signature,
+      input.extension.directoryMode === "reference" ? sourceRevision : undefined,
+      input.allowReplaceExisting !== false,
+    );
     return { path: outputDir, protected: true };
   }
 
   async removeEnvironment(environmentId: string): Promise<boolean> {
     const directory = this.resolveEnvironmentPath(environmentId);
-    if (!(await pathExists(directory))) return false;
-    await fs.rm(directory, { recursive: true, force: true });
-    return true;
+    await assertRuntimePathIsSafe(this.options.runtimeDir, directory, "extension runtime environment");
+    if (this.hasActiveMaterializationInEnvironment(directory)) return false;
+    return this.runEnvironmentOperation(directory, async () => {
+      if (!(await pathExists(directory))) return false;
+      await assertDirectoryHasNoSymbolicLinkChildren(directory, "extension runtime output");
+      await fs.rm(directory, { recursive: true, force: true });
+      return true;
+    });
   }
 
   async removeExtension(
@@ -122,6 +183,7 @@ export class ExtensionRuntimeService {
   ): Promise<void> {
     assertDirectChildName(extensionId, "extension id");
     const requested = environmentIds ? new Set(environmentIds) : undefined;
+    await assertRuntimePathIsSafe(this.options.runtimeDir, this.options.runtimeDir, "extension runtime root");
     let entries: import("node:fs").Dirent[];
     try {
       entries = await fs.readdir(this.options.runtimeDir, { withFileTypes: true });
@@ -130,16 +192,28 @@ export class ExtensionRuntimeService {
     }
     for (const entry of entries) {
       if (
+        entry.isSymbolicLink()
+        && !excludedEnvironmentIds.has(entry.name)
+        && (!requested || requested.has(entry.name))
+      ) throw unsafeRuntimePath("extension runtime environment");
+      if (
         !entry.isDirectory()
         || excludedEnvironmentIds.has(entry.name)
         || (requested && !requested.has(entry.name))
       ) continue;
       assertDirectChildName(entry.name, "environment id");
-      await fs.rm(path.join(this.options.runtimeDir, entry.name, extensionId), { recursive: true, force: true }).catch(() => undefined);
+      const outputDir = this.resolveRuntimePath(entry.name, extensionId);
+      if (this.materializations.has(outputDir)) continue;
+      const environmentDir = path.dirname(outputDir);
+      await this.runEnvironmentOperation(environmentDir, async () => {
+        await assertRuntimePathIsSafe(this.options.runtimeDir, outputDir, "extension runtime output");
+        await fs.rm(outputDir, { recursive: true, force: true }).catch(() => undefined);
+      });
     }
   }
 
   async sweepArtifacts(): Promise<void> {
+    await assertRuntimePathIsSafe(this.options.runtimeDir, this.options.runtimeDir, "extension runtime root");
     let environments: import("node:fs").Dirent[];
     try {
       environments = await fs.readdir(this.options.runtimeDir, { withFileTypes: true });
@@ -147,18 +221,28 @@ export class ExtensionRuntimeService {
       return;
     }
     for (const environment of environments) {
+      if (environment.isSymbolicLink()) throw unsafeRuntimePath("extension runtime environment");
       if (!environment.isDirectory()) continue;
       const environmentDir = path.join(this.options.runtimeDir, environment.name);
-      let entries: import("node:fs").Dirent[];
-      try {
-        entries = await fs.readdir(environmentDir, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const entry of entries) {
-        if (!entry.isDirectory() || !isSwapArtifact(entry.name)) continue;
-        await fs.rm(path.join(environmentDir, entry.name), { recursive: true, force: true }).catch(() => undefined);
-      }
+      if (this.hasActiveMaterializationInEnvironment(environmentDir)) continue;
+      await this.runEnvironmentOperation(environmentDir, async () => {
+        await assertRuntimePathIsSafe(this.options.runtimeDir, environmentDir, "extension runtime environment");
+        let entries: import("node:fs").Dirent[];
+        try {
+          entries = await fs.readdir(environmentDir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const entry of entries) {
+          if (entry.isSymbolicLink() && isSwapArtifact(entry.name)) {
+            throw unsafeRuntimePath("extension runtime swap artifact");
+          }
+          if (!entry.isDirectory() || !isSwapArtifact(entry.name)) continue;
+          const artifactPath = path.join(environmentDir, entry.name);
+          await assertRuntimePathIsSafe(this.options.runtimeDir, artifactPath, "extension runtime swap artifact");
+          await fs.rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
+        }
+      });
     }
   }
 
@@ -166,6 +250,7 @@ export class ExtensionRuntimeService {
     bindingsByEnvironment: ReadonlyMap<string, ReadonlySet<string>>,
     holdingRuntime: ReadonlySet<string> = new Set(),
   ): Promise<void> {
+    await assertRuntimePathIsSafe(this.options.runtimeDir, this.options.runtimeDir, "extension runtime root");
     let environments: import("node:fs").Dirent[];
     try {
       environments = await fs.readdir(this.options.runtimeDir, { withFileTypes: true });
@@ -173,27 +258,42 @@ export class ExtensionRuntimeService {
       return;
     }
     for (const environment of environments) {
+      if (environment.isSymbolicLink() && !holdingRuntime.has(environment.name)) {
+        throw unsafeRuntimePath("extension runtime environment");
+      }
       if (!environment.isDirectory() || holdingRuntime.has(environment.name)) continue;
-      const allowed = bindingsByEnvironment.get(environment.name);
-      if (!allowed) {
-        await fs.rm(path.join(this.options.runtimeDir, environment.name), { recursive: true, force: true }).catch(() => undefined);
-        continue;
-      }
       const environmentDir = path.join(this.options.runtimeDir, environment.name);
-      let extensions: import("node:fs").Dirent[];
-      try {
-        extensions = await fs.readdir(environmentDir, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const extension of extensions) {
-        if (!extension.isDirectory() || isSwapArtifact(extension.name) || allowed.has(extension.name)) continue;
-        await fs.rm(path.join(environmentDir, extension.name), { recursive: true, force: true }).catch(() => undefined);
-      }
+      if (this.hasActiveMaterializationInEnvironment(environmentDir)) continue;
+      await this.runEnvironmentOperation(environmentDir, async () => {
+        await assertRuntimePathIsSafe(this.options.runtimeDir, environmentDir, "extension runtime environment");
+        const allowed = bindingsByEnvironment.get(environment.name);
+        if (!allowed) {
+          await assertDirectoryHasNoSymbolicLinkChildren(environmentDir, "extension runtime output");
+          await fs.rm(environmentDir, { recursive: true, force: true }).catch(() => undefined);
+          return;
+        }
+        let extensions: import("node:fs").Dirent[];
+        try {
+          extensions = await fs.readdir(environmentDir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const extension of extensions) {
+          if (
+            extension.isSymbolicLink()
+            && !isSwapArtifact(extension.name)
+            && !allowed.has(extension.name)
+          ) throw unsafeRuntimePath("extension runtime output");
+          if (!extension.isDirectory() || isSwapArtifact(extension.name) || allowed.has(extension.name)) continue;
+          const outputDir = path.join(environmentDir, extension.name);
+          await assertRuntimePathIsSafe(this.options.runtimeDir, outputDir, "extension runtime output");
+          await fs.rm(outputDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+      });
     }
   }
 
-  private async legacyInitialBehavior(environmentId: string): Promise<InitialBehavior> {
+  private async legacyInitialBehavior(environmentId: string): Promise<ExtensionRuntimeInitialBehavior> {
     const userDataDir = path.join(this.options.browserDataDir, assertDirectChildName(environmentId, "environment id"));
     const evidence = [
       path.join(userDataDir, "Local State"),
@@ -216,6 +316,27 @@ export class ExtensionRuntimeService {
     );
   }
 
+  private hasActiveMaterializationInEnvironment(environmentDir: string): boolean {
+    for (const outputDir of this.materializations.keys()) {
+      if (path.dirname(outputDir) === environmentDir) return true;
+    }
+    return false;
+  }
+
+  private async runEnvironmentOperation<T>(environmentDir: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.environmentOperations.get(environmentDir) ?? Promise.resolve();
+    const work = previous.then(operation, operation);
+    const tail = work.then(() => undefined, () => undefined);
+    this.environmentOperations.set(environmentDir, tail);
+    try {
+      return await work;
+    } finally {
+      if (this.environmentOperations.get(environmentDir) === tail) {
+        this.environmentOperations.delete(environmentDir);
+      }
+    }
+  }
+
   private async publishRuntimeCopy(
     sourcePath: string,
     outputDir: string,
@@ -223,24 +344,44 @@ export class ExtensionRuntimeService {
     config: RuntimeConfig,
     background: BackgroundAdapter,
     signature: string,
+    expectedSourceRevision: string | undefined,
+    allowReplaceExisting: boolean,
   ): Promise<void> {
     const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const tempDir = `${outputDir}.tmp-${suffix}`;
     const asideDir = `${outputDir}.old-${suffix}`;
+    await assertRuntimePathIsSafe(this.options.runtimeDir, outputDir, "extension runtime output");
     await fs.mkdir(path.dirname(outputDir), { recursive: true });
-    await fs.rm(tempDir, { recursive: true, force: true });
+    await assertRuntimePathIsSafe(this.options.runtimeDir, path.dirname(outputDir), "extension runtime environment");
+    if (await lstatIfExists(tempDir)) throw new Error(`Extension runtime temporary path already exists: ${tempDir}`);
+    if (await lstatIfExists(asideDir)) throw new Error(`Extension runtime aside path already exists: ${asideDir}`);
     let movedAside = false;
     try {
       await fs.cp(sourcePath, tempDir, { recursive: true });
-      await injectLifecycleAdapter(tempDir, manifest, config, background, signature);
+      await assertTemporaryMutationPathsAreSafe(tempDir, background);
+      if (expectedSourceRevision !== undefined && await fingerprintDirectory(tempDir) !== expectedSourceRevision) {
+        throw sourceChangedDuringMaterialization();
+      }
+      await injectLifecycleAdapter(tempDir, manifest, config, background);
+      const integritySha256 = await fingerprintDirectory(tempDir, MATERIALIZATION_METADATA_PATH);
+      await writeMaterializationMetadata(tempDir, signature, integritySha256);
+      if (expectedSourceRevision !== undefined && await fingerprintDirectory(sourcePath) !== expectedSourceRevision) {
+        throw sourceChangedDuringMaterialization();
+      }
+      await assertRuntimePathIsSafe(this.options.runtimeDir, outputDir, "extension runtime output");
+      if (!allowReplaceExisting && await lstatIfExists(outputDir)) throw replacementForbidden();
       movedAside = await renameIfExists(outputDir, asideDir);
       await fs.rename(tempDir, outputDir);
+      await assertRuntimePathIsSafe(this.options.runtimeDir, asideDir, "extension runtime aside");
       await fs.rm(asideDir, { recursive: true, force: true }).catch(() => undefined);
     } catch (error) {
       if (movedAside) await fs.rename(asideDir, outputDir).catch(() => undefined);
       throw error;
     } finally {
-      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      if (await lstatIfExists(tempDir)) {
+        await assertRuntimePathIsSafe(this.options.runtimeDir, tempDir, "extension runtime temporary path");
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   }
 }
@@ -296,10 +437,9 @@ async function injectLifecycleAdapter(
   manifest: RuntimeManifest,
   config: RuntimeConfig,
   background: BackgroundAdapter,
-  signature: string,
 ): Promise<void> {
   const namespaceDir = path.join(runtimePath, EXTENSION_LIFECYCLE_NAMESPACE);
-  if (await pathExists(namespaceDir)) {
+  if (await lstatIfExists(namespaceDir)) {
     throw Object.assign(new Error(`Extension uses reserved path ${EXTENSION_LIFECYCLE_NAMESPACE}`), {
       status: 409,
       code: "EXTENSION_LIFECYCLE_RESERVED_PATH",
@@ -348,17 +488,23 @@ async function injectLifecycleAdapter(
   } else {
     const pagePath = path.join(runtimePath, ...background.page.split("/"));
     const pageHtml = await fs.readFile(pagePath, "utf8");
-    const pageDir = path.posix.dirname(background.page);
-    const configSrc = relativeHtmlPath(pageDir, `${EXTENSION_LIFECYCLE_NAMESPACE}/${CONFIG_FILE}`);
-    const bootstrapSrc = relativeHtmlPath(pageDir, `${EXTENSION_LIFECYCLE_NAMESPACE}/${BOOTSTRAP_FILE}`);
+    const configSrc = `/${EXTENSION_LIFECYCLE_NAMESPACE}/${CONFIG_FILE}`;
+    const bootstrapSrc = `/${EXTENSION_LIFECYCLE_NAMESPACE}/${BOOTSTRAP_FILE}`;
     const injection = `<script src="${escapeHtmlAttribute(configSrc)}"></script><script src="${escapeHtmlAttribute(bootstrapSrc)}"></script>`;
     await fs.writeFile(pagePath, injectBeforeFirstScript(pageHtml, injection), "utf8");
   }
 
   await fs.writeFile(path.join(runtimePath, "manifest.json"), `${JSON.stringify(nextManifest, null, 2)}\n`, "utf8");
+}
+
+async function writeMaterializationMetadata(
+  runtimePath: string,
+  signature: string,
+  integritySha256: string,
+): Promise<void> {
   await fs.writeFile(
-    path.join(namespaceDir, SIGNATURE_FILE),
-    `${JSON.stringify({ injectorVersion: EXTENSION_LIFECYCLE_INJECTOR_VERSION, signature }, null, 2)}\n`,
+    path.join(runtimePath, EXTENSION_LIFECYCLE_NAMESPACE, SIGNATURE_FILE),
+    `${JSON.stringify({ injectorVersion: EXTENSION_LIFECYCLE_INJECTOR_VERSION, signature, integritySha256 }, null, 2)}\n`,
     "utf8",
   );
 }
@@ -374,13 +520,14 @@ function materializationSignature(
     .digest("hex");
 }
 
-async function fingerprintDirectory(root: string): Promise<string> {
+async function fingerprintDirectory(root: string, excludedRelativePath?: string): Promise<string> {
   const hash = createHash("sha256");
   async function visit(directory: string, relativeDirectory: string): Promise<void> {
     const entries = await fs.readdir(directory, { withFileTypes: true });
     entries.sort((left, right) => left.name.localeCompare(right.name, "en"));
     for (const entry of entries) {
       const relative = path.posix.join(relativeDirectory, entry.name);
+      if (relative === excludedRelativePath) continue;
       const absolute = path.join(directory, entry.name);
       if (entry.isDirectory()) {
         hash.update(`d\0${relative}\0`);
@@ -391,6 +538,8 @@ async function fingerprintDirectory(root: string): Promise<string> {
         hash.update(`f\0${relative}\0`);
         hash.update(await fs.readFile(absolute));
         hash.update("\0");
+      } else {
+        throw new Error(`Unsupported extension entry type: ${relative}`);
       }
     }
   }
@@ -400,10 +549,16 @@ async function fingerprintDirectory(root: string): Promise<string> {
 
 async function hasMaterializationSignature(outputDir: string, signature: string): Promise<boolean> {
   try {
+    await assertRegularNonSymbolicPath(outputDir, MATERIALIZATION_METADATA_PATH, "materialization metadata");
     const parsed = JSON.parse(
       await fs.readFile(path.join(outputDir, EXTENSION_LIFECYCLE_NAMESPACE, SIGNATURE_FILE), "utf8"),
-    ) as { injectorVersion?: unknown; signature?: unknown };
-    return parsed.injectorVersion === EXTENSION_LIFECYCLE_INJECTOR_VERSION && parsed.signature === signature;
+    ) as { injectorVersion?: unknown; signature?: unknown; integritySha256?: unknown };
+    if (
+      parsed.injectorVersion !== EXTENSION_LIFECYCLE_INJECTOR_VERSION
+      || parsed.signature !== signature
+      || typeof parsed.integritySha256 !== "string"
+    ) return false;
+    return await fingerprintDirectory(outputDir, MATERIALIZATION_METADATA_PATH) === parsed.integritySha256;
   } catch {
     return false;
   }
@@ -437,6 +592,45 @@ async function assertLifecycleSourceIsSafe(root: string, background: BackgroundA
   }
 }
 
+async function assertTemporaryMutationPathsAreSafe(root: string, background: BackgroundAdapter): Promise<void> {
+  const rootStat = await fs.lstat(root);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw unsafeRuntimePath("temporary runtime root");
+  await assertRegularNonSymbolicPath(root, "manifest.json", "runtime manifest");
+  if (background.kind === "mv3-classic" || background.kind === "mv3-module") {
+    await assertRegularNonSymbolicPath(root, background.original, "runtime background service worker");
+  } else if (background.kind === "mv2-page") {
+    await assertRegularNonSymbolicPath(root, background.page, "runtime background page");
+  }
+  if (background.kind === "mv3-classic") {
+    await assertNonSymbolicPathParents(root, background.preservedOriginal, "reserved runtime worker");
+    if (await lstatIfExists(path.join(root, ...background.preservedOriginal.split("/")))) {
+      throw new Error(`Extension uses reserved worker path: ${background.preservedOriginal}`);
+    }
+  }
+}
+
+async function assertRegularNonSymbolicPath(root: string, relativePath: string, label: string): Promise<void> {
+  let candidate = root;
+  const segments = relativePath.split("/");
+  for (const [index, segment] of segments.entries()) {
+    candidate = path.join(candidate, segment);
+    const stat = await fs.lstat(candidate);
+    if (stat.isSymbolicLink()) throw unsafeRuntimePath(label);
+    if (index < segments.length - 1 && !stat.isDirectory()) throw unsafeRuntimePath(label);
+    if (index === segments.length - 1 && !stat.isFile()) throw unsafeRuntimePath(label);
+  }
+}
+
+async function assertNonSymbolicPathParents(root: string, relativePath: string, label: string): Promise<void> {
+  let candidate = root;
+  const parentSegments = relativePath.split("/").slice(0, -1);
+  for (const segment of parentSegments) {
+    candidate = path.join(candidate, segment);
+    const stat = await fs.lstat(candidate);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw unsafeRuntimePath(label);
+  }
+}
+
 async function assertPathContainsNoSymbolicLink(root: string, relativePath: string, label: string): Promise<void> {
   const rootStat = await fs.lstat(root);
   if (rootStat.isSymbolicLink()) throw unsafeSymbolicLink(label);
@@ -454,9 +648,64 @@ function unsafeSymbolicLink(label: string): Error {
   });
 }
 
-function relativeHtmlPath(fromDirectory: string, target: string): string {
-  const relative = path.posix.relative(fromDirectory === "." ? "" : fromDirectory, target);
-  return relative.startsWith(".") ? relative : `./${relative}`;
+async function assertRuntimePathIsSafe(runtimeRoot: string, target: string, label: string): Promise<void> {
+  const root = path.resolve(runtimeRoot);
+  const resolvedTarget = path.resolve(target);
+  const relative = path.relative(root, resolvedTarget);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw unsafeRuntimePath(label);
+  }
+  await assertExistingPathSegmentsAreNotSymbolicLinks(root, "extension runtime root");
+  if (relative) await assertExistingPathSegmentsAreNotSymbolicLinks(resolvedTarget, label);
+}
+
+async function assertExistingPathSegmentsAreNotSymbolicLinks(target: string, label: string): Promise<void> {
+  const absolute = path.resolve(target);
+  const parsed = path.parse(absolute);
+  let candidate = parsed.root;
+  const segments = absolute.slice(parsed.root.length).split(path.sep).filter(Boolean);
+  for (const [index, segment] of segments.entries()) {
+    candidate = path.join(candidate, segment);
+    const stat = await lstatIfExists(candidate);
+    if (!stat) break;
+    if (stat.isSymbolicLink()) throw unsafeRuntimePath(label);
+    if (index < segments.length - 1 && !stat.isDirectory()) throw unsafeRuntimePath(label);
+  }
+}
+
+async function assertDirectoryHasNoSymbolicLinkChildren(directory: string, label: string): Promise<void> {
+  const entries = await fs.readdir(directory, { withFileTypes: true });
+  if (entries.some((entry) => entry.isSymbolicLink())) throw unsafeRuntimePath(label);
+}
+
+async function lstatIfExists(candidate: string): Promise<import("node:fs").Stats | undefined> {
+  try {
+    return await fs.lstat(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function unsafeRuntimePath(label: string): Error {
+  return Object.assign(new Error(`${label} cannot traverse a symbolic link, junction, or reparse point`), {
+    status: 409,
+    code: "EXTENSION_RUNTIME_UNSAFE_PATH",
+  });
+}
+
+function sourceChangedDuringMaterialization(): Error {
+  return Object.assign(new Error("Extension source changed while its runtime copy was being materialized"), {
+    status: 409,
+    code: "EXTENSION_RUNTIME_SOURCE_CHANGED",
+  });
+}
+
+function replacementForbidden(): Error {
+  return Object.assign(new Error("Extension runtime replacement is forbidden until the previous browser close is confirmed"), {
+    status: 409,
+    code: "EXTENSION_RUNTIME_REPLACEMENT_FORBIDDEN",
+  });
 }
 
 function relativeModuleSpecifier(fromDirectory: string, target: string): string {
@@ -671,9 +920,22 @@ const LIFECYCLE_BOOTSTRAP = `(() => {
 
   async function loadState() {
     if (!statePromise) {
-      statePromise = readState().catch((error) => {
+      statePromise = readState().then((state) => {
+        if (state === undefined) return { status: "missing" };
+        if (
+          !state
+          || state.schemaVersion !== 1
+          || typeof state.version !== "string"
+          || typeof state.packageRevision !== "string"
+          || typeof state.bindingRevision !== "string"
+        ) {
+          console.error("CBPanel lifecycle protection found invalid state");
+          return { status: "failed" };
+        }
+        return { status: "loaded", state };
+      }, (error) => {
         console.error("CBPanel lifecycle protection could not read state", error);
-        return undefined;
+        return { status: "failed" };
       });
     }
     return statePromise;
@@ -683,11 +945,11 @@ const LIFECYCLE_BOOTSTRAP = `(() => {
     const next = currentState();
     try {
       await writeState(next);
-      statePromise = Promise.resolve(next);
+      statePromise = Promise.resolve({ status: "loaded", state: next });
       return true;
     } catch (error) {
       console.error("CBPanel lifecycle protection could not write state", error);
-      statePromise = undefined;
+      statePromise = Promise.resolve({ status: "failed" });
       return false;
     }
   }
@@ -717,21 +979,33 @@ const LIFECYCLE_BOOTSTRAP = `(() => {
   }
 
   async function handleInstalled(details) {
-    const previous = await loadState();
-    if (!previous || previous.schemaVersion !== 1) {
+    const loaded = await loadState();
+    if (loaded.status === "failed") {
+      console.error("CBPanel lifecycle protection suppressed install/update because its state could not be read safely");
+      emitStartup();
+      return;
+    }
+    if (details?.reason !== "install") {
+      if (await persistCurrentState()) emitInstalled(details);
+      else {
+        console.error("CBPanel lifecycle protection suppressed native install/update because its state could not be persisted");
+        emitStartup();
+      }
+      return;
+    }
+    if (loaded.status === "missing") {
       const persisted = await persistCurrentState();
       if (config.initialBehavior === "preserve") emitStartup();
       else if (persisted) emitInstalled(details);
       else console.error("CBPanel lifecycle protection suppressed install because its state could not be persisted");
       return;
     }
+    const previous = loaded.state;
     const versionChanged = previous.version !== config.version;
     const packageChanged = previous.packageRevision !== config.packageRevision;
     const bindingChanged = previous.bindingRevision !== config.bindingRevision;
-    const legacyAdoption = config.initialBehavior === "preserve"
-      && config.bindingRevision === "legacy"
-      && previous.bindingRevision !== "legacy";
-    if (legacyAdoption) {
+    const preserveRebase = config.initialBehavior === "preserve" && bindingChanged;
+    if (preserveRebase) {
       await persistCurrentState();
       emitStartup();
       return;
@@ -752,19 +1026,20 @@ const LIFECYCLE_BOOTSTRAP = `(() => {
   }
 
   async function handleStartup() {
-    const previous = await loadState();
-    if (!previous || previous.schemaVersion !== 1) {
+    const loaded = await loadState();
+    if (loaded.status === "failed") {
+      emitStartup();
+      return;
+    }
+    if (loaded.status === "missing") {
       if (config.initialBehavior === "preserve") {
         await persistCurrentState();
         emitStartup();
       }
       return;
     }
-    if (
-      config.initialBehavior === "preserve"
-      && config.bindingRevision === "legacy"
-      && previous.bindingRevision !== "legacy"
-    ) {
+    const previous = loaded.state;
+    if (config.initialBehavior === "preserve" && previous.bindingRevision !== config.bindingRevision) {
       await persistCurrentState();
       emitStartup();
       return;
@@ -774,7 +1049,7 @@ const LIFECYCLE_BOOTSTRAP = `(() => {
       || previous.packageRevision !== config.packageRevision
       || (
         previous.bindingRevision !== config.bindingRevision
-        && !(config.initialBehavior === "preserve" && config.bindingRevision === "legacy")
+        && config.initialBehavior !== "preserve"
       )
     ) return;
     if (previous.bindingRevision !== config.bindingRevision) await persistCurrentState();

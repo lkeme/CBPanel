@@ -63,6 +63,10 @@ type SessionServiceOptions = {
   // calls ensureBinary itself, and an explicit update unfreezes CLOAKBROWSER_AUTO_UPDATE process-wide, so
   // a launch started inside that window can begin a second download into the cache being written.
   activeCacheOperation?: () => string | undefined;
+  // Full backups and environment packages read or replace the same browser-data/extension trees a
+  // launch consumes. The callback includes queued work because start* publishes that state
+  // synchronously, closing the route-to-launch race before the async worker begins.
+  activeDataOperation?: () => string | undefined;
 };
 
 type CloakBrowserModule = {
@@ -98,6 +102,8 @@ type CloakBrowserPuppeteerModule = {
 
 export class SessionService {
   private readonly sessions = new Map<string, RunningSession>();
+  /** Browser generations whose close was attempted but never confirmed, including replaced records. */
+  private readonly unconfirmedCloses = new Set<RunningSession>();
   private readonly githubMirrorProbeService = new GithubMirrorProbeService();
   private stoppingAll = false;
 
@@ -117,15 +123,16 @@ export class SessionService {
   // environment and browser-core services ask before they rm or rename something — "might a browser
   // process still have these files open" — for which an unconfirmed close has to count as yes.
   profileIdsHoldingRuntime(): Set<string> {
-    return new Set(
+    const holding = new Set(
       [...this.sessions.values()]
         .filter((session) =>
           session.status === "running"
           || session.status === "launching"
-          || session.status === "stopping"
-          || session.closeUnconfirmed === true)
+          || session.status === "stopping")
         .map((session) => session.profileId),
     );
+    for (const session of this.unconfirmedCloses) holding.add(session.profileId);
+    return holding;
   }
 
   async preflight(profile: BrowserProfile): Promise<ProfilePreflightReport> {
@@ -144,6 +151,7 @@ export class SessionService {
 
     // Register before resolving so a concurrent launch sees this environment as active and
     // cannot rm/rename an extension directory under this booting browser.
+    const previousCloseUnconfirmed = this.hasUnconfirmedClose(profile.id);
     const session: RunningSession = {
       profileId: profile.id,
       status: "launching",
@@ -153,13 +161,16 @@ export class SessionService {
       // that older process can still be holding these files. Dropping it here released the hold the
       // moment the user pressed Launch — and if this launch then failed, every destructive operation
       // would think the files were free.
-      closeUnconfirmed: this.sessions.get(profile.id)?.closeUnconfirmed,
+      closeUnconfirmed: previousCloseUnconfirmed || undefined,
     };
     this.sessions.set(profile.id, session);
     pushSessionEvent(session, "info", "创建启动请求", profile.name);
 
     try {
-      const resolved = await this.resolveRuntimeProfile(profile, { install: true });
+      const resolved = await this.resolveRuntimeProfile(profile, {
+        install: true,
+        allowRuntimeReplacement: !previousCloseUnconfirmed,
+      });
       const runtimeProfile = resolved.profile;
       if (resolved.extensionWarnings.length > 0) {
         pushSessionEvent(
@@ -189,6 +200,9 @@ export class SessionService {
         );
         if (!networkCheck.ok) throw proxyCheckLaunchError(networkCheck);
       }
+      // Network probing is another await boundary. A restore/import can be queued while it runs; recheck
+      // at the final point before a browser process is created.
+      this.assertCanLaunch();
       const userDataDir = this.profileDataDir(runtimeProfile);
       session.launch = buildSessionLaunchPlan(runtimeProfile, userDataDir);
       pushSessionEvent(session, "info", "启动计划已生成", `${session.launch.runtimeLauncher} -> ${session.launch.sdkLauncher}`);
@@ -236,43 +250,54 @@ export class SessionService {
       if (!closed) {
         // Honest about not knowing rather than optimistic: reporting "stopped" would claim a process exit
         // nobody observed.
-        this.markCloseUnconfirmed(profileId, `停止超时（${Math.round(this.closeTimeoutMs() / 1000)} 秒）`, "停止超时");
+        this.markCloseUnconfirmed(
+          profileId,
+          `停止超时（${Math.round(this.closeTimeoutMs() / 1000)} 秒）`,
+          "停止超时",
+          session,
+        );
         // The close keeps running, and its late outcome is the only thing that can clear this without a
         // browser event. Resolving means there was nothing left to close — a launch that never produced a
         // runtime — or that the close finally landed; either way the files are free.
         void closing.then(
-          () => this.markSessionStopped(profileId, "会话已停止"),
-          (error) => this.recordLateCloseFailure(profileId, error),
+          () => this.markSessionStopped(profileId, "会话已停止", session),
+          (error) => this.recordLateCloseFailure(profileId, error, session),
         );
         return publicSession(session);
       }
-      this.markSessionStopped(profileId, "会话已停止");
+      this.markSessionStopped(profileId, "会话已停止", session);
       return publicSession(session);
     } catch (error) {
       // A close that threw is exactly as unconfirmed as one that ran out of time: the attempt failed, so
       // nothing observed the process exit and it may still hold its files. The diagnosis survives in the
       // event log even after a later close event clears the session.
-      this.markCloseUnconfirmed(profileId, `停止失败：${(error as Error).message}`, "停止失败");
+      this.markCloseUnconfirmed(profileId, `停止失败：${(error as Error).message}`, "停止失败", session);
       return publicSession(session);
     }
   }
 
-  private markCloseUnconfirmed(profileId: string, reason: string, event: string): void {
+  private markCloseUnconfirmed(
+    profileId: string,
+    reason: string,
+    event: string,
+    expectedSession?: RunningSession,
+  ): void {
     const session = this.sessions.get(profileId);
     // The browser's own close event can land inside the budget and confirm the stop already. Overwriting
     // that confirmation is permanent — no second event will ever arrive — so the session would hold every
     // file-touching service for the rest of the process.
-    if (!session || session.status === "stopped") return;
+    if (!session || (expectedSession && session !== expectedSession) || session.status === "stopped") return;
     session.status = "error";
     session.closeUnconfirmed = true;
+    this.unconfirmedCloses.add(session);
     delete session.closingByPanel;
     session.lastError = `${reason}：浏览器可能仍在运行。可再次点击停止，或手动结束该浏览器进程。`;
     pushSessionEvent(session, "error", event, session.lastError);
   }
 
-  private recordLateCloseFailure(profileId: string, error: unknown): void {
-    if (!this.sessions.get(profileId)?.closeUnconfirmed) return;
-    this.markCloseUnconfirmed(profileId, `停止失败：${(error as Error).message}`, "停止失败");
+  private recordLateCloseFailure(profileId: string, error: unknown, expectedSession: RunningSession): void {
+    if (this.sessions.get(profileId) !== expectedSession || !expectedSession.closeUnconfirmed) return;
+    this.markCloseUnconfirmed(profileId, `停止失败：${(error as Error).message}`, "停止失败", expectedSession);
   }
 
   // Both awaits are inside the budget on purpose: a launch that never finishes leaves runtimePromise
@@ -309,6 +334,13 @@ export class SessionService {
       throw Object.assign(new Error(`浏览器内核正在${coreOperationText(operation)}，请等它完成后再启动会话。`), {
         status: 409,
         code: "BROWSER_CORE_OPERATION_IN_PROGRESS",
+      });
+    }
+    const dataOperation = this.options.activeDataOperation?.();
+    if (dataOperation) {
+      throw Object.assign(new Error(`环境数据正在${dataOperation}，请等它完成后再启动会话。`), {
+        status: 409,
+        code: "ENVIRONMENT_DATA_OPERATION_IN_PROGRESS",
       });
     }
   }
@@ -357,7 +389,7 @@ export class SessionService {
 
   private async resolveRuntimeProfile(
     profile: BrowserProfile,
-    options: { install: boolean },
+    options: { install: boolean; allowRuntimeReplacement?: boolean },
   ): Promise<{
     profile: BrowserProfile;
     extensionErrors: Array<{ name: string; detail: string }>;
@@ -368,7 +400,9 @@ export class SessionService {
     if (environment.environment.extensionIds.length === 0) return { profile, extensionErrors: [], extensionWarnings: [] };
 
     try {
-      const ensured = await this.options.extensionService.ensureExtensionsInstalled(profile.id);
+      const ensured = await this.options.extensionService.ensureExtensionsInstalled(profile.id, {
+        allowRuntimeReplacement: options.allowRuntimeReplacement,
+      });
       return {
         profile: {
           ...profile,
@@ -402,8 +436,20 @@ export class SessionService {
 
   // Protected, not private: watchExternalClose routes the browser's own exit through here, and the tests
   // stand in for that event the same way they stand in for startRuntime.
-  protected markSessionStopped(profileId: string, detail: string): void {
+  protected markSessionStopped(
+    profileId: string,
+    detail: string,
+    expectedSession?: RunningSession,
+  ): void {
     const session = this.sessions.get(profileId);
+    const closedSession = expectedSession ?? session;
+    if (closedSession) this.unconfirmedCloses.delete(closedSession);
+    // A timed-out close and the old browser's disconnect event may settle after the user has relaunched
+    // the same profile. Those callbacks belong to the replaced record and must never stop the new one.
+    if (expectedSession && session !== expectedSession) {
+      if (session) this.reflectUnconfirmedClose(session);
+      return;
+    }
     // A stop that ran out of time is the one error worth overwriting: it recorded that the close was
     // never confirmed, so a disconnect arriving later *is* that confirmation. Without this exception the
     // session would keep every file-touching service blocked until the panel restarted.
@@ -415,19 +461,34 @@ export class SessionService {
     delete session.runtimePromise;
     delete session.lastError;
     delete session.closingByPanel;
-    delete session.closeUnconfirmed;
+    this.reflectUnconfirmedClose(session);
     pushSessionEvent(session, "info", detail);
     this.sessions.set(profileId, session);
   }
 
-  private watchExternalClose(profileId: string, target: object, eventName: string): void {
+  private hasUnconfirmedClose(profileId: string): boolean {
+    for (const session of this.unconfirmedCloses) {
+      if (session.profileId === profileId) return true;
+    }
+    return false;
+  }
+
+  private reflectUnconfirmedClose(session: RunningSession): void {
+    if (this.hasUnconfirmedClose(session.profileId)) session.closeUnconfirmed = true;
+    else delete session.closeUnconfirmed;
+  }
+
+  private watchExternalClose(session: RunningSession, target: object, eventName: string): void {
     const source = target as {
       once?: (event: string, handler: () => void) => void;
       on?: (event: string, handler: () => void) => void;
     };
     const onClosed = () => {
-      const session = this.sessions.get(profileId);
-      this.markSessionStopped(profileId, session?.closingByPanel ? "会话已停止" : "浏览器窗口已关闭");
+      this.markSessionStopped(
+        session.profileId,
+        session.closingByPanel ? "会话已停止" : "浏览器窗口已关闭",
+        session,
+      );
     };
     if (typeof source.once === "function") {
       source.once(eventName, onClosed);
@@ -469,7 +530,7 @@ export class SessionService {
         : await runtime.launchContext(preview.options as unknown as Parameters<CloakBrowserModule["launchContext"]>[0]);
 
     if (!context) throw new Error("CloakBrowser 未返回 BrowserContext");
-    this.watchExternalClose(profile.id, context, "close");
+    this.watchExternalClose(session, context, "close");
 
     try {
       const page = await getOrCreatePlaywrightPage(context);
@@ -498,12 +559,12 @@ export class SessionService {
     const preview = buildLaunchPreview(profile, this.profileDataDir(profile), browserVersionLaunchHints(binary.version));
     pushSessionEvent(session, "info", "调用 Playwright Browser 启动器", preview.launcher);
     const browser = await runtime.launch(preview.options as unknown as Parameters<CloakBrowserModule["launch"]>[0]);
-    this.watchExternalClose(profile.id, browser, "disconnected");
+    this.watchExternalClose(session, browser, "disconnected");
     let context: BrowserContext | undefined;
 
     try {
       context = await browser.newContext(buildPlaywrightContextOptions(profile));
-      this.watchExternalClose(profile.id, context, "close");
+      this.watchExternalClose(session, context, "close");
       const page = await context.newPage();
       if (profile.startUrl.trim()) pushSessionEvent(session, "info", "打开起始页", profile.startUrl.trim());
       const warning = await gotoStartUrl(page, profile.startUrl.trim());
@@ -534,7 +595,7 @@ export class SessionService {
             preview.options as unknown as Parameters<CloakBrowserPuppeteerModule["launchPersistentContext"]>[0],
           )
         : await runtime.launch(preview.options as unknown as Parameters<CloakBrowserPuppeteerModule["launch"]>[0]);
-    this.watchExternalClose(profile.id, browser, "disconnected");
+    this.watchExternalClose(session, browser, "disconnected");
     let page: PuppeteerPage | undefined;
 
     try {

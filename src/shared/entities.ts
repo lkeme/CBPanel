@@ -174,6 +174,14 @@ export interface ExtensionBindingMetadata {
   lifecycleRevision?: string;
 }
 
+/** A nonempty one-time binding token whose first materialization must adopt existing browser state. */
+export const PRESERVE_LIFECYCLE_REVISION_PREFIX = "preserve:";
+
+export function isPreserveLifecycleRevision(revision: string | undefined): boolean {
+  return Boolean(revision?.startsWith(PRESERVE_LIFECYCLE_REVISION_PREFIX)
+    && revision.length > PRESERVE_LIFECYCLE_REVISION_PREFIX.length);
+}
+
 export function normalizeExtensionBindingMetadata(input: unknown): ExtensionBindingMetadata[] | undefined {
   if (input === undefined) return undefined;
   if (!Array.isArray(input)) throw invalidExtensionBindingMetadata("Extension binding metadata must be an array");

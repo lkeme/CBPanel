@@ -128,6 +128,22 @@ test("launching is refused while the browser core cache is being written", async
   assert.deepEqual(service.listSessions(), []);
 });
 
+test("launching is refused while an environment data operation is queued or running", async () => {
+  const service = new WedgedCloseSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    activeDataOperation: () => "导入或导出环境包",
+  });
+
+  const refusal = await service.launchProfile(defaultProfile({ id: "launch-during-data-operation" }))
+    .then(() => undefined, (error: Error & { status?: number; code?: string }) => error);
+
+  assert.equal(refusal?.status, 409);
+  assert.equal(refusal?.code, "ENVIRONMENT_DATA_OPERATION_IN_PROGRESS");
+  assert.match(refusal?.message ?? "", /环境包/);
+  assert.deepEqual(service.listSessions(), []);
+});
+
 test("an operation that starts mid-launch still stops the runtime being created", async () => {
   let operation: string | undefined;
   const service = new WedgedCloseSessionService({
@@ -146,6 +162,32 @@ test("an operation that starts mid-launch still stops the runtime being created"
 
   assert.equal(refusal?.status, 409);
   assert.match(refusal?.message ?? "", /安装/);
+  assert.equal(service.closeCalls, 0);
+  assert.equal(service.listSessions().find((item) => item.profileId === profile.id)?.status, "error");
+});
+
+test("a data operation that starts mid-launch is rechecked before runtime creation", async () => {
+  let operation: string | undefined;
+  const base = defaultProfile({ id: "data-operation-mid-launch-test" });
+  const service = new WedgedCloseSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    checkNetwork: async () => {
+      operation = "恢复应用备份";
+      return { checkedAt: new Date().toISOString(), ok: true, source: "environment-check" };
+    },
+    activeDataOperation: () => operation,
+  });
+  const profile = {
+    ...base,
+    proxy: { ...base.proxy, enabled: true, host: "127.0.0.1", port: "8080" },
+  };
+
+  const refusal = await service.launchProfile(profile)
+    .then(() => undefined, (error: Error & { status?: number; code?: string }) => error);
+
+  assert.equal(refusal?.status, 409);
+  assert.equal(refusal?.code, "ENVIRONMENT_DATA_OPERATION_IN_PROGRESS");
   assert.equal(service.closeCalls, 0);
   assert.equal(service.listSessions().find((item) => item.profileId === profile.id)?.status, "error");
 });
@@ -316,6 +358,29 @@ class WedgedCloseSessionService extends SessionService {
   }
 }
 
+class DelayedCloseSessionService extends SessionService {
+  private readonly closeResolvers: Array<() => void> = [];
+
+  protected override closeTimeoutMs(): number {
+    return 40;
+  }
+
+  protected override async startRuntime(): Promise<TestRuntimeHandle> {
+    return {
+      close: () => new Promise<void>((resolve) => this.closeResolvers.push(resolve)),
+      pageUrl: () => "about:blank",
+    };
+  }
+
+  resolveClose(index: number): void {
+    this.closeResolvers[index]?.();
+  }
+
+  simulateCurrentClose(profileId: string): void {
+    this.markSessionStopped(profileId, "浏览器窗口已关闭");
+  }
+}
+
 function wedgedService(rejectClose = false): WedgedCloseSessionService {
   return new WedgedCloseSessionService({
     browserDataDir: "data/browser-data-test",
@@ -351,6 +416,29 @@ test("a stop that never completes still lets the profile be launched again", asy
   // The launch gate asks a different question from the file-safety probe, and must answer no here:
   // a browser nobody can confirm is gone cannot block that profile for the rest of the session.
   assert.equal(service.hasActiveSession(profile.id), false);
+});
+
+test("a relaunch after an unconfirmed close forbids replacing an existing extension runtime", async () => {
+  const profile = defaultProfile({ id: "unconfirmed-runtime-replacement-test" });
+  const allowReplacement: Array<boolean | undefined> = [];
+  const service = new WedgedCloseSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: {
+      resolveEnvironment: async () => ({ environment: { extensionIds: ["extension-1"] }, profile: profile.runtime }),
+      ensureExtensionsInstalled: async (_environmentId: string, options?: { allowRuntimeReplacement?: boolean }) => {
+        allowReplacement.push(options?.allowRuntimeReplacement);
+        return { paths: ["D:/extensions/runtime"], warnings: [] };
+      },
+    } as unknown as ExtensionService,
+  });
+
+  await service.launchProfile(profile);
+  await service.stopProfile(profile.id);
+  await service.launchProfile(profile);
+
+  assert.deepEqual(allowReplacement, [true, false]);
+  assert.equal(service.listSessions().find((item) => item.profileId === profile.id)?.closeUnconfirmed, true);
 });
 
 test("a stop that never completes keeps the profile counted as holding its files", async () => {
@@ -485,6 +573,49 @@ test("relaunching after an unconfirmed stop keeps the old process counted as hol
   // the flag with it meant a failed relaunch reported the files as free while the old browser lived.
   assert.equal(service.listSessions().find((item) => item.profileId === profile.id)?.closeUnconfirmed, true);
   assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+});
+
+test("a late close from a replaced session cannot stop the relaunched browser", async () => {
+  const service = new DelayedCloseSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "late-close-after-relaunch-test" });
+  await service.launchProfile(profile);
+  await service.stopProfile(profile.id);
+  await service.launchProfile(profile);
+
+  service.resolveClose(0);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const relaunched = service.listSessions().find((item) => item.profileId === profile.id);
+  assert.equal(relaunched?.status, "running");
+  assert.equal(relaunched?.closeUnconfirmed, undefined);
+});
+
+test("closing a relaunched browser does not release an older unconfirmed generation", async () => {
+  const service = new DelayedCloseSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "new-close-old-hold-test" });
+  await service.launchProfile(profile);
+  await service.stopProfile(profile.id);
+  await service.launchProfile(profile);
+
+  service.simulateCurrentClose(profile.id);
+  let current = service.listSessions().find((item) => item.profileId === profile.id);
+  assert.equal(current?.status, "stopped");
+  assert.equal(current?.closeUnconfirmed, true);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+
+  service.resolveClose(0);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  current = service.listSessions().find((item) => item.profileId === profile.id);
+  assert.equal(current?.status, "stopped");
+  assert.equal(current?.closeUnconfirmed, undefined);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
 });
 
 test("stopAll stays bounded when every session is wedged", async () => {

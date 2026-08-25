@@ -719,6 +719,59 @@ test("extension bindings keep stable lifecycle revisions until an actual unbind 
   repository.close();
 });
 
+test("explicit extension unbind validates every environment before deleting any binding", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const profile = await repository.createProfile({ name: "Atomic Unbind" });
+  const extension = await repository.createExtension({
+    name: "Atomic Unbind Extension",
+    sourceKind: "local-directory",
+    sourceUrl: path.join(directory, "extension"),
+    installState: "installed",
+  });
+  await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
+
+  await assert.rejects(
+    repository.unbindExtensionFromEnvironments(extension.id, [profile.id, "missing-environment"]),
+    (error) => (error as { status?: number }).status === 404,
+  );
+
+  assert.deepEqual(
+    (await repository.listEnvironmentExtensionBindings(profile.id)).map((binding) => binding.extensionId),
+    [extension.id],
+  );
+  repository.close();
+});
+
+test("environment package binding metadata must name an actual mapped binding even without a revision", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const environment = await repository.createEnvironment({ name: "Unbound Package Pair" });
+  const extension = await repository.createExtension({
+    name: "Unbound Package Extension",
+    sourceKind: "local-directory",
+    sourceUrl: path.join(directory, "extension"),
+    installState: "installed",
+  });
+  const groups = await repository.listGroups();
+  const beforeEnvironmentIds = (await repository.listEnvironments()).map((item) => item.id);
+  const beforeExtensionIds = (await repository.listExtensions()).map((item) => item.id);
+
+  await assert.rejects(repository.importEnvironmentPackage({
+    environments: [environment],
+    groups,
+    extensions: [extension],
+    environmentExtensionBindings: [{
+      environmentId: environment.id,
+      extensionId: extension.id,
+    }],
+  }), /unbound entity pair/);
+
+  assert.deepEqual((await repository.listEnvironments()).map((item) => item.id), beforeEnvironmentIds);
+  assert.deepEqual((await repository.listExtensions()).map((item) => item.id), beforeExtensionIds);
+  repository.close();
+});
+
 test("a database predating lifecycle revisions gains the nullable binding column without inventing revisions", async () => {
   const directory = await makeTempDir();
   const databasePath = path.join(directory, "cbpanel.sqlite");

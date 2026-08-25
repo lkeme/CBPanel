@@ -1268,7 +1268,7 @@ test("check re-injects a pinned key that is missing from the unpacked manifest",
   repository.close();
 });
 
-test("check never injects a key into a reference-mode source directory", async () => {
+test("check rejects a reference identity mismatch without injecting into the source directory", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
   const service = new ExtensionService({ repository, extensionCacheDir: path.join(directory, "extensions") });
@@ -1278,10 +1278,16 @@ test("check never injects a key into a reference-mode source directory", async (
   // carry a key on a reference-mode entity; the user's directory stays read-only regardless.
   await repository.updateExtension(referenced.id, { manifestKey: PRESET_MANIFEST_KEY });
 
-  const checked = await service.check(referenced.id);
-
-  assert.equal(checked.installState, "installed");
+  await assert.rejects(
+    service.check(referenced.id),
+    (error) => {
+      assert.equal((error as { status?: number }).status, 409);
+      assert.equal((error as { code?: string }).code, "EXTENSION_REFERENCE_IDENTITY_MISMATCH");
+      return true;
+    },
+  );
   assert.equal(await readManifestKeyFromDirectory(sourceDirectory), undefined);
+  assert.match((await repository.getExtension(referenced.id))?.lastError ?? "", /pinned browser identity/);
 
   repository.close();
 });
@@ -1315,6 +1321,39 @@ test("check backfills a legacy reference manifest key in SQLite and lifecycle-pr
   assert.notEqual(ensured.paths[0], source);
   assert.ok(ensured.paths[0]?.startsWith(path.join(directory, "extension-runtimes", profile.id)));
   assert.deepEqual(await fs.readFile(path.join(source, "manifest.json")), before);
+  repository.close();
+});
+
+test("check backfills an on-disk manifest key for a managed copy before runtime materialization", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const service = new ExtensionService({
+    repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionRuntimeDir: path.join(directory, "extension-runtimes"),
+    browserDataDir: path.join(directory, "browser-data"),
+  });
+  const managedPath = await writeExtensionDirectory(path.join(directory, "extensions"), "restored-copy", {
+    name: "Restored Keyed Copy",
+    key: PRESET_MANIFEST_KEY,
+    background: { service_worker: "background.js" },
+  });
+  await fs.writeFile(path.join(managedPath, "background.js"), "globalThis.loaded = true;\n", "utf8");
+  const extension = await repository.createExtension({
+    name: "Restored Keyed Copy",
+    sourceKind: "local-directory",
+    sourceUrl: managedPath,
+    localPath: managedPath,
+    directoryMode: "copy",
+    installState: "installed",
+  });
+  const profile = await repository.createProfile({ name: "Restored Keyed Runtime" });
+  await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
+
+  const ensured = await service.ensureExtensionsInstalled(profile.id);
+
+  assert.equal((await repository.getExtension(extension.id))?.manifestKey, PRESET_MANIFEST_KEY);
+  assert.ok(ensured.paths[0]?.startsWith(path.join(directory, "extension-runtimes", profile.id)));
   repository.close();
 });
 
@@ -1500,8 +1539,9 @@ test("launch loads the current snapshot of an update-available extension and war
 
   assert.deepEqual(ensured.paths, [localPath]);
   assert.equal(downloads, 0);
-  assert.equal(ensured.warnings.length, 1);
-  assert.match(ensured.warnings[0]?.reason ?? "", /有可用更新未安装/);
+  assert.equal(ensured.warnings.length, 2);
+  assert.equal(ensured.warnings.some((warning) => /有可用更新未安装/.test(warning.reason)), true);
+  assert.equal(ensured.warnings.some((warning) => /固定插件身份/.test(warning.reason)), true);
   assert.equal((await repository.getExtension(extension.id))?.installState, "update-available");
 
   repository.close();
