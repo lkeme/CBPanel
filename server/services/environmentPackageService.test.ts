@@ -108,6 +108,8 @@ test("environment package import creates new environments and restores browser d
     sha256: sha256Hex(Buffer.from("same-extension")),
   });
   await sourceRepository.bindExtensionToEnvironments(extension.id, [sourceProfile.id]);
+  const sourceLifecycleRevision = (await sourceRepository.listEnvironmentExtensionBindings(sourceProfile.id))[0]?.lifecycleRevision;
+  assert.ok(sourceLifecycleRevision);
   await fs.mkdir(path.join(sourceDir, "browser-data", sourceProfile.id), { recursive: true });
   await fs.writeFile(path.join(sourceDir, "browser-data", sourceProfile.id, "Preferences"), "prefs", "utf8");
   const packagePath = path.join(sourceDir, "portable.cbpe");
@@ -139,6 +141,10 @@ test("environment package import creates new environments and restores browser d
   assert.equal(groups.filter((group) => group.name === "Accounts").length, 1);
   assert.equal(proxies.length, 0);
   assert.deepEqual(importedProfile?.runtime.extensionPaths, [path.join(targetDir, "extensions", newExtensionId)]);
+  assert.equal(
+    (await targetRepository.listEnvironmentExtensionBindings(newEnvironmentId))[0]?.lifecycleRevision,
+    sourceLifecycleRevision,
+  );
 
   targetRepository.close();
 });
@@ -190,6 +196,10 @@ test("environment package import reuses installed extensions without copying orp
 
   const importedProfile = await targetRepository.getProfile(importedEnvironmentId);
   assert.deepEqual(importedProfile?.runtime.extensionPaths, [existingExtensionDir]);
+  assert.equal(
+    (await targetRepository.listEnvironmentExtensionBindings(importedEnvironmentId))[0]?.lifecycleRevision,
+    undefined,
+  );
 
   targetRepository.close();
 });

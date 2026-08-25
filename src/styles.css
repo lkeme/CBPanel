@@ -2344,6 +2344,18 @@ dl.browser-core-download-details .mono-cell {
   border-radius: var(--radius-control);
 }
 
+.extension-detail-warning {
+  min-width: 0;
+  padding: 8px 10px;
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  background: var(--warning-soft);
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border));
+  border-radius: var(--radius-control);
+}
+
 .extension-detail-description {
   min-width: 0;
   margin: 0;

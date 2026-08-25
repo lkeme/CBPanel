@@ -43,6 +43,7 @@ const DATA_DIR = process.env.CBPANEL_DATA_DIR
   : path.join(ROOT_DIR, "data");
 const STORE_PATH = path.join(DATA_DIR, "profiles.json");
 const BROWSER_DATA_DIR = path.join(DATA_DIR, "browser-data");
+const EXTENSION_RUNTIME_DIR = path.join(DATA_DIR, "extension-runtimes");
 const PORT = Number(process.env.PORT ?? 4173);
 const HOST = "127.0.0.1";
 const SHELL_MODE = process.env.CBPANEL_SHELL === "desktop" ? "desktop" : "web";
@@ -99,6 +100,8 @@ const extensionService = new ExtensionService({
   repository,
   extensionCacheDir: path.join(DATA_DIR, "extensions"),
   extensionArchiveDir: path.join(DATA_DIR, "extension-archives"),
+  extensionRuntimeDir: EXTENSION_RUNTIME_DIR,
+  browserDataDir: BROWSER_DATA_DIR,
   activeEnvironmentIds,
 });
 void extensionService.sweepCacheArtifacts().catch(() => undefined);
@@ -113,7 +116,10 @@ const sessionService = new SessionService({
   activeCacheOperation: () => binaryService.activeCacheOperation(),
 });
 const proxyService = new ProxyService();
-const environmentDataService = new EnvironmentDataService({ browserDataDir: BROWSER_DATA_DIR });
+const environmentDataService = new EnvironmentDataService({
+  browserDataDir: BROWSER_DATA_DIR,
+  extensionRuntimeDir: EXTENSION_RUNTIME_DIR,
+});
 const environmentPackageService = new EnvironmentPackageService({
   repository,
   browserDataDir: BROWSER_DATA_DIR,
@@ -124,6 +130,7 @@ const appBackupService = new AppBackupService({
   repository,
   browserDataDir: BROWSER_DATA_DIR,
   extensionCacheDir: path.join(DATA_DIR, "extensions"),
+  extensionRuntimeDir: EXTENSION_RUNTIME_DIR,
   activeEnvironmentIds,
 });
 const githubMirrorProbeService = new GithubMirrorProbeService();
@@ -1188,7 +1195,12 @@ async function createApp(): Promise<express.Express> {
   app.post("/api/extensions/:id/unbind-environments", async (request, response) => {
     try {
       const environmentIds = readUnbindEnvironmentIds(request.body?.environmentIds);
-      response.json(await repository.unbindExtensionFromEnvironments(request.params.id, environmentIds));
+      const environments = await repository.unbindExtensionFromEnvironments(request.params.id, environmentIds);
+      await extensionService.cleanupRuntimeBindings(
+        request.params.id,
+        environments.map((environment) => environment.id),
+      );
+      response.json(environments);
     } catch (error) {
       sendError(response, error);
     }

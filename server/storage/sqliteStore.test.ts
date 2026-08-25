@@ -694,6 +694,81 @@ test("extension registry protects referenced deletes and projects installed path
   repository.close();
 });
 
+test("extension bindings keep stable lifecycle revisions until an actual unbind and rebind", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const profile = await repository.createProfile({ name: "Lifecycle Binding" });
+  const extension = await repository.createExtension({
+    name: "Lifecycle Extension",
+    sourceKind: "local-directory",
+    sourceUrl: path.join(directory, "extension"),
+    installState: "installed",
+  });
+
+  await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
+  const first = (await repository.listEnvironmentExtensionBindings(profile.id))[0];
+  assert.ok(first?.lifecycleRevision);
+  await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
+  assert.equal((await repository.listEnvironmentExtensionBindings(profile.id))[0]?.lifecycleRevision, first.lifecycleRevision);
+
+  await repository.unbindExtensionFromEnvironments(extension.id, [profile.id]);
+  await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
+  const rebound = (await repository.listEnvironmentExtensionBindings(profile.id))[0];
+  assert.ok(rebound?.lifecycleRevision);
+  assert.notEqual(rebound.lifecycleRevision, first.lifecycleRevision);
+  repository.close();
+});
+
+test("a database predating lifecycle revisions gains the nullable binding column without inventing revisions", async () => {
+  const directory = await makeTempDir();
+  const databasePath = path.join(directory, "cbpanel.sqlite");
+  const fresh = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const profile = await fresh.createProfile({ name: "Legacy Binding" });
+  const extension = await fresh.createExtension({
+    name: "Legacy Extension",
+    sourceKind: "local-directory",
+    sourceUrl: path.join(directory, "extension"),
+    installState: "installed",
+  });
+  await fresh.bindExtensionToEnvironments(extension.id, [profile.id]);
+  fresh.close();
+
+  const raw = new DatabaseSync(databasePath);
+  raw.exec("ALTER TABLE environment_extensions DROP COLUMN lifecycle_revision");
+  raw.close();
+
+  const upgraded = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const binding = (await upgraded.listEnvironmentExtensionBindings(profile.id))[0];
+  assert.equal(binding?.extensionId, extension.id);
+  assert.equal(binding?.lifecycleRevision, undefined);
+  await upgraded.bindExtensionToEnvironments(extension.id, [profile.id]);
+  assert.equal((await upgraded.listEnvironmentExtensionBindings(profile.id))[0]?.lifecycleRevision, undefined);
+  upgraded.close();
+});
+
+test("full backup restore rejects unknown binding metadata even when its revision is omitted", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const profile = await repository.createProfile({ name: "Binding Metadata Validation" });
+  const extension = await repository.createExtension({
+    name: "Binding Metadata Extension",
+    sourceKind: "local-directory",
+    sourceUrl: path.join(directory, "extension"),
+    installState: "installed",
+  });
+  await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
+  const backup = await repository.exportFullBackupData();
+  backup.environmentExtensionBindings = [{
+    environmentId: "missing-environment",
+    extensionId: extension.id,
+  }];
+
+  await assert.rejects(repository.restoreFullBackupData(backup), /binding metadata references an unknown entity/);
+  assert.ok(await repository.getEnvironment(profile.id));
+  assert.ok(await repository.getExtension(extension.id));
+  repository.close();
+});
+
 test("trashed environments neither block extension deletes nor survive as bindings", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });

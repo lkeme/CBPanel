@@ -614,6 +614,9 @@ function ExtensionRowDetail({
   const description = extension.description && extension.description !== extension.name ? extension.description : "";
   const localPath = extension.localPath;
   const canOpenDirectory = Boolean(localPath) && isTauri();
+  const lifecycleUnprotected = extension.sourceKind === "local-directory"
+    && extension.directoryMode !== "copy"
+    && !identityPinned;
   const permissionChips = useMemo(() => {
     const risks = new Map<string, ExtensionPermissionRisk>(extension.permissionRisks.map((risk) => [risk.permission, risk]));
     return [...new Set([...extension.permissions, ...extension.hostPermissions])].map((permission) => {
@@ -639,6 +642,9 @@ function ExtensionRowDetail({
 
   return (
     <div className="extension-detail">
+      {lifecycleUnprotected && (
+        <div className="extension-detail-warning">{t("module.extensionLifecycleUnprotectedReference")}</div>
+      )}
       {extension.lastError && <div className="extension-detail-error">{extension.lastError}</div>}
       {description && <p className="extension-detail-description">{description}</p>}
       <section className="extension-detail-group">

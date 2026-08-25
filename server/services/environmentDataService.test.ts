@@ -23,6 +23,45 @@ test("removeEnvironmentData deletes existing directories and tolerates unknown i
   await fs.rm(directory, { recursive: true, force: true });
 });
 
+test("runtime-only cleanup does not inflate the browser-data removal count", async () => {
+  const directory = await makeTempDir();
+  const browserDataDir = path.join(directory, "browser-data");
+  const extensionRuntimeDir = path.join(directory, "extension-runtimes");
+  await fs.mkdir(path.join(extensionRuntimeDir, "profile-runtime-only", "extension-one"), { recursive: true });
+  const service = new EnvironmentDataService({ browserDataDir, extensionRuntimeDir });
+
+  const result = await service.removeEnvironmentData(["profile-runtime-only"]);
+
+  assert.deepEqual(result.removed, []);
+  assert.deepEqual(result.warnings, []);
+  assert.equal(await pathExists(path.join(extensionRuntimeDir, "profile-runtime-only")), false);
+  await fs.rm(directory, { recursive: true, force: true });
+});
+
+test("browser-data success remains counted when runtime cleanup fails", async () => {
+  const directory = await makeTempDir();
+  const browserDataDir = path.join(directory, "browser-data");
+  const extensionRuntimeDir = path.join(directory, "extension-runtimes");
+  await writeEnvironmentData(browserDataDir, "profile-partial");
+  await fs.mkdir(path.join(extensionRuntimeDir, "profile-partial", "extension-one"), { recursive: true });
+  class FailingRuntimeCleanupService extends EnvironmentDataService {
+    protected override async removeDirectory(target: string): Promise<void> {
+      if (target.startsWith(extensionRuntimeDir)) throw new Error("runtime locked");
+      await super.removeDirectory(target);
+    }
+  }
+  const service = new FailingRuntimeCleanupService({ browserDataDir, extensionRuntimeDir });
+
+  const result = await service.removeEnvironmentData(["profile-partial"]);
+
+  assert.deepEqual(result.removed, ["profile-partial"]);
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0]!, /extension runtime data.*runtime locked/);
+  assert.equal(await pathExists(path.join(browserDataDir, "profile-partial")), false);
+  assert.equal(await pathExists(path.join(extensionRuntimeDir, "profile-partial")), true);
+  await fs.rm(directory, { recursive: true, force: true });
+});
+
 test("removeEnvironmentData reports a rejected id as a warning without dropping the rest", async () => {
   const directory = await makeTempDir();
   const browserDataDir = path.join(directory, "browser-data");

@@ -2,6 +2,7 @@ import type { BrowserProfile } from "../../src/shared/profile";
 import type {
   BrowserEnvironment,
   ExtensionEntity,
+  ExtensionBindingMetadata,
   ExtensionSourceEntity,
   GroupEntity,
   NetworkCheckResult,
@@ -19,6 +20,7 @@ export type EnvironmentPackageImportInput = {
   environmentIdMap?: Record<string, string>;
   extensionIdMap?: Record<string, string>;
   extensionLocalPaths?: Record<string, string>;
+  environmentExtensionBindings?: ExtensionBindingMetadata[];
 };
 
 export type EnvironmentPackageImportResult = {
@@ -29,6 +31,13 @@ export type EnvironmentPackageImportResult = {
     groups: Record<string, string>;
     extensions: Record<string, string>;
   };
+};
+
+export type EnvironmentExtensionBinding = {
+  environmentId: string;
+  extensionId: string;
+  /** Null marks a binding created before lifecycle protection was introduced. */
+  lifecycleRevision?: string;
 };
 
 export interface ProfileRepository {
@@ -94,6 +103,7 @@ export interface RegistryRepository {
   createExtension(input: Partial<ExtensionEntity>): Promise<ExtensionEntity>;
   updateExtension(id: string, patch: Partial<ExtensionEntity>): Promise<ExtensionEntity>;
   deleteExtension(id: string): Promise<void>;
+  listEnvironmentExtensionBindings(environmentId: string): Promise<EnvironmentExtensionBinding[]>;
   bindExtensionToEnvironments(id: string, environmentIds: string[]): Promise<BrowserEnvironment[]>;
   unbindExtensionFromEnvironments(id: string, environmentIds?: string[]): Promise<BrowserEnvironment[]>;
   listExtensionSources(): Promise<ExtensionSourceEntity[]>;

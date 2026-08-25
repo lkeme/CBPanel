@@ -46,6 +46,8 @@ test("app backup export and restore replaces app data, browser data, and extensi
     sha256: "b".repeat(64),
   });
   await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
+  const lifecycleRevision = (await repository.listEnvironmentExtensionBindings(profile.id))[0]?.lifecycleRevision;
+  assert.ok(lifecycleRevision);
   await fs.mkdir(path.join(directory, "browser-data", profile.id), { recursive: true });
   await fs.writeFile(path.join(directory, "browser-data", profile.id, "Cookies"), "cookie-db", "utf8");
   const backupPath = path.join(directory, "backup.cbpb");
@@ -60,6 +62,7 @@ test("app backup export and restore replaces app data, browser data, and extensi
   await fs.rm(extensionDir, { recursive: true, force: true });
   await fs.mkdir(path.join(directory, "browser-data", "junk"), { recursive: true });
   await fs.writeFile(path.join(directory, "browser-data", "junk", "file"), "junk", "utf8");
+  await fs.mkdir(path.join(directory, "extension-runtimes", "stale-environment", "stale-extension"), { recursive: true });
 
   const restored = await service.restoreFromBackup({ inputPath: backupPath });
 
@@ -81,6 +84,11 @@ test("app backup export and restore replaces app data, browser data, and extensi
   assert.equal(restoredExtension?.directoryMode, "copy");
   assert.deepEqual(restoredEnvironment?.runtimeProfile.runtime.extensionPaths, [path.join(directory, "extensions", extension.id)]);
   assert.deepEqual(restoredProfile?.runtime.extensionPaths, [path.join(directory, "extensions", extension.id)]);
+  assert.equal(
+    (await repository.listEnvironmentExtensionBindings(profile.id))[0]?.lifecycleRevision,
+    lifecycleRevision,
+  );
+  assert.equal(await fileExists(path.join(directory, "extension-runtimes", "stale-environment")), false);
 
   repository.close();
 });
@@ -238,6 +246,7 @@ function makeService(directory: string, repository: SqlitePanelRepository, activ
     repository,
     browserDataDir: path.join(directory, "browser-data"),
     extensionCacheDir: path.join(directory, "extensions"),
+    extensionRuntimeDir: path.join(directory, "extension-runtimes"),
     activeEnvironmentIds: () => activeIds,
   });
 }

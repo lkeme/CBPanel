@@ -1,7 +1,12 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { BrowserEnvironment, ExtensionEntity, GroupEntity } from "../../src/shared/entities";
+import {
+  normalizeExtensionBindingMetadata,
+  type BrowserEnvironment,
+  type ExtensionEntity,
+  type GroupEntity,
+} from "../../src/shared/entities";
 import {
   ENVIRONMENT_PACKAGE_KIND,
   ENVIRONMENT_PACKAGE_SCHEMA_VERSION,
@@ -136,8 +141,18 @@ export class EnvironmentPackageService {
       }
 
       this.setProgress(operationId, "importing-database", 0, prepared.data.environments.length, "Writing imported environments.");
+      const importedBindings = prepared.data.environmentExtensionBindings?.map((binding) => ({
+        ...binding,
+        // The imported browser state describes the exported package revision, while a reused local
+        // entity may have an unrelated reinstall timestamp. Leave that pair legacy-null so the first
+        // protected launch rebases it as a preserve-mode startup instead of synthesizing an update.
+        lifecycleRevision: reusedExtensionIds.has(prepared.extensionIdMap[binding.extensionId] ?? "")
+          ? undefined
+          : binding.lifecycleRevision,
+      }));
       const imported = await this.options.repository.importEnvironmentPackage({
         ...prepared.data,
+        environmentExtensionBindings: importedBindings,
         environmentIdMap: prepared.environmentIdMap,
         extensionIdMap: prepared.extensionIdMap,
         extensionLocalPaths: prepared.extensionLocalPaths,
@@ -207,6 +222,9 @@ export class EnvironmentPackageService {
     const warnings: string[] = [];
     const groups = await this.exportGroups(environments);
     const extensions = await this.exportExtensions(environments);
+    const environmentExtensionBindings = (await Promise.all(
+      environments.map((environment) => this.options.repository.listEnvironmentExtensionBindings(environment.id)),
+    )).flat();
     const exportedEnvironments = await this.materializeEnvironmentDependencies(environments);
     const entries: ArchiveEntry[] = [];
     const browserDataEntries = await this.browserDataEntries(exportedEnvironments, warnings);
@@ -231,6 +249,7 @@ export class EnvironmentPackageService {
       environments: exportedEnvironments,
       groups,
       extensions,
+      environmentExtensionBindings,
     };
     entries.push(jsonArchiveEntry(MANIFEST_ENTRY, manifest));
     entries.push(jsonArchiveEntry(DATA_ENTRY, data));
@@ -497,6 +516,7 @@ function parsePackageData(input: unknown): EnvironmentPackageData {
     environments: input.environments as BrowserEnvironment[],
     groups: input.groups as GroupEntity[],
     extensions: input.extensions as ExtensionEntity[],
+    environmentExtensionBindings: normalizeExtensionBindingMetadata(input.environmentExtensionBindings),
   };
 }
 

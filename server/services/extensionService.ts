@@ -20,10 +20,13 @@ import {
 } from "../../src/shared/entities";
 import { createId, nowIso } from "../../src/shared/profile";
 import type { PanelRepository } from "../storage/types";
+import { ExtensionRuntimeService } from "./extensionRuntimeService";
 
 type ExtensionServiceOptions = {
   repository: PanelRepository;
   extensionCacheDir: string;
+  extensionRuntimeDir?: string;
+  browserDataDir?: string;
   /** Where uploaded archives are persisted so `sourceUrl` stays readable for reinstall/update. */
   extensionArchiveDir?: string;
   fetchImpl?: typeof fetch;
@@ -155,10 +158,17 @@ export class ExtensionService {
 
   private readonly extensionArchiveDir: string;
 
+  private readonly runtimeService: ExtensionRuntimeService;
+
   constructor(private readonly options: ExtensionServiceOptions) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.extensionArchiveDir = options.extensionArchiveDir
       ?? path.join(path.dirname(path.resolve(options.extensionCacheDir)), "extension-archives");
+    const dataDir = path.dirname(path.resolve(options.extensionCacheDir));
+    this.runtimeService = new ExtensionRuntimeService({
+      runtimeDir: options.extensionRuntimeDir ?? path.join(dataDir, "extension-runtimes"),
+      browserDataDir: options.browserDataDir ?? path.join(dataDir, "browser-data"),
+    });
   }
 
   async importDirectory(
@@ -197,6 +207,7 @@ export class ExtensionService {
         sourceKind: "local-directory",
         sourceUrl: sourcePath,
         localPath: sourcePath,
+        manifestKey: identity.manifestKey,
         manifestSha256,
         directoryMode: "reference",
         installState: "installed",
@@ -223,6 +234,19 @@ export class ExtensionService {
 
   /** Best-effort removal of interrupted extract/copy swap leftovers in the extension cache. */
   async sweepCacheArtifacts(): Promise<void> {
+    await this.runtimeService.sweepArtifacts();
+    const environments = [
+      ...await this.options.repository.listEnvironments(),
+      ...(await this.options.repository.listTrashEnvironments()).map((item) => item.environment),
+    ];
+    const bindings = new Map<string, ReadonlySet<string>>();
+    for (const environment of environments) {
+      bindings.set(
+        environment.id,
+        new Set((await this.options.repository.listEnvironmentExtensionBindings(environment.id)).map((binding) => binding.extensionId)),
+      );
+    }
+    await this.runtimeService.sweepBindings(bindings, this.options.activeEnvironmentIds?.());
     let entries: import("node:fs").Dirent[];
     try {
       entries = await fs.readdir(this.options.extensionCacheDir, { withFileTypes: true });
@@ -336,6 +360,19 @@ export class ExtensionService {
     const extension = await this.getExtensionOrThrow(id);
     await this.options.repository.deleteExtension(id);
     await this.cleanupExtensionFiles(extension);
+    await this.cleanupRuntimeBindings(id);
+  }
+
+  /** Best-effort cleanup after the repository has removed one or more bindings. */
+  async cleanupRuntimeBindings(extensionId: string, environmentIds?: string[]): Promise<void> {
+    const held = this.options.activeEnvironmentIds?.() ?? new Set<string>();
+    const removable = environmentIds?.filter((environmentId) => !held.has(environmentId));
+    if (environmentIds && removable?.length === 0) return;
+    if (!environmentIds && held.size > 0) {
+      await this.runtimeService.removeExtension(extensionId, undefined, held);
+      return;
+    }
+    await this.runtimeService.removeExtension(extensionId, removable);
   }
 
   async createRemote(input: Partial<ExtensionEntity>): Promise<ExtensionEntity> {
@@ -488,8 +525,15 @@ export class ExtensionService {
       // points staying complete forever. Falling back to the stored value is a hard requirement: a
       // manifest that cannot be read must never blank an established digest.
       const manifestSha256 = (await readManifestFingerprint(extension.localPath)) ?? extension.manifestSha256;
+      const referenceManifestKey = extension.directoryMode === "reference"
+        && !extension.manifestKey
+        && typeof manifest.key === "string"
+        && manifest.key.trim()
+        ? manifest.key.trim()
+        : undefined;
       return this.options.repository.updateExtension(id, {
         ...extensionFieldsFromManifest(manifest),
+        ...(referenceManifestKey ? { manifestKey: referenceManifestKey } : {}),
         manifestSha256,
         installState: extension.installState === "update-available" ? "update-available" : "installed",
         lastCheckedAt: nowIso(),
@@ -658,6 +702,12 @@ export class ExtensionService {
     if (!environment) throw Object.assign(new Error("Environment does not exist"), { status: 404 });
 
     const extensionById = new Map((await this.options.repository.listExtensions()).map((extension) => [extension.id, extension]));
+    const bindingByExtensionId = new Map(
+      (await this.options.repository.listEnvironmentExtensionBindings(environmentId))
+        .map((binding) => [binding.extensionId, binding] as const),
+    );
+    const protectsLifecycle = environment.runtimeProfile.mode === "persistent"
+      && environment.runtimeProfile.runtime.launcher !== "playwright-browser";
     const paths: string[] = [];
     const warnings: ExtensionLaunchWarning[] = [];
     const loaded: ExtensionEntity[] = [];
@@ -682,7 +732,20 @@ export class ExtensionService {
       if (installed.installState === "update-available") {
         warnings.push({ name: installed.name, reason: "有可用更新未安装，本次启动仍使用当前版本" });
       }
-      paths.push(installed.localPath);
+      if (protectsLifecycle) {
+        const runtime = await this.runtimeService.materialize({
+          environmentId,
+          extension: installed,
+          lifecycleRevision: bindingByExtensionId.get(installed.id)?.lifecycleRevision,
+        });
+        paths.push(runtime.path);
+        if (runtime.warning) warnings.push({ name: installed.name, reason: runtime.warning });
+        if (!runtime.protected && !this.options.activeEnvironmentIds?.().has(environmentId)) {
+          await this.runtimeService.removeExtension(installed.id, [environmentId]);
+        }
+      } else {
+        paths.push(installed.localPath);
+      }
       loaded.push(installed);
     }
     warnings.push(...duplicateIdentityWarnings(loaded));
@@ -919,6 +982,7 @@ export class ExtensionService {
         sourceKind: "local-directory",
         sourceUrl: sourcePath,
         localPath: sourcePath,
+        manifestKey: await readManifestKey(sourcePath),
         directoryMode: "reference",
         sha256: undefined,
         manifestSha256,
@@ -1270,19 +1334,24 @@ export class ExtensionService {
 
   private assertOutsideExtensionCache(sourcePath: string): void {
     const cacheDir = path.resolve(this.options.extensionCacheDir);
+    const runtimeDir = path.resolve(
+      this.options.extensionRuntimeDir ?? path.join(path.dirname(cacheDir), "extension-runtimes"),
+    );
     const comparableSource = process.platform === "win32" ? sourcePath.toLowerCase() : sourcePath;
-    const comparableCache = process.platform === "win32" ? cacheDir.toLowerCase() : cacheDir;
-    if (comparableSource === comparableCache || comparableSource.startsWith(`${comparableCache}${path.sep}`)) {
-      throw Object.assign(
-        new Error(`Extension directory cannot be inside the extension cache directory: ${sourcePath}`),
-        { status: 400 },
-      );
-    }
-    if (comparableCache.startsWith(`${comparableSource}${path.sep}`)) {
-      throw Object.assign(
-        new Error(`Extension directory cannot contain the extension cache directory: ${sourcePath}`),
-        { status: 400 },
-      );
+    for (const [managedDir, label] of [[cacheDir, "extension cache"], [runtimeDir, "extension runtime"]] as const) {
+      const comparableManaged = process.platform === "win32" ? managedDir.toLowerCase() : managedDir;
+      if (comparableSource === comparableManaged || comparableSource.startsWith(`${comparableManaged}${path.sep}`)) {
+        throw Object.assign(
+          new Error(`Extension directory cannot be inside the ${label} directory: ${sourcePath}`),
+          { status: 400 },
+        );
+      }
+      if (comparableManaged.startsWith(`${comparableSource}${path.sep}`)) {
+        throw Object.assign(
+          new Error(`Extension directory cannot contain the ${label} directory: ${sourcePath}`),
+          { status: 400 },
+        );
+      }
     }
   }
 

@@ -1,4 +1,4 @@
-import type { BrowserEnvironment, ExtensionEntity, GroupEntity } from "./entities";
+import type { BrowserEnvironment, ExtensionBindingMetadata, ExtensionEntity, GroupEntity } from "./entities";
 
 export const ENVIRONMENT_PACKAGE_KIND = "cbpanel.environmentPackage";
 export const ENVIRONMENT_PACKAGE_SCHEMA_VERSION = 1;
@@ -30,6 +30,7 @@ export interface EnvironmentPackageData {
   environments: BrowserEnvironment[];
   groups: GroupEntity[];
   extensions: ExtensionEntity[];
+  environmentExtensionBindings?: ExtensionBindingMetadata[];
 }
 
 export interface EnvironmentPackageOperationResult {

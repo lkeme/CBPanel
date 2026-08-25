@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ExtensionEntity } from "../../src/shared/entities";
+import { normalizeExtensionBindingMetadata, type ExtensionEntity } from "../../src/shared/entities";
 import {
   APP_BACKUP_KIND,
   APP_BACKUP_SCHEMA_VERSION,
@@ -29,6 +29,7 @@ type AppBackupServiceOptions = {
   repository: PanelRepository;
   browserDataDir: string;
   extensionCacheDir: string;
+  extensionRuntimeDir?: string;
   activeEnvironmentIds: () => Set<string>;
 };
 
@@ -316,6 +317,10 @@ export class AppBackupService {
     await replaceManagedDirectory(path.join(prepared.stagingDir, "browser-data"), this.options.browserDataDir);
     this.setProgress(operationId, "restoring-files", 1, 2, "Replacing extension files.");
     await replaceManagedDirectory(path.join(prepared.stagingDir, "extensions"), this.options.extensionCacheDir);
+    await fs.rm(
+      this.options.extensionRuntimeDir ?? path.join(path.dirname(this.options.extensionCacheDir), "extension-runtimes"),
+      { recursive: true, force: true },
+    );
     this.setProgress(operationId, "restoring-files", 2, 2, "Runtime files restored.");
   }
 
@@ -439,6 +444,7 @@ function parseBackupData(input: unknown): AppBackupData {
     proxies: input.proxies as AppBackupData["proxies"],
     extensions: input.extensions as AppBackupData["extensions"],
     extensionSources: input.extensionSources as AppBackupData["extensionSources"],
+    environmentExtensionBindings: normalizeExtensionBindingMetadata(input.environmentExtensionBindings),
   };
 }
 

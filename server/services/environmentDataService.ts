@@ -5,6 +5,7 @@ import { pathExists } from "./archiveUtils";
 
 type EnvironmentDataServiceOptions = {
   browserDataDir: string;
+  extensionRuntimeDir?: string;
 };
 
 export type EnvironmentDataCleanupResult = {
@@ -40,23 +41,32 @@ export class EnvironmentDataService {
         warnings.push(`Kept browser data for ${id}: a browser process may still be holding it.`);
         continue;
       }
-      const directory = this.resolveEnvironmentDir(id);
-      if (!directory) {
+      const directories = this.resolveEnvironmentDirs(id);
+      if (!directories) {
         warnings.push(`Refused to remove browser data for an unusable environment id: ${id}`);
         continue;
       }
       // An environment that was never launched has no directory, and reporting it as removed would
       // inflate the count the caller shows. `force` below still covers the directory disappearing
       // between this check and the rm.
-      if (!(await pathExists(directory))) continue;
-      // Per id, so one failure never aborts the rest, and never throws: on Windows a browser process
-      // still holding handles under its profile answers EPERM/EBUSY, and that must not turn an already
-      // committed permanent delete into a 5xx.
-      try {
-        await fs.rm(directory, { recursive: true, force: true });
-        removed.push(id);
-      } catch (error) {
-        warnings.push(`Failed to remove browser data for ${id}: ${(error as Error).message}`);
+      const [browserDirectory, runtimeDirectory] = directories;
+      // `removed` is an established API count for browser-data only. Runtime copies are derivative and
+      // cleaned independently so a runtime-only orphan cannot inflate that count, and a failure on one
+      // side never hides a successful removal on the other.
+      if (await pathExists(browserDirectory!)) {
+        try {
+          await this.removeDirectory(browserDirectory!);
+          removed.push(id);
+        } catch (error) {
+          warnings.push(`Failed to remove browser data for ${id}: ${(error as Error).message}`);
+        }
+      }
+      if (runtimeDirectory && await pathExists(runtimeDirectory)) {
+        try {
+          await this.removeDirectory(runtimeDirectory);
+        } catch (error) {
+          warnings.push(`Failed to remove extension runtime data for ${id}: ${(error as Error).message}`);
+        }
       }
     }
     return { removed, warnings };
@@ -71,21 +81,29 @@ export class EnvironmentDataService {
    * registered after the listing is still in the ids read afterwards.
    */
   async pruneOrphanEnvironmentData(readKnownIds: () => Promise<Iterable<string>>): Promise<EnvironmentDataCleanupResult> {
-    // No directory means nothing has ever been launched, which is not something to report as a failure.
-    if (!(await pathExists(this.options.browserDataDir))) return { removed: [], warnings: [] };
-    let entries: Dirent[];
-    try {
-      entries = await fs.readdir(this.options.browserDataDir, { withFileTypes: true });
-    } catch (error) {
-      return { removed: [], warnings: [`Failed to read browser data directory: ${(error as Error).message}`] };
-    }
+    const roots = [this.options.browserDataDir, ...(this.options.extensionRuntimeDir ? [this.options.extensionRuntimeDir] : [])];
+    const rootReads = await Promise.all(roots.map(async (root) => {
+      if (!(await pathExists(root))) return [] as Dirent[];
+      try {
+        return await fs.readdir(root, { withFileTypes: true });
+      } catch (error) {
+        return error as Error;
+      }
+    }));
+    const readWarnings = rootReads
+      .filter((result): result is Error => result instanceof Error)
+      .map((error) => `Failed to read environment data directory: ${error.message}`);
+    const entriesByRoot = rootReads.filter((result): result is Dirent[] => Array.isArray(result));
+    if (entriesByRoot.length === 0) return { removed: [], warnings: readWarnings };
+    if (entriesByRoot.every((entries) => entries.length === 0)) return { removed: [], warnings: readWarnings };
     const known = new Set(await readKnownIds());
     // Only directories are environment data. Loose files next to them belong to whatever wrote them,
     // and deleting a file because no environment is named after it would be pure guesswork.
-    const orphans = entries
-      .filter((entry) => entry.isDirectory() && !known.has(entry.name))
-      .map((entry) => entry.name);
-    return this.removeEnvironmentData(orphans);
+    const orphans = [...new Set(entriesByRoot
+      .flatMap((entries) => entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name)))]
+      .filter((id) => !known.has(id));
+    const cleanup = await this.removeEnvironmentData(orphans);
+    return { removed: cleanup.removed, warnings: [...readWarnings, ...cleanup.warnings] };
   }
 
   /**
@@ -93,9 +111,16 @@ export class EnvironmentDataService {
    * anything that is not a plain direct child name (empty, `..`, a nested or absolute path) is rejected
    * rather than resolved into a target.
    */
-  private resolveEnvironmentDir(id: string): string | undefined {
+  private resolveEnvironmentDirs(id: string): string[] | undefined {
     const name = id.trim();
     if (!name || name === "." || name === ".." || name !== path.basename(name)) return undefined;
-    return path.join(this.options.browserDataDir, name);
+    return [
+      path.join(this.options.browserDataDir, name),
+      ...(this.options.extensionRuntimeDir ? [path.join(this.options.extensionRuntimeDir, name)] : []),
+    ];
+  }
+
+  protected async removeDirectory(directory: string): Promise<void> {
+    await fs.rm(directory, { recursive: true, force: true });
   }
 }

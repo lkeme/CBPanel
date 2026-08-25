@@ -193,7 +193,8 @@ test("ensureExtensionsInstalled returns only valid unpacked paths", async () => 
   const ensured = await service.ensureExtensionsInstalled(profile.id);
 
   assert.deepEqual(ensured.paths, [extensionDir]);
-  assert.deepEqual(ensured.warnings, []);
+  assert.equal(ensured.warnings.length, 1);
+  assert.match(ensured.warnings[0]?.reason ?? "", /复制模式/);
 
   repository.close();
 });
@@ -215,10 +216,10 @@ test("ensureExtensionsInstalled reports disabled bound extensions instead of dro
   const ensured = await service.ensureExtensionsInstalled(profile.id);
 
   assert.deepEqual(ensured.paths, [enabled.localPath]);
-  assert.equal(ensured.warnings.length, 1);
-  assert.equal(ensured.warnings[0]?.name, "Disabled Extension");
-  assert.match(ensured.warnings[0]?.reason ?? "", /扩展已停用/);
-  assert.match(ensured.warnings[0]?.reason ?? "", /浏览器可能回收未加载扩展的本地数据/);
+  assert.equal(ensured.warnings.length, 2);
+  const disabledWarning = ensured.warnings.find((warning) => warning.name === "Disabled Extension");
+  assert.match(disabledWarning?.reason ?? "", /扩展已停用/);
+  assert.match(disabledWarning?.reason ?? "", /浏览器可能回收未加载扩展的本地数据/);
 
   repository.close();
 });
@@ -1167,6 +1168,21 @@ test("reference import rejects directories inside the extension cache", async ()
   repository.close();
 });
 
+test("directory import rejects generated extension runtime copies as canonical sources", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const runtimeDir = path.join(directory, "extension-runtimes");
+  const service = new ExtensionService({
+    repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionRuntimeDir: runtimeDir,
+  });
+  const generatedCopy = await writeExtensionDirectory(runtimeDir, "environment-one/extension-one");
+
+  await assert.rejects(service.importDirectory(generatedCopy, "reference"), /inside the extension runtime directory/);
+  repository.close();
+});
+
 test("directory import rejects comma paths that would split the browser extension list", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
@@ -1267,6 +1283,38 @@ test("check never injects a key into a reference-mode source directory", async (
   assert.equal(checked.installState, "installed");
   assert.equal(await readManifestKeyFromDirectory(sourceDirectory), undefined);
 
+  repository.close();
+});
+
+test("check backfills a legacy reference manifest key in SQLite and lifecycle-protects a byte-identical source", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const service = new ExtensionService({
+    repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionRuntimeDir: path.join(directory, "extension-runtimes"),
+    browserDataDir: path.join(directory, "browser-data"),
+  });
+  const source = await writeExtensionDirectory(directory, "legacy-keyed-reference", {
+    name: "Legacy Keyed Reference",
+    key: PRESET_MANIFEST_KEY,
+    background: { service_worker: "background.js" },
+  });
+  await fs.writeFile(path.join(source, "background.js"), "globalThis.loaded = true;\n", "utf8");
+  const imported = await service.importDirectory(source, "reference");
+  await repository.updateExtension(imported.id, { manifestKey: undefined });
+  const before = await fs.readFile(path.join(source, "manifest.json"));
+  const profile = await repository.createProfile({ name: "Legacy Keyed Runtime" });
+  await repository.bindExtensionToEnvironments(imported.id, [profile.id]);
+
+  const checked = await service.check(imported.id);
+  const ensured = await service.ensureExtensionsInstalled(profile.id);
+
+  assert.equal(checked.manifestKey, PRESET_MANIFEST_KEY);
+  assert.equal((await repository.getExtension(imported.id))?.manifestKey, PRESET_MANIFEST_KEY);
+  assert.notEqual(ensured.paths[0], source);
+  assert.ok(ensured.paths[0]?.startsWith(path.join(directory, "extension-runtimes", profile.id)));
+  assert.deepEqual(await fs.readFile(path.join(source, "manifest.json")), before);
   repository.close();
 });
 
@@ -1985,8 +2033,8 @@ test("launch warns when two bound extensions share the same localPath", async ()
 
   const ensured = await service.ensureExtensionsInstalled(profile.id);
   assert.equal(ensured.paths.length, 2);
-  assert.equal(ensured.warnings.length, 1);
-  assert.match(ensured.warnings[0]?.reason ?? "", /相同的本地路径，浏览器只会加载其中一个/);
+  assert.equal(ensured.warnings.length, 3);
+  assert.ok(ensured.warnings.some((warning) => /相同的本地路径，浏览器只会加载其中一个/.test(warning.reason)));
 
   repository.close();
 });

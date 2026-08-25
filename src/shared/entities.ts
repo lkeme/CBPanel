@@ -167,6 +167,40 @@ export interface ExtensionEntity {
   updatedAt: string;
 }
 
+/** Optional lifecycle metadata carried by new backups/packages; old archives omit it safely. */
+export interface ExtensionBindingMetadata {
+  environmentId: string;
+  extensionId: string;
+  lifecycleRevision?: string;
+}
+
+export function normalizeExtensionBindingMetadata(input: unknown): ExtensionBindingMetadata[] | undefined {
+  if (input === undefined) return undefined;
+  if (!Array.isArray(input)) throw invalidExtensionBindingMetadata("Extension binding metadata must be an array");
+  const bindings = new Map<string, ExtensionBindingMetadata>();
+  for (const value of input) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw invalidExtensionBindingMetadata("Extension binding metadata entries must be objects");
+    }
+    const record = value as Record<string, unknown>;
+    const environmentId = typeof record.environmentId === "string" ? record.environmentId.trim() : "";
+    const extensionId = typeof record.extensionId === "string" ? record.extensionId.trim() : "";
+    if (!environmentId || !extensionId) throw invalidExtensionBindingMetadata("Extension binding metadata ids cannot be empty");
+    if (record.lifecycleRevision !== undefined && typeof record.lifecycleRevision !== "string") {
+      throw invalidExtensionBindingMetadata("Extension binding lifecycle revision must be a string");
+    }
+    const lifecycleRevision = typeof record.lifecycleRevision === "string" && record.lifecycleRevision.trim()
+      ? record.lifecycleRevision.trim()
+      : undefined;
+    bindings.set(`${environmentId}\0${extensionId}`, { environmentId, extensionId, lifecycleRevision });
+  }
+  return [...bindings.values()];
+}
+
+function invalidExtensionBindingMetadata(message: string): Error {
+  return Object.assign(new Error(message), { status: 400 });
+}
+
 export interface ExtensionSourceEntity {
   id: string;
   name: string;

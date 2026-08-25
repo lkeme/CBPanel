@@ -27,6 +27,7 @@ import type {
   TagEntity,
   TrashEnvironment,
 } from "../../src/shared/entities";
+import { normalizeExtensionBindingMetadata } from "../../src/shared/entities";
 import {
   type AppSettings,
   type AppSettingsPatch,
@@ -37,7 +38,12 @@ import {
 } from "../../src/shared/settings";
 import { APP_BACKUP_SCHEMA_VERSION, type AppBackupData } from "../../src/shared/appBackup";
 import { seedProfiles } from "./seedProfiles";
-import type { EnvironmentPackageImportInput, EnvironmentPackageImportResult, PanelRepository } from "./types";
+import type {
+  EnvironmentExtensionBinding,
+  EnvironmentPackageImportInput,
+  EnvironmentPackageImportResult,
+  PanelRepository,
+} from "./types";
 
 type SqliteStoreOptions = {
   dataDir: string;
@@ -154,6 +160,12 @@ type ExtensionSourceRow = {
 
 type IdRow = {
   id: string;
+};
+
+type EnvironmentExtensionBindingRow = {
+  environment_id: string;
+  extension_id: string;
+  lifecycle_revision: string | null;
 };
 
 type IdentityTable = "profiles" | "browser_environments" | "groups" | "tags" | "proxies" | "extensions" | "extension_sources";
@@ -431,6 +443,20 @@ export class SqlitePanelRepository implements PanelRepository {
         const imported = this.insertImportedEnvironment(environment, groupIdMap, extensionIdMap, requestedId);
         environmentIdMap[environment.id] = imported.id;
         importedIds.push(imported.id);
+      }
+
+      for (const binding of input.environmentExtensionBindings ?? []) {
+        const environmentId = environmentIdMap[binding.environmentId];
+        const extensionId = extensionIdMap[binding.extensionId];
+        if (!environmentId || !extensionId) {
+          throw Object.assign(new Error("Environment package binding metadata references an unknown entity"), { status: 400 });
+        }
+        if (!binding.lifecycleRevision) continue;
+        db.prepare(`
+          UPDATE environment_extensions
+          SET lifecycle_revision = ?
+          WHERE environment_id = ? AND extension_id = ?
+        `).run(binding.lifecycleRevision, environmentId, extensionId);
       }
 
       this.markProfilesModified();
@@ -790,6 +816,26 @@ export class SqlitePanelRepository implements PanelRepository {
     }
   }
 
+  async listEnvironmentExtensionBindings(environmentId: string): Promise<EnvironmentExtensionBinding[]> {
+    await this.initialize();
+    return this.database()
+      .prepare(`
+        SELECT environment_id, extension_id, lifecycle_revision
+        FROM environment_extensions
+        WHERE environment_id = ?
+        ORDER BY extension_id ASC
+      `)
+      .all(environmentId)
+      .map((row) => {
+        const binding = row as EnvironmentExtensionBindingRow;
+        return {
+          environmentId: binding.environment_id,
+          extensionId: binding.extension_id,
+          lifecycleRevision: binding.lifecycle_revision ?? undefined,
+        };
+      });
+  }
+
   async bindExtensionToEnvironments(id: string, environmentIds: string[]): Promise<BrowserEnvironment[]> {
     await this.initialize();
     this.getExtensionOrThrow(id);
@@ -799,7 +845,10 @@ export class SqlitePanelRepository implements PanelRepository {
     try {
       for (const environmentId of cleanEnvironmentIds) {
         this.getActiveEnvironmentOrThrow(environmentId);
-        db.prepare("INSERT OR IGNORE INTO environment_extensions (environment_id, extension_id) VALUES (?, ?)").run(environmentId, id);
+        db.prepare(`
+          INSERT OR IGNORE INTO environment_extensions (environment_id, extension_id, lifecycle_revision)
+          VALUES (?, ?, ?)
+        `).run(environmentId, id, createId("binding"));
       }
       db.exec("COMMIT");
     } catch (error) {
@@ -931,6 +980,7 @@ export class SqlitePanelRepository implements PanelRepository {
       proxies: await this.listProxies({ includeSecrets: true }),
       extensions: await this.listExtensions(),
       extensionSources: await this.listExtensionSources(),
+      environmentExtensionBindings: this.readAllEnvironmentExtensionBindings(),
     };
   }
 
@@ -948,6 +998,7 @@ export class SqlitePanelRepository implements PanelRepository {
       for (const extension of normalized.extensions) this.insertExtensionExact(extension);
       for (const profile of normalized.profiles) this.upsertProfileRow(profile);
       for (const environment of normalized.environments) this.insertEnvironmentExact(environment);
+      this.restoreBindingRevisions(normalized.environmentExtensionBindings);
       this.writeSettings(normalized.settings);
       this.setMetadata("profiles_user_modified", "true");
       this.setMetadata("restored_from_backup_at", nowIso());
@@ -1110,6 +1161,7 @@ export class SqlitePanelRepository implements PanelRepository {
       CREATE TABLE IF NOT EXISTS environment_extensions (
         environment_id TEXT NOT NULL,
         extension_id TEXT NOT NULL,
+        lifecycle_revision TEXT,
         PRIMARY KEY (environment_id, extension_id),
         FOREIGN KEY (environment_id) REFERENCES browser_environments(id) ON DELETE CASCADE,
         FOREIGN KEY (extension_id) REFERENCES extensions(id)
@@ -1138,6 +1190,7 @@ export class SqlitePanelRepository implements PanelRepository {
     this.ensureColumn("extensions", "manifest_key", "TEXT");
     this.ensureColumn("extensions", "directory_mode", "TEXT");
     this.ensureColumn("extensions", "manifest_sha256", "TEXT");
+    this.ensureColumn("environment_extensions", "lifecycle_revision", "TEXT");
   }
 
   private async migrateLegacyJsonIfNeeded({ explicit }: { explicit: boolean }): Promise<void> {
@@ -1407,7 +1460,10 @@ export class SqlitePanelRepository implements PanelRepository {
       localPath,
       directoryMode: restoredFiles ? "copy" : extension.directoryMode,
       installState: missingInstalledFiles ? "local-missing" : restoredFiles ? "installed" : extension.installState,
-      lastInstalledAt: restoredFiles ? timestamp : undefined,
+      // `lastInstalledAt` doubles as the explicit package revision consumed by lifecycle protection.
+      // Re-homing identical package bytes must preserve it, otherwise the imported environment's first
+      // launch looks like a reinstall and third-party extensions receive a synthetic update.
+      lastInstalledAt: restoredFiles ? extension.lastInstalledAt ?? timestamp : undefined,
       lastCheckedAt: undefined,
       lastError: restoredFiles ? undefined : missingInstalledFiles ? "Extension files missing from imported package." : extension.lastError,
       createdAt: timestamp,
@@ -2151,6 +2207,39 @@ export class SqlitePanelRepository implements PanelRepository {
       .map((row) => (row as IdRow).id);
   }
 
+  private readAllEnvironmentExtensionBindings(): EnvironmentExtensionBinding[] {
+    return this.database()
+      .prepare(`
+        SELECT environment_id, extension_id, lifecycle_revision
+        FROM environment_extensions
+        ORDER BY environment_id ASC, extension_id ASC
+      `)
+      .all()
+      .map((row) => {
+        const binding = row as EnvironmentExtensionBindingRow;
+        return {
+          environmentId: binding.environment_id,
+          extensionId: binding.extension_id,
+          lifecycleRevision: binding.lifecycle_revision ?? undefined,
+        };
+      });
+  }
+
+  private restoreBindingRevisions(bindings: EnvironmentExtensionBinding[] | undefined): void {
+    if (!bindings) return;
+    const statement = this.database().prepare(`
+      UPDATE environment_extensions
+      SET lifecycle_revision = ?
+      WHERE environment_id = ? AND extension_id = ?
+    `);
+    for (const binding of bindings) {
+      const result = statement.run(binding.lifecycleRevision ?? null, binding.environmentId, binding.extensionId);
+      if (Number(result.changes) === 0) {
+        throw Object.assign(new Error("App backup binding metadata references an unknown entity"), { status: 400 });
+      }
+    }
+  }
+
   private environmentExtensions(environmentId: string): ExtensionEntity[] {
     return this.database()
       .prepare(`
@@ -2302,6 +2391,7 @@ function normalizeFullBackupData(data: AppBackupData): AppBackupData {
     proxies: data.proxies.map(normalizeProxyEntity),
     extensions: data.extensions.map(normalizeExtensionEntity),
     extensionSources: data.extensionSources.map(normalizeExtensionSourceEntity),
+    environmentExtensionBindings: normalizeExtensionBindingMetadata(data.environmentExtensionBindings),
   };
 }
 

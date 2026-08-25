@@ -1,6 +1,7 @@
 import type {
   BrowserEnvironment,
   ExtensionEntity,
+  ExtensionBindingMetadata,
   ExtensionSourceEntity,
   GroupEntity,
   ProxyEntity,
@@ -48,6 +49,7 @@ export interface AppBackupData {
   proxies: ProxyEntity[];
   extensions: ExtensionEntity[];
   extensionSources: ExtensionSourceEntity[];
+  environmentExtensionBindings?: ExtensionBindingMetadata[];
 }
 
 export interface AppBackupOperationResult {
