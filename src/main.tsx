@@ -76,6 +76,13 @@ import { omitKeys, withoutIds } from "./lib/collectionState";
 import { useBrowserCoreActions } from "./hooks/useBrowserCoreActions";
 import { useDiagnosticsActions } from "./hooks/useDiagnosticsActions";
 import { useExtensionActions } from "./hooks/useExtensionActions";
+import {
+  type ProfileLaunchRequest,
+  mergeSessionSnapshotByGeneration,
+  reconcileProfileLaunchRequests,
+  runSingleFlight,
+  shouldPollProfileSessions,
+} from "./hooks/profileLaunchState";
 import { useProfileLifecycleActions } from "./hooks/useProfileLifecycleActions";
 import { useProfileUtilityActions } from "./hooks/useProfileUtilityActions";
 import { useProxyActions } from "./hooks/useProxyActions";
@@ -356,6 +363,8 @@ function App() {
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const importInput = useRef<HTMLInputElement>(null);
   const pendingLaunchIdsRef = useRef<Set<string>>(new Set());
+  const launchRequestsRef = useRef<Map<string, ProfileLaunchRequest>>(new Map());
+  const sessionPollInFlightRef = useRef<Promise<void> | null>(null);
   const confirmedSettingsRef = useRef<AppSettings | null>(null);
   const optimisticSettingsRef = useRef<AppSettings | null>(null);
   const settingsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -368,6 +377,11 @@ function App() {
 
   useEffect(() => {
     void bootstrap();
+  }, []);
+
+  useEffect(() => () => {
+    for (const request of launchRequestsRef.current.values()) request.controller.abort();
+    launchRequestsRef.current.clear();
   }, []);
 
   useEffect(() => {
@@ -463,9 +477,9 @@ function App() {
     }
     return [...tags].sort((left, right) => left.localeCompare(right));
   }, [state?.profiles]);
-  const hasActiveSessions = useMemo(
-    () => (state?.sessions ?? []).some((session) => session.status === "running" || session.status === "launching" || session.status === "stopping"),
-    [state?.sessions],
+  const shouldPollSessions = useMemo(
+    () => shouldPollProfileSessions(state?.sessions ?? [], pendingLaunchIds.size),
+    [pendingLaunchIds, state?.sessions],
   );
   const moduleStats = useMemo(() => buildModuleStats(state, sessionsByProfileId, locale), [locale, sessionsByProfileId, state]);
   const filteredProfiles = useMemo(() => {
@@ -508,12 +522,25 @@ function App() {
   );
 
   useEffect(() => {
-    if (!hasActiveSessions) return;
+    if (!shouldPollSessions) return;
+    let disposed = false;
+    const poll = () => {
+      if (disposed || sessionPollInFlightRef.current) return;
+      void runSingleFlight(
+        sessionPollInFlightRef,
+        loadState,
+        (error) => console.warn("Session state polling failed", error),
+      );
+    };
+    poll();
     const interval = window.setInterval(() => {
-      void loadState();
+      poll();
     }, 1800);
-    return () => window.clearInterval(interval);
-  }, [hasActiveSessions]);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [shouldPollSessions]);
 
   useEffect(() => {
     if (!browserCoreOperationActive(binaryInfo?.core?.operation) && !isBrowserCoreBusy(busy)) return;
@@ -573,12 +600,27 @@ function App() {
 
   async function loadState(): Promise<PanelState> {
     const next = await api<PanelState>("/api/state");
+    const settledLaunchIds = reconcileProfileLaunchRequests(launchRequestsRef.current, next.sessions);
+    for (const profileId of settledLaunchIds) markLaunchPending(profileId, false);
     const optimisticSettings = optimisticSettingsRef.current;
     if (!optimisticSettings) {
       confirmedSettingsRef.current = normalizeSettings(next.settings);
     }
-    setState(optimisticSettings ? { ...next, settings: optimisticSettings } : next);
+    setState((current) => {
+      const resolved = optimisticSettings ? { ...next, settings: optimisticSettings } : next;
+      return current
+        ? { ...resolved, sessions: mergeSessionSnapshotByGeneration(current.sessions, resolved.sessions) }
+        : resolved;
+    });
     return next;
+  }
+
+  function markLaunchPending(id: string, pending: boolean) {
+    const next = new Set(pendingLaunchIdsRef.current);
+    if (pending) next.add(id);
+    else next.delete(id);
+    pendingLaunchIdsRef.current = next;
+    setPendingLaunchIds(next);
   }
 
   async function loadRuntimeInfo() {
@@ -775,9 +817,10 @@ function App() {
     draft,
     draftIsNew,
     draftProxyLibraryIds,
+    launchRequestsRef,
     loadState,
     localProxyDraftIds,
-    pendingLaunchIdsRef,
+    markLaunchPending,
     setBusy,
     setConfirmDialog,
     setDraft,
@@ -785,7 +828,6 @@ function App() {
     setDraftProxyLibraryIds,
     setDrawerMode,
     setLocalProxyDraftIds,
-    setPendingLaunchIds,
     setPreflight,
     setProxyCheck,
     setSelectedId,
@@ -1216,7 +1258,7 @@ function App() {
   }
 
   function confirmRunningSessionsBeforeExit(): boolean {
-    if (!hasActiveSessions) return false;
+    if (!shouldPollSessions) return false;
     setConfirmDialog({
       title: t("tray.closeRunningTitle"),
       body: t("tray.closeRunningBody"),

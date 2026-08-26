@@ -26,10 +26,21 @@ import { GithubMirrorProbeService } from "./githubMirrorProbeService";
 type RuntimeHandle = {
   close: () => Promise<void>;
   pageUrl: () => string | undefined;
+  ready: Promise<RuntimeReady>;
+};
+
+type RuntimeReady = {
   warning?: string;
 };
 
-export type ExtensionRegistrationPreflightProcess = RuntimeHandle & {
+type LaunchInterruption = {
+  promise: Promise<void>;
+  resolve: () => void;
+};
+
+export type ExtensionRegistrationPreflightProcess = {
+  close: () => Promise<void>;
+  pageUrl: () => string | undefined;
   clearServiceWorkers: (origins: string[]) => Promise<void>;
   loadUnpackedExtensions: (registrations: ExtensionLaunchRegistration[]) => Promise<void>;
   /** Completes a successful migration only after Browser.close and a natural Chromium exit. */
@@ -44,6 +55,10 @@ type RunningSession = SessionSummary & {
   registrationPreflightRuntime?: RegistrationPreflightRuntimeHandle;
   registrationPreflightPromise?: Promise<RegistrationPreflightRuntimeHandle>;
   closingByPanel?: boolean;
+  launchInterruption: LaunchInterruption;
+  launchFailed?: boolean;
+  launchCancelled?: boolean;
+  runtimeCloseConfirmed?: boolean;
 };
 
 // A graceful browser close is one to three seconds' work. When it is not — a renderer that will not exit,
@@ -54,7 +69,9 @@ type RunningSession = SessionSummary & {
 // to shut down and then kills it, so a budget above that would have stopAll cut off mid-flight, skipping
 // repository.close() and orphaning browsers that were about to exit.
 const SESSION_CLOSE_TIMEOUT_MS = 6_000;
+const SESSION_FORMAL_LAUNCH_TIMEOUT_MS = 60_000;
 const EXTENSION_REGISTRATION_MIGRATION_TIMEOUT_MS = 15_000;
+const EXTENSION_PAGE_RECOVERY_TIMEOUT_MS = 5_000;
 const EXTENSION_REGISTRATION_PREFLIGHT_TIMEOUT_MS = 15_000;
 const EXTENSION_REGISTRATION_PREFLIGHT_LAUNCH_GRACE_MS = 1_000;
 const EXTENSION_REGISTRATION_PREFLIGHT_CLOSE_GRACE_MS = 3_000;
@@ -116,8 +133,15 @@ type PuppeteerPage = {
   close?: () => Promise<void>;
   url: () => string;
   goto: (url: string, options?: GotoOptions) => Promise<unknown>;
+  reload?: (options?: GotoOptions) => Promise<unknown>;
+  createCDPSession?: () => Promise<unknown>;
   setUserAgent?: (userAgent: string) => Promise<void>;
   setViewport?: (viewport: { width: number; height: number }) => Promise<void>;
+};
+
+type BrowserPageCdpSession = {
+  send: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
+  detach?: () => Promise<void>;
 };
 
 type PuppeteerTarget = {
@@ -151,6 +175,28 @@ export type ExtensionRegistrationManagementPage = {
 export type ExtensionRegistrationMigrationBrowser = {
   listWorkers: () => Promise<ExtensionRegistrationWorker[]>;
   openManagementPage: () => Promise<ExtensionRegistrationManagementPage>;
+};
+
+export type ExtensionPageRootFrame = {
+  url: string;
+  unreachableUrl?: string;
+};
+
+export type RegisteredExtensionPageTarget = {
+  readRootFrame: (timeoutMs?: number) => Promise<ExtensionPageRootFrame>;
+  reload: () => Promise<void>;
+};
+
+export type RegisteredExtensionPageRecoveryBrowser = Pick<
+  ExtensionRegistrationMigrationBrowser,
+  "listWorkers"
+> & {
+  listExtensionPages: () => Promise<RegisteredExtensionPageTarget[]>;
+};
+
+export type ExtensionPageRecoveryReport = {
+  recovered: string[];
+  warnings: string[];
 };
 
 type GotoOptions = {
@@ -220,6 +266,7 @@ export class SessionService {
       status: "launching",
       startedAt: new Date().toISOString(),
       events: [],
+      launchInterruption: createLaunchInterruption(),
       // Carried over, not dropped: the record it replaces may be one whose close was never confirmed, and
       // that older process can still be holding these files. Dropping it here released the hold the
       // moment the user pressed Launch — and if this launch then failed, every destructive operation
@@ -229,6 +276,7 @@ export class SessionService {
     this.sessions.set(profile.id, session);
     pushSessionEvent(session, "info", "创建启动请求", profile.name);
 
+    let formalLaunchStarted = false;
     try {
       const resolved = await this.resolveRuntimeProfile(profile, {
         install: true,
@@ -280,6 +328,7 @@ export class SessionService {
       session.launch = buildSessionLaunchPlan(runtimeProfile, userDataDir);
       pushSessionEvent(session, "info", "启动计划已生成", `${session.launch.runtimeLauncher} -> ${session.launch.sdkLauncher}`);
       if (resolved.extensionRegistrations.some((registration) => registration.migrationRequired)) {
+        if (!this.isCurrentLaunching(session)) return publicSession(session);
         await this.preflightPendingExtensionRegistrations(
           runtimeProfile,
           session,
@@ -290,36 +339,63 @@ export class SessionService {
         // Recheck before the formal extension-enabled browser is created.
         this.assertCanLaunch();
       }
-      if (session.status !== "launching") return publicSession(session);
+      if (!this.isCurrentLaunching(session)) return publicSession(session);
 
-      session.runtimePromise = this.startRuntime(
+      formalLaunchStarted = true;
+      const formalDeadline = Date.now() + Math.max(1, this.formalLaunchTimeoutMs());
+      const runtimePromise = this.startRuntime(
         runtimeProfile,
         session,
         binary,
         resolved.extensionRegistrations,
+      ).then((runtime) => this.publishRuntimeHandle(session, runtime));
+      session.runtimePromise = runtimePromise;
+      const runtime = await this.awaitFormalLaunchStage(
+        session,
+        runtimePromise,
+        formalDeadline,
+        "browser startup",
       );
-      const runtime = await session.runtimePromise;
-      if (session.status !== "launching") return publicSession(session);
-      session.runtime = runtime;
-      delete session.runtimePromise;
-      session.status = "running";
+      if (!runtime || !this.isCurrentLaunching(session)) return publicSession(session);
+      const ready = await this.awaitFormalLaunchStage(
+        session,
+        runtime.ready,
+        formalDeadline,
+        "browser initialization",
+      );
+      if (!ready || !this.isCurrentLaunching(session)) return publicSession(session);
+      if (session.runtimePromise === runtimePromise) delete session.runtimePromise;
       // Deliberately the raw read, not readPageUrl: this one is still inside the launch, so a licence denial
       // the wrapper surfaces here belongs in the catch below, where it becomes a 409 naming the core
       // settings. readPageUrl exists for the polled reads afterwards, which must not be able to throw.
-      pushSessionEvent(session, "info", "CloakBrowser 已启动", runtime.pageUrl());
-      if (runtime.warning) {
-        session.lastError = runtime.warning;
-        pushSessionEvent(session, "warn", "起始页加载失败", runtime.warning);
+      const pageUrl = runtime.pageUrl();
+      session.status = "running";
+      pushSessionEvent(session, "info", "CloakBrowser 已启动", pageUrl);
+      if (ready.warning) {
+        session.lastError = ready.warning;
+        pushSessionEvent(session, "warn", "起始页加载失败", ready.warning);
       }
 
       return publicSession(session);
     } catch (error) {
-      if (session.status === "stopped") return publicSession(session);
+      if (!this.isCurrentSession(session) || session.launchCancelled) return publicSession(session);
+      if (session.status !== "launching") {
+        // Registration-preflight ownership failures can mark the generation error/unconfirmed before
+        // their primary launch error reaches this catch. A late handle may then close successfully; keep
+        // that confirmation from rewriting the failed launch as a normal stopped session.
+        if (session.status === "error") session.launchFailed = true;
+        throw await licenseDenialError(error);
+      }
       session.status = "error";
+      session.launchFailed = true;
       session.lastError = (error as Error).message;
       pushSessionEvent(session, "error", "启动失败", session.lastError);
-      delete session.runtime;
-      delete session.runtimePromise;
+      session.launchInterruption.resolve();
+      if (formalLaunchStarted) await this.cleanupFailedFormalLaunch(session, error);
+      else {
+        delete session.runtime;
+        delete session.runtimePromise;
+      }
       throw await licenseDenialError(error);
     }
   }
@@ -329,9 +405,22 @@ export class SessionService {
     if (!session) {
       return { profileId, status: "stopped", stoppedAt: new Date().toISOString() };
     }
+    const olderCloseWork = Promise.all(
+      [...this.unconfirmedCloses]
+        .filter((candidate) => candidate !== session && candidate.profileId === profileId)
+        .map((candidate) => this.closeUnconfirmedGeneration(candidate)),
+    );
+    if (session.runtimeCloseConfirmed) {
+      this.markSessionStopped(profileId, "会话已停止", session);
+      await olderCloseWork;
+      this.reflectUnconfirmedClose(session);
+      return publicSession(session);
+    }
 
     session.status = "stopping";
     session.closingByPanel = true;
+    session.launchCancelled = true;
+    session.launchInterruption.resolve();
     pushSessionEvent(session, "info", "停止会话");
     try {
       const closing = this.closeSessionRuntime(session);
@@ -352,15 +441,21 @@ export class SessionService {
           () => this.markSessionStopped(profileId, "会话已停止", session),
           (error) => this.recordLateCloseFailure(profileId, error, session),
         );
+        await olderCloseWork;
+        this.reflectUnconfirmedClose(session);
         return publicSession(session);
       }
       this.markSessionStopped(profileId, "会话已停止", session);
+      await olderCloseWork;
+      this.reflectUnconfirmedClose(session);
       return publicSession(session);
     } catch (error) {
       // A close that threw is exactly as unconfirmed as one that ran out of time: the attempt failed, so
       // nothing observed the process exit and it may still hold its files. The diagnosis survives in the
       // event log even after a later close event clears the session.
       this.markCloseUnconfirmed(profileId, `停止失败：${(error as Error).message}`, "停止失败", session);
+      await olderCloseWork;
+      this.reflectUnconfirmedClose(session);
       return publicSession(session);
     }
   }
@@ -376,9 +471,15 @@ export class SessionService {
     // that confirmation is permanent — no second event will ever arrive — so the session would hold every
     // file-touching service for the rest of the process.
     if (!session || (expectedSession && session !== expectedSession) || session.status === "stopped") return;
+    if ((expectedSession ?? session).runtimeCloseConfirmed) {
+      this.releaseGenerationRuntimeHold(expectedSession ?? session);
+      if ((expectedSession ?? session).launchFailed) (expectedSession ?? session).status = "error";
+      return;
+    }
     session.status = "error";
     session.closeUnconfirmed = true;
     this.unconfirmedCloses.add(session);
+    session.launchInterruption.resolve();
     delete session.closingByPanel;
     session.lastError = `${reason}：浏览器可能仍在运行。可再次点击停止，或手动结束该浏览器进程。`;
     pushSessionEvent(session, "error", event, session.lastError);
@@ -408,12 +509,180 @@ export class SessionService {
     return SESSION_CLOSE_TIMEOUT_MS;
   }
 
+  protected formalLaunchTimeoutMs(): number {
+    return SESSION_FORMAL_LAUNCH_TIMEOUT_MS;
+  }
+
+  private isCurrentSession(session: RunningSession): boolean {
+    return this.sessions.get(session.profileId) === session;
+  }
+
+  private isCurrentLaunching(session: RunningSession): boolean {
+    return this.isCurrentSession(session) && session.status === "launching";
+  }
+
+  private publishRuntimeHandle(session: RunningSession, runtime: RuntimeHandle): RuntimeHandle {
+    const published = {
+      ...runtime,
+      close: idempotentAsync(runtime.close),
+    };
+    if (this.isCurrentSession(session) && (session.status === "launching" || session.status === "stopping")) {
+      session.runtime = published;
+    }
+    return published;
+  }
+
+  private async awaitFormalLaunchStage<Result>(
+    session: RunningSession,
+    work: Promise<Result>,
+    deadline: number,
+    operation: string,
+  ): Promise<Result | undefined> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw formalLaunchTimeoutError(operation);
+    const settled = work.then(
+      (value) => ({ kind: "fulfilled" as const, value }),
+      (error: unknown) => ({ kind: "rejected" as const, error }),
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      settled,
+      session.launchInterruption.promise.then(() => ({ kind: "interrupted" as const })),
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        timer = setTimeout(() => resolve({ kind: "timeout" }), remaining);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (outcome.kind === "fulfilled") return outcome.value;
+    if (outcome.kind === "rejected") throw outcome.error;
+    if (outcome.kind === "interrupted") return undefined;
+    throw formalLaunchTimeoutError(operation);
+  }
+
+  private async cleanupFailedFormalLaunch(session: RunningSession, error: unknown): Promise<void> {
+    const runtime = session.runtime;
+    if (runtime) {
+      await this.closeFailedRuntimeHandle(session, runtime);
+      return;
+    }
+
+    const runtimePromise = session.runtimePromise;
+    if (!runtimePromise) return;
+    if ((error as { code?: string }).code !== "BROWSER_LAUNCH_TIMEOUT") {
+      delete session.runtimePromise;
+      return;
+    }
+
+    this.retainGenerationRuntimeHold(
+      session,
+      "Formal browser startup timed out before a runtime handle was available",
+    );
+    void runtimePromise.then(
+      (lateRuntime) => this.closeFailedRuntimeHandle(session, lateRuntime),
+      () => this.releaseGenerationRuntimeHold(session),
+    );
+  }
+
+  private async closeFailedRuntimeHandle(session: RunningSession, runtime: RuntimeHandle): Promise<void> {
+    if (session.status === "stopped") {
+      this.releaseGenerationRuntimeHold(session);
+      return;
+    }
+    this.retainGenerationRuntimeHold(session, "Formal browser cleanup is awaiting confirmed process exit");
+    const closing = runtime.close();
+    try {
+      const closed = await raceTimeout(closing, this.closeTimeoutMs());
+      if (closed) {
+        this.releaseGenerationRuntimeHold(session);
+        if (session.runtime === runtime) delete session.runtime;
+        return;
+      }
+      if (session.runtimeCloseConfirmed) {
+        this.releaseGenerationRuntimeHold(session);
+        if (session.runtime === runtime) delete session.runtime;
+        return;
+      }
+      this.retainGenerationRuntimeHold(
+        session,
+        `Formal browser cleanup timed out after ${Math.round(this.closeTimeoutMs() / 1000)} seconds`,
+      );
+      void closing.then(
+        () => this.releaseGenerationRuntimeHold(session),
+        (lateError) => this.recordFailedLaunchCleanupFailure(session, lateError),
+      );
+    } catch (closeError) {
+      if (session.runtimeCloseConfirmed) {
+        this.releaseGenerationRuntimeHold(session);
+        if (session.runtime === runtime) delete session.runtime;
+        return;
+      }
+      this.retainGenerationRuntimeHold(
+        session,
+        `Formal browser cleanup failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
+      );
+    }
+  }
+
+  private retainGenerationRuntimeHold(session: RunningSession, detail: string): void {
+    if (session.runtimeCloseConfirmed) {
+      this.releaseGenerationRuntimeHold(session);
+      return;
+    }
+    const newlyHeld = !this.unconfirmedCloses.has(session);
+    session.closeUnconfirmed = true;
+    this.unconfirmedCloses.add(session);
+    const current = this.sessions.get(session.profileId);
+    if (current) this.reflectUnconfirmedClose(current);
+    if (newlyHeld && current === session) pushSessionEvent(session, "warn", "启动清理未确认", detail);
+  }
+
+  private releaseGenerationRuntimeHold(session: RunningSession): void {
+    this.unconfirmedCloses.delete(session);
+    delete session.closeUnconfirmed;
+    const current = this.sessions.get(session.profileId);
+    if (current) this.reflectUnconfirmedClose(current);
+  }
+
+  private recordFailedLaunchCleanupFailure(session: RunningSession, error: unknown): void {
+    this.retainGenerationRuntimeHold(
+      session,
+      `Formal browser cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   async stopAll(): Promise<void> {
     this.stoppingAll = true;
+    const currentProfileIds = new Set(this.sessions.keys());
+    const orphanUnconfirmed = [...this.unconfirmedCloses]
+      .filter((session) => !currentProfileIds.has(session.profileId));
+    await Promise.all([
+      ...[...this.sessions.keys()].map((profileId) => this.stopProfile(profileId)),
+      ...orphanUnconfirmed.map((session) => this.closeUnconfirmedGeneration(session)),
+    ]);
+  }
+
+  private async closeUnconfirmedGeneration(session: RunningSession): Promise<void> {
+    if (session.runtimeCloseConfirmed) {
+      this.releaseGenerationRuntimeHold(session);
+      return;
+    }
+    const closing = this.closeSessionRuntime(session);
     try {
-      await Promise.all([...this.sessions.keys()].map((profileId) => this.stopProfile(profileId)));
-    } finally {
-      this.stoppingAll = false;
+      const closed = await raceTimeout(closing, this.closeTimeoutMs());
+      if (closed || session.runtimeCloseConfirmed) this.releaseGenerationRuntimeHold(session);
+      else {
+        this.retainGenerationRuntimeHold(session, "Shutdown could not confirm an older browser generation exit");
+        void closing.then(
+          () => this.releaseGenerationRuntimeHold(session),
+          (lateError) => this.retainGenerationRuntimeHold(
+            session,
+            `Shutdown retry remained unconfirmed: ${errorMessage(lateError)}`,
+          ),
+        );
+      }
+    } catch (error) {
+      if (session.runtimeCloseConfirmed) this.releaseGenerationRuntimeHold(session);
+      else this.retainGenerationRuntimeHold(session, `Shutdown retry failed: ${errorMessage(error)}`);
     }
   }
 
@@ -560,7 +829,12 @@ export class SessionService {
   ): void {
     const session = this.sessions.get(profileId);
     const closedSession = expectedSession ?? session;
-    if (closedSession) this.unconfirmedCloses.delete(closedSession);
+    if (closedSession) {
+      closedSession.runtimeCloseConfirmed = true;
+      closedSession.launchCancelled = true;
+      closedSession.launchInterruption.resolve();
+      this.unconfirmedCloses.delete(closedSession);
+    }
     // A timed-out close and the old browser's disconnect event may settle after the user has relaunched
     // the same profile. Those callbacks belong to the replaced record and must never stop the new one.
     if (expectedSession && session !== expectedSession) {
@@ -571,6 +845,18 @@ export class SessionService {
     // never confirmed, so a disconnect arriving later *is* that confirmation. Without this exception the
     // session would keep every file-touching service blocked until the panel restarted.
     if (!session || session.status === "stopped") return;
+    if (session.launchFailed) {
+      session.status = "error";
+      session.stoppedAt = new Date().toISOString();
+      delete session.runtime;
+      delete session.runtimePromise;
+      delete session.registrationPreflightRuntime;
+      delete session.registrationPreflightPromise;
+      delete session.closingByPanel;
+      this.reflectUnconfirmedClose(session);
+      pushSessionEvent(session, "info", detail);
+      return;
+    }
     if (session.status === "error" && !session.closeUnconfirmed) return;
     session.status = "stopped";
     session.stoppedAt = new Date().toISOString();
@@ -641,6 +927,7 @@ export class SessionService {
   ): Promise<void> {
     const pending = registrations.filter((registration) => registration.migrationRequired);
     if (pending.length === 0) return;
+    if (!this.isCurrentLaunching(session)) return;
     const timeoutMs = this.registrationPreflightTimeoutMs();
     const options = buildExtensionRegistrationPreflightLaunchOptions(
       this.profileDataDir(profile),
@@ -648,6 +935,7 @@ export class SessionService {
       timeoutMs,
     );
     pushSessionEvent(session, "info", "准备扩展注册迁移", `${pending.length} extension(s)`);
+    if (!this.isCurrentLaunching(session)) return;
     const launchWork = this.launchRegistrationPreflightProcess(options);
     const preflightPromise = launchWork;
     session.registrationPreflightPromise = preflightPromise;
@@ -699,6 +987,7 @@ export class SessionService {
     session.registrationPreflightRuntime = preflight;
 
     let migrationCommandsCompleted = false;
+    let migrationCommandError: unknown;
     try {
       if (session.status !== "launching") return;
       await boundedRegistrationPreflightOperation(
@@ -715,6 +1004,9 @@ export class SessionService {
         "unpacked extension registration",
       );
       migrationCommandsCompleted = session.status === "launching";
+    } catch (error) {
+      migrationCommandError = error;
+      throw error;
     } finally {
       // Successful clear/load work needs Chromium's own graceful shutdown so its extension registration
       // database and ScriptCache changes are durably flushed. close() is deliberately a different path:
@@ -739,6 +1031,7 @@ export class SessionService {
         // exit is cleanup only: it blocks the formal launch while releasing the profile hold. Retain an
         // unconfirmed generation only when even that cancellation cannot confirm process exit.
         const cleanupWork = finishing ? preflight.close() : shutdownWork;
+        const primaryPreflightError = migrationCommandError ?? (finishing ? error : undefined);
         try {
           await boundedRegistrationPreflightOperation(
             cleanupWork,
@@ -752,18 +1045,41 @@ export class SessionService {
             this.markSessionStopped(profile.id, "Extension registration preflight has stopped", session);
           }
         } catch (cleanupError) {
-          this.markCloseUnconfirmed(
-            profile.id,
-            `Extension registration preflight close was not confirmed: ${(cleanupError as Error).message}`,
-            "Extension registration preflight close failed",
-            session,
-          );
-          void cleanupWork.then(
-            () => this.markSessionStopped(profile.id, "Extension registration preflight has stopped", session),
-            (lateError) => this.recordLateCloseFailure(profile.id, lateError, session),
-          );
+          const cleanupDetail = `Extension registration preflight close was not confirmed: ${errorMessage(cleanupError)}`;
+          if (primaryPreflightError !== undefined) {
+            this.retainGenerationRuntimeHold(session, cleanupDetail);
+            pushSessionEvent(session, "error", "Extension registration preflight close failed", cleanupDetail);
+            void cleanupWork.then(
+              () => {
+                session.runtimeCloseConfirmed = true;
+                this.releaseGenerationRuntimeHold(session);
+                if (session.launchFailed) {
+                  this.markSessionStopped(
+                    profile.id,
+                    "Extension registration preflight has stopped",
+                    session,
+                  );
+                }
+              },
+              (lateError) => this.retainGenerationRuntimeHold(
+                session,
+                `Extension registration preflight close remained unconfirmed: ${errorMessage(lateError)}`,
+              ),
+            );
+          } else {
+            this.markCloseUnconfirmed(
+              profile.id,
+              cleanupDetail,
+              "Extension registration preflight close failed",
+              session,
+            );
+            void cleanupWork.then(
+              () => this.markSessionStopped(profile.id, "Extension registration preflight has stopped", session),
+              (lateError) => this.recordLateCloseFailure(profile.id, lateError, session),
+            );
+          }
         }
-        throw error;
+        if (migrationCommandError === undefined) throw error;
       }
     }
     if (!migrationCommandsCompleted || session.status !== "launching") return;
@@ -806,26 +1122,35 @@ export class SessionService {
 
     if (!context) throw new Error("CloakBrowser 未返回 BrowserContext");
     this.watchExternalClose(session, context, "close");
-
-    try {
+    let page: ReturnType<BrowserContext["pages"]>[number] | undefined;
+    const ready = (async (): Promise<RuntimeReady> => {
+      const registrationBrowser = playwrightRegistrationMigrationBrowser(context);
       await this.migrateExtensionRegistrations(
-        playwrightRegistrationMigrationBrowser(context),
+        registrationBrowser,
         registrations,
       );
-      const page = await getOrCreatePlaywrightPage(context);
+      if (profile.mode === "persistent" && registrations.length > 0) {
+        recordExtensionPageRecovery(
+          session,
+          await recoverRegisteredExtensionPages(
+            registrationBrowser,
+            registrations,
+            EXTENSION_PAGE_RECOVERY_TIMEOUT_MS,
+          ),
+        );
+      }
+      page = await getOrCreatePlaywrightPage(context);
       if (profile.startUrl.trim()) pushSessionEvent(session, "info", "打开起始页", profile.startUrl.trim());
       const warning = await gotoStartUrl(page, profile.startUrl.trim());
+      return { warning };
+    })();
+    ready.catch(() => undefined);
 
-      return {
-        close: () => context.close(),
-        pageUrl: () => context.pages()[0]?.url(),
-        warning,
-      };
-    } catch (error) {
-      if (!session.closingByPanel) session.status = "error";
-      await context.close().catch(() => {});
-      throw error;
-    }
+    return {
+      close: () => context.close(),
+      pageUrl: () => page?.url(),
+      ready,
+    };
   }
 
   private async startPlaywrightBrowserRuntime(
@@ -840,23 +1165,24 @@ export class SessionService {
     const browser = await runtime.launch(preview.options as unknown as Parameters<CloakBrowserModule["launch"]>[0]);
     this.watchExternalClose(session, browser, "disconnected");
     let context: BrowserContext | undefined;
-
-    try {
+    let page: ReturnType<BrowserContext["pages"]>[number] | undefined;
+    const ready = (async (): Promise<RuntimeReady> => {
       context = await browser.newContext(buildPlaywrightContextOptions(profile));
-      this.watchExternalClose(session, context, "close");
-      const page = await context.newPage();
+      // This launcher owns a Browser process, not a persistent context. A child context may close while
+      // the browser remains connected, so only Browser.disconnected can confirm process exit and release
+      // the generation hold. Failed initialization still flows through the browser-level close owner.
+      page = await context.newPage();
       if (profile.startUrl.trim()) pushSessionEvent(session, "info", "打开起始页", profile.startUrl.trim());
       const warning = await gotoStartUrl(page, profile.startUrl.trim());
-      return {
-        close: () => browser.close(),
-        pageUrl: () => context?.pages()[0]?.url(),
-        warning,
-      };
-    } catch (error) {
-      if (!session.closingByPanel) session.status = "error";
-      await browser.close().catch(() => {});
-      throw error;
-    }
+      return { warning };
+    })();
+    ready.catch(() => undefined);
+
+    return {
+      close: () => browser.close(),
+      pageUrl: () => page?.url(),
+      ready,
+    };
   }
 
   private async startPuppeteerRuntime(
@@ -877,14 +1203,23 @@ export class SessionService {
         : await runtime.launch(preview.options as unknown as Parameters<CloakBrowserPuppeteerModule["launch"]>[0]);
     this.watchExternalClose(session, browser, "disconnected");
     let page: PuppeteerPage | undefined;
-
-    try {
+    const ready = (async (): Promise<RuntimeReady> => {
+      const registrationBrowser = puppeteerRegistrationMigrationBrowser(browser);
       await this.migrateExtensionRegistrations(
-        puppeteerRegistrationMigrationBrowser(browser),
+        registrationBrowser,
         registrations,
       );
-      const pages = await browser.pages();
-      page = pages[0] ?? (profile.startUrl.trim() ? await browser.newPage() : undefined);
+      if (profile.mode === "persistent" && registrations.length > 0) {
+        recordExtensionPageRecovery(
+          session,
+          await recoverRegisteredExtensionPages(
+            registrationBrowser,
+            registrations,
+            EXTENSION_PAGE_RECOVERY_TIMEOUT_MS,
+          ),
+        );
+      }
+      page = await getOrCreatePuppeteerPage(browser);
       let warning: string | undefined;
       if (page) {
         const setup = buildPuppeteerPageSetup(profile);
@@ -893,16 +1228,15 @@ export class SessionService {
         if (profile.startUrl.trim()) pushSessionEvent(session, "info", "打开起始页", profile.startUrl.trim());
         warning = await gotoStartUrl(page, profile.startUrl.trim());
       }
-      return {
-        close: () => browser.close(),
-        pageUrl: () => page?.url(),
-        warning,
-      };
-    } catch (error) {
-      if (!session.closingByPanel) session.status = "error";
-      await browser.close().catch(() => {});
-      throw error;
-    }
+      return { warning };
+    })();
+    ready.catch(() => undefined);
+
+    return {
+      close: () => browser.close(),
+      pageUrl: () => page?.url(),
+      ready,
+    };
   }
 
   protected async migrateExtensionRegistrations(
@@ -1595,23 +1929,34 @@ export async function migrateExtensionRegistrations(
 }
 
 async function isRegistrationCurrent(
-  browser: ExtensionRegistrationMigrationBrowser,
+  browser: Pick<ExtensionRegistrationMigrationBrowser, "listWorkers">,
   registration: ExtensionLaunchRegistration,
   timeoutMs: number,
 ): Promise<boolean> {
+  const deadline = Date.now() + Math.max(1, timeoutMs);
   const expectedUrl = expectedWorkerUrl(registration);
+  const enumerationTimeoutMs = remainingRegistrationMigrationBudget(
+    deadline,
+    registration,
+    "service-worker enumeration",
+  );
   const workers = await boundedExtensionRegistrationMigrationOperation(
     Promise.resolve().then(() => browser.listWorkers()),
-    timeoutMs,
+    enumerationTimeoutMs,
     registration,
     "service-worker enumeration",
   );
   for (const worker of workers) {
     if (worker.url !== expectedUrl) continue;
     try {
+      const revisionTimeoutMs = remainingRegistrationMigrationBudget(
+        deadline,
+        registration,
+        "service-worker lifecycle-state read",
+      );
       const revision = await boundedExtensionRegistrationMigrationOperation(
         Promise.resolve().then(() => worker.readRuntimeRevision()),
-        timeoutMs,
+        revisionTimeoutMs,
         registration,
         "service-worker lifecycle-state read",
       );
@@ -1625,8 +1970,21 @@ async function isRegistrationCurrent(
   return false;
 }
 
+function remainingRegistrationMigrationBudget(
+  deadline: number,
+  registration: ExtensionLaunchRegistration,
+  operation: string,
+): number {
+  const remaining = deadline - Date.now();
+  if (remaining > 0) return remaining;
+  throw Object.assign(
+    registrationMigrationError(registration, `${operation} timed out`),
+    { registrationMigrationTimedOut: true, operation },
+  );
+}
+
 async function waitForRegistrationCurrent(
-  browser: ExtensionRegistrationMigrationBrowser,
+  browser: Pick<ExtensionRegistrationMigrationBrowser, "listWorkers">,
   registration: ExtensionLaunchRegistration,
   timeoutMs: number,
 ): Promise<void> {
@@ -1714,10 +2072,126 @@ function registrationMigrationError(registration: ExtensionLaunchRegistration, d
   });
 }
 
+export async function recoverRegisteredExtensionPages(
+  browser: RegisteredExtensionPageRecoveryBrowser,
+  registrations: ExtensionLaunchRegistration[],
+  timeoutMs = EXTENSION_PAGE_RECOVERY_TIMEOUT_MS,
+): Promise<ExtensionPageRecoveryReport> {
+  const report: ExtensionPageRecoveryReport = { recovered: [], warnings: [] };
+  if (registrations.length === 0) return report;
+  const deadline = Date.now() + Math.max(1, timeoutMs);
+  let targets: RegisteredExtensionPageTarget[];
+  try {
+    targets = await boundedExtensionPageRecoveryOperation(
+      () => browser.listExtensionPages(),
+      deadline,
+      "page enumeration",
+    );
+  } catch (error) {
+    report.warnings.push(`Extension page recovery could not enumerate pages: ${errorMessage(error)}`);
+    return report;
+  }
+
+  for (const target of targets) {
+    if (Date.now() >= deadline) break;
+    let before: ExtensionPageRootFrame;
+    try {
+      before = await target.readRootFrame(Math.max(1, deadline - Date.now()));
+    } catch (error) {
+      report.warnings.push(`Extension page recovery could not inspect a page: ${errorMessage(error)}`);
+      continue;
+    }
+    const candidate = registeredExtensionErrorNavigation(before, registrations);
+    if (!candidate) continue;
+
+    try {
+      await waitForRegistrationCurrent(
+        browser,
+        candidate.registration,
+        Math.max(1, deadline - Date.now()),
+      );
+      await boundedExtensionPageRecoveryOperation(
+        () => target.reload(),
+        deadline,
+        "page reload",
+      );
+      const after = await target.readRootFrame(Math.max(1, deadline - Date.now()));
+      if (!isRegisteredExtensionOrigin(after.url, candidate.registration.browserExtensionId)) {
+        throw new Error(`reload remained at ${after.url || "<missing>"}`);
+      }
+      report.recovered.push(candidate.unreachableUrl);
+    } catch (error) {
+      report.warnings.push(
+        `${candidate.registration.name} page ${candidate.unreachableUrl} was not recovered: ${errorMessage(error)}`,
+      );
+    }
+  }
+  return report;
+}
+
+export function registeredExtensionErrorNavigation(
+  frame: ExtensionPageRootFrame,
+  registrations: ExtensionLaunchRegistration[],
+): { registration: ExtensionLaunchRegistration; unreachableUrl: string } | undefined {
+  if (frame.url !== "chrome-error://chromewebdata/" || !frame.unreachableUrl) return undefined;
+  let unreachable: URL;
+  try {
+    unreachable = new URL(frame.unreachableUrl);
+  } catch {
+    return undefined;
+  }
+  if (unreachable.protocol !== "chrome-extension:" || !/^[a-p]{32}$/.test(unreachable.hostname)) return undefined;
+  const registration = registrations.find((candidate) => candidate.browserExtensionId === unreachable.hostname);
+  return registration ? { registration, unreachableUrl: unreachable.href } : undefined;
+}
+
+function isRegisteredExtensionOrigin(url: string, extensionId: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "chrome-extension:" && parsed.hostname === extensionId;
+  } catch {
+    return false;
+  }
+}
+
+async function boundedExtensionPageRecoveryOperation<Result>(
+  startWork: () => Promise<Result>,
+  deadline: number,
+  operation: string,
+): Promise<Result> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new Error(`${operation} timed out`);
+  const work = Promise.resolve().then(startWork);
+  const settled = work.then(
+    (value) => ({ kind: "fulfilled" as const, value }),
+    (error: unknown) => ({ kind: "rejected" as const, error }),
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    settled,
+    new Promise<{ kind: "timeout" }>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: "timeout" }), remaining);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (outcome.kind === "fulfilled") return outcome.value;
+  if (outcome.kind === "rejected") throw outcome.error;
+  throw new Error(`${operation} timed out`);
+}
+
+function recordExtensionPageRecovery(session: RunningSession, report: ExtensionPageRecoveryReport): void {
+  if (report.recovered.length > 0) {
+    pushSessionEvent(session, "info", "扩展页面已恢复", report.recovered.join("；"));
+  }
+  for (const warning of report.warnings) {
+    pushSessionEvent(session, "warn", "扩展页面恢复警告", warning);
+  }
+}
+
 /** @internal Exported for the production-faithful Chromium registration migration fixture. */
 export function playwrightRegistrationMigrationBrowser(
   context: BrowserContext,
-): ExtensionRegistrationMigrationBrowser {
+): ExtensionRegistrationMigrationBrowser & RegisteredExtensionPageRecoveryBrowser {
   return {
     listWorkers: async () => context.serviceWorkers().map((worker) => ({
       url: worker.url(),
@@ -1737,12 +2211,21 @@ export function playwrightRegistrationMigrationBrowser(
         throw error;
       }
     },
+    listExtensionPages: async () => context.pages().map((page) => ({
+      readRootFrame: (timeoutMs = EXTENSION_PAGE_RECOVERY_TIMEOUT_MS) => readRootFrameFromCdpSession(
+        async () => await context.newCDPSession(page) as unknown as BrowserPageCdpSession,
+        timeoutMs,
+      ),
+      reload: async () => {
+        await page.reload({ waitUntil: "domcontentloaded", timeout: EXTENSION_PAGE_RECOVERY_TIMEOUT_MS });
+      },
+    })),
   };
 }
 
 export function puppeteerRegistrationMigrationBrowser(
   browser: PuppeteerBrowser,
-): ExtensionRegistrationMigrationBrowser {
+): ExtensionRegistrationMigrationBrowser & RegisteredExtensionPageRecoveryBrowser {
   return {
     listWorkers: async () => {
       if (typeof browser.targets !== "function") {
@@ -1788,6 +2271,99 @@ export function puppeteerRegistrationMigrationBrowser(
         throw error;
       }
     },
+    listExtensionPages: async () => (await browser.pages()).map((page) => ({
+      readRootFrame: async (timeoutMs = EXTENSION_PAGE_RECOVERY_TIMEOUT_MS) => {
+        if (typeof page.createCDPSession !== "function") {
+          throw new Error("Puppeteer launcher does not expose page CDP sessions");
+        }
+        return readRootFrameFromCdpSession(async () => (
+          await page.createCDPSession!() as BrowserPageCdpSession
+        ), timeoutMs);
+      },
+      reload: async () => {
+        if (typeof page.reload !== "function") throw new Error("Puppeteer launcher does not expose page reload");
+        await page.reload({ waitUntil: "domcontentloaded", timeout: EXTENSION_PAGE_RECOVERY_TIMEOUT_MS });
+      },
+    })),
+  };
+}
+
+async function readRootFrameFromCdpSession(
+  createSession: () => Promise<BrowserPageCdpSession>,
+  timeoutMs: number,
+): Promise<ExtensionPageRootFrame> {
+  const deadline = Date.now() + Math.max(1, timeoutMs);
+  const creation = createSession();
+  let creationAdopted = false;
+  let session: BrowserPageCdpSession;
+  try {
+    session = await boundedCdpRootFrameRead(
+      creation,
+      Math.max(1, deadline - Date.now()),
+      "CDP page-session creation",
+    ) as BrowserPageCdpSession;
+    creationAdopted = true;
+  } catch (error) {
+    void creation.then(
+      (lateSession) => {
+        if (!creationAdopted) void lateSession.detach?.().catch(() => undefined);
+      },
+      () => undefined,
+    );
+    throw error;
+  }
+  try {
+    const result = await boundedCdpRootFrameRead(
+      session.send("Page.getFrameTree", {}),
+      Math.max(1, deadline - Date.now()),
+      "CDP Page.getFrameTree",
+    );
+    return parseExtensionPageRootFrame(result);
+  } finally {
+    void session.detach?.().catch(() => undefined);
+  }
+}
+
+async function boundedCdpRootFrameRead(
+  work: Promise<unknown>,
+  timeoutMs: number,
+  operation: string,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const settled = work.then(
+    (value) => ({ kind: "fulfilled" as const, value }),
+    (error: unknown) => ({ kind: "rejected" as const, error }),
+  );
+  const outcome = await Promise.race([
+    settled,
+    new Promise<{ kind: "timeout" }>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: "timeout" }), Math.max(1, timeoutMs));
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (outcome.kind === "fulfilled") return outcome.value;
+  if (outcome.kind === "rejected") throw outcome.error;
+  throw new Error(`${operation} timed out`);
+}
+
+function parseExtensionPageRootFrame(result: unknown): ExtensionPageRootFrame {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("CDP Page.getFrameTree returned invalid data");
+  }
+  const frameTree = (result as { frameTree?: unknown }).frameTree;
+  if (!frameTree || typeof frameTree !== "object" || Array.isArray(frameTree)) {
+    throw new Error("CDP Page.getFrameTree omitted the root frame tree");
+  }
+  const frame = (frameTree as { frame?: unknown }).frame;
+  if (!frame || typeof frame !== "object" || Array.isArray(frame)) {
+    throw new Error("CDP Page.getFrameTree omitted the root frame");
+  }
+  const url = (frame as { url?: unknown }).url;
+  const unreachableUrl = (frame as { unreachableUrl?: unknown }).unreachableUrl;
+  if (typeof url !== "string") throw new Error("CDP root frame omitted its URL");
+  return {
+    url,
+    unreachableUrl: typeof unreachableUrl === "string" ? unreachableUrl : undefined,
   };
 }
 
@@ -1980,6 +2556,50 @@ async function loadCloakBrowserPuppeteer(): Promise<CloakBrowserPuppeteerModule>
   return await import("cloakbrowser/puppeteer");
 }
 
+function createLaunchInterruption(): LaunchInterruption {
+  let settled = false;
+  let resolvePromise!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return {
+    promise,
+    resolve: () => {
+      if (settled) return;
+      settled = true;
+      resolvePromise();
+    },
+  };
+}
+
+function idempotentAsync(work: () => Promise<void>): () => Promise<void> {
+  let promise: Promise<void> | undefined;
+  return () => {
+    if (!promise) {
+      const current = Promise.resolve().then(work);
+      promise = current;
+      void current.catch(() => {
+        // Concurrent callers share one close attempt. A successful close remains idempotent forever,
+        // while a rejected attempt is not proof of process exit and a later explicit Stop may retry it.
+        if (promise === current) promise = undefined;
+      });
+    }
+    return promise;
+  };
+}
+
+function formalLaunchTimeoutError(operation: string): Error {
+  return Object.assign(new Error(`Browser formal launch timed out during ${operation}`), {
+    status: 504,
+    code: "BROWSER_LAUNCH_TIMEOUT",
+    operation,
+  });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 // Resolves true when the work finished inside the budget, false when the budget ran out. The work is not
 // cancelled: a close that is merely slow still lands, and its disconnect handler still clears the
 // session. The extra catch is what stops that late outcome from surfacing as an unhandled rejection once
@@ -2085,7 +2705,37 @@ export function formatNetworkCheckDetail(check: NetworkCheckResult, locale = "zh
 // launchContext() returns a context without pages, and Playwright's non-persistent launch uses
 // --no-startup-window: without an explicit page the browser stays invisible even when headed.
 export async function getOrCreatePlaywrightPage(context: Pick<BrowserContext, "pages" | "newPage">) {
-  return context.pages()[0] ?? (await context.newPage());
+  return selectSafeStartPage(context.pages()) ?? (await context.newPage());
+}
+
+export async function getOrCreatePuppeteerPage(
+  browser: Pick<PuppeteerBrowser, "pages" | "newPage">,
+): Promise<PuppeteerPage> {
+  return selectSafeStartPage(await browser.pages()) ?? (await browser.newPage());
+}
+
+function selectSafeStartPage<Page extends { url: () => string }>(pages: Page[]): Page | undefined {
+  const urls = pages.map((page) => ({ page, url: safePageUrl(page) }));
+  return urls.find(({ url }) => url === "about:blank")?.page
+    ?? urls.find(({ url }) => isSafeStartPageUrl(url))?.page;
+}
+
+function safePageUrl(page: { url: () => string }): string | undefined {
+  try {
+    return page.url();
+  } catch {
+    return undefined;
+  }
+}
+
+function isSafeStartPageUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol !== "chrome-extension:" && parsed.protocol !== "chrome-error:";
+  } catch {
+    return false;
+  }
 }
 
 export async function gotoStartUrl(

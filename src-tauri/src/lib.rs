@@ -5,7 +5,10 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 use tauri::{
@@ -219,6 +222,53 @@ impl RuntimeState {
         self.sidecar_port = None;
         self.sidecar_token = None;
     }
+}
+
+const SIDECAR_SHUTDOWN_IDLE: u8 = 0;
+const SIDECAR_SHUTDOWN_RUNNING: u8 = 1;
+const SIDECAR_SHUTDOWN_COMPLETE: u8 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidecarShutdownAction {
+    Start,
+    Wait,
+    Exit,
+}
+
+fn sidecar_shutdown_action(state: &AtomicU8) -> SidecarShutdownAction {
+    match state.load(Ordering::Acquire) {
+        SIDECAR_SHUTDOWN_COMPLETE => SidecarShutdownAction::Exit,
+        SIDECAR_SHUTDOWN_IDLE => match state.compare_exchange(
+            SIDECAR_SHUTDOWN_IDLE,
+            SIDECAR_SHUTDOWN_RUNNING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => SidecarShutdownAction::Start,
+            Err(_) => SidecarShutdownAction::Wait,
+        },
+        _ => SidecarShutdownAction::Wait,
+    }
+}
+
+fn stop_sidecar_for_exit(runtime_state: &Mutex<RuntimeState>) {
+    let mut runtime = runtime_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    runtime.stop_sidecar();
+}
+
+fn complete_sidecar_shutdown(
+    state: &AtomicU8,
+    stop_sidecar: impl FnOnce(),
+    request_exit: impl FnOnce(),
+) {
+    // Once the first ExitRequested has been prevented, every exit request remains blocked while the
+    // gate is RUNNING. Cleanup must therefore be panic-contained: even a poisoned/unexpected sidecar
+    // failure has to advance the gate and enqueue the final, unprevented ExitRequested.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(stop_sidecar));
+    state.store(SIDECAR_SHUTDOWN_COMPLETE, Ordering::Release);
+    request_exit();
 }
 
 #[tauri::command]
@@ -572,7 +622,7 @@ pub fn run() {
         }));
     }
 
-    builder
+    let app = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(Arc::clone(&window_state))
@@ -633,18 +683,65 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building CBPanel")
-        .run(|app_handle, event| {
-            if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
-                let window_state = app_handle.state::<Arc<WindowStatePersistence>>();
-                save_main_window_size(app_handle, window_state.inner().as_ref());
-                app_handle
-                    .state::<Mutex<RuntimeState>>()
-                    .lock()
-                    .expect("runtime state lock poisoned")
-                    .stop_sidecar();
+        .expect("error while building CBPanel");
+    let sidecar_shutdown_state = Arc::new(AtomicU8::new(SIDECAR_SHUTDOWN_IDLE));
+    app.run(move |app_handle, event| {
+        if let RunEvent::ExitRequested { api, code, .. } = event {
+            match sidecar_shutdown_action(&sidecar_shutdown_state) {
+                SidecarShutdownAction::Start => {
+                    // The Node shutdown request can wait on bounded browser cleanup and the child process
+                    // for several seconds. Keep every blocking socket/process operation off Tauri's event
+                    // thread; otherwise the desktop window stops painting exactly when a launch is wedged.
+                    api.prevent_exit();
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let window_state = app_handle.state::<Arc<WindowStatePersistence>>();
+                        save_main_window_size(app_handle, window_state.inner().as_ref());
+                    }));
+                    let exit_code = code.unwrap_or(0);
+                    let background_cleanup_app = app_handle.clone();
+                    let background_exit_app = app_handle.clone();
+                    let background_state = Arc::clone(&sidecar_shutdown_state);
+                    let fallback_cleanup_app = app_handle.clone();
+                    let fallback_exit_app = app_handle.clone();
+                    let fallback_state = Arc::clone(&sidecar_shutdown_state);
+                    let spawned = std::thread::Builder::new()
+                        .name("cbpanel-sidecar-shutdown".into())
+                        .spawn(move || {
+                            complete_sidecar_shutdown(
+                                background_state.as_ref(),
+                                || {
+                                    let runtime_state =
+                                        background_cleanup_app.state::<Mutex<RuntimeState>>();
+                                    stop_sidecar_for_exit(runtime_state.inner());
+                                },
+                                || {
+                                    // This produces one final ExitRequested. Only the completed state leaves
+                                    // that request unprevented, so repeated requests cannot bypass cleanup.
+                                    background_exit_app.exit(exit_code);
+                                },
+                            );
+                        });
+                    if spawned.is_err() {
+                        // Keep the rare named-thread allocation fallback off the event thread as well;
+                        // the prevented exit remains responsive while Tauri's blocking pool owns cleanup.
+                        tauri::async_runtime::spawn_blocking(move || {
+                            complete_sidecar_shutdown(
+                                fallback_state.as_ref(),
+                                || {
+                                    let runtime_state =
+                                        fallback_cleanup_app.state::<Mutex<RuntimeState>>();
+                                    stop_sidecar_for_exit(runtime_state.inner());
+                                },
+                                || fallback_exit_app.exit(exit_code),
+                            );
+                        });
+                    }
+                }
+                SidecarShutdownAction::Wait => api.prevent_exit(),
+                SidecarShutdownAction::Exit => {}
             }
-        });
+        }
+    });
 }
 
 #[cfg(target_os = "windows")]
@@ -1436,5 +1533,92 @@ mod tests {
             deserialize_window_size_state(r#"{"version":2,"width":1440,"height":900}"#),
             None
         );
+    }
+
+    #[test]
+    fn sidecar_shutdown_gate_waits_for_cleanup_before_exit() {
+        let state = AtomicU8::new(SIDECAR_SHUTDOWN_IDLE);
+
+        assert_eq!(sidecar_shutdown_action(&state), SidecarShutdownAction::Start);
+        assert_eq!(sidecar_shutdown_action(&state), SidecarShutdownAction::Wait);
+        state.store(SIDECAR_SHUTDOWN_COMPLETE, Ordering::Release);
+        assert_eq!(sidecar_shutdown_action(&state), SidecarShutdownAction::Exit);
+    }
+
+    #[test]
+    fn sidecar_shutdown_gate_allows_only_one_concurrent_cleanup_owner() {
+        const CONTENDERS: usize = 8;
+        let state = Arc::new(AtomicU8::new(SIDECAR_SHUTDOWN_IDLE));
+        let barrier = Arc::new(std::sync::Barrier::new(CONTENDERS));
+        let contenders = (0..CONTENDERS)
+            .map(|_| {
+                let contender_state = Arc::clone(&state);
+                let contender_barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    contender_barrier.wait();
+                    sidecar_shutdown_action(contender_state.as_ref())
+                })
+            })
+            .collect::<Vec<_>>();
+        let actions = contenders
+            .into_iter()
+            .map(|contender| contender.join().expect("shutdown gate contender should finish"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| **action == SidecarShutdownAction::Start)
+                .count(),
+            1
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| **action == SidecarShutdownAction::Wait)
+                .count(),
+            CONTENDERS - 1
+        );
+    }
+
+    #[test]
+    fn sidecar_shutdown_completion_requests_exit_after_cleanup_panics() {
+        let state = AtomicU8::new(SIDECAR_SHUTDOWN_RUNNING);
+        let exit_requested = std::cell::Cell::new(false);
+
+        complete_sidecar_shutdown(
+            &state,
+            || panic!("sidecar cleanup fixture failure"),
+            || exit_requested.set(true),
+        );
+
+        assert_eq!(state.load(Ordering::Acquire), SIDECAR_SHUTDOWN_COMPLETE);
+        assert!(exit_requested.get());
+        assert_eq!(sidecar_shutdown_action(&state), SidecarShutdownAction::Exit);
+    }
+
+    #[test]
+    fn sidecar_shutdown_recovers_a_poisoned_runtime_lock() {
+        let runtime_state = Arc::new(Mutex::new(RuntimeState {
+            config: degraded_config("test"),
+            sidecar: None,
+            sidecar_port: Some(4173),
+            sidecar_token: Some("test-token".into()),
+        }));
+        let poison_target = Arc::clone(&runtime_state);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target.lock().expect("fixture lock should start healthy");
+            panic!("poison runtime lock for the shutdown fixture");
+        })
+        .join();
+
+        assert!(runtime_state.is_poisoned());
+        stop_sidecar_for_exit(runtime_state.as_ref());
+
+        let runtime = runtime_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(runtime.sidecar_port, None);
+        assert_eq!(runtime.sidecar_token, None);
     }
 }

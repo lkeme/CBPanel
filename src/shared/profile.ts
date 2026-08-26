@@ -409,7 +409,7 @@ export const RUNTIME_QUICK_ARGS: RuntimeQuickArg[] = [
   },
 ];
 
-const UNSAFE_CHROMIUM_ARGS = new Set(["--no-sandbox"]);
+const WRAPPER_OWNED_CHROMIUM_ARGS = new Set(["--no-sandbox"]);
 
 export const PROFILE_PRESETS: ProfilePreset[] = [
   {
@@ -1015,36 +1015,34 @@ function pushFlag(args: string[], key: string, value: string | number | undefine
   args.push(`${key}=${text}`);
 }
 
-export function isUnsafeChromiumArg(arg: string): boolean {
+export function isWrapperOwnedChromiumArg(arg: string): boolean {
   const normalized = arg.trim().split("=", 1)[0].toLowerCase();
-  return UNSAFE_CHROMIUM_ARGS.has(normalized);
+  return WRAPPER_OWNED_CHROMIUM_ARGS.has(normalized);
 }
 
 function sanitizeChromiumArgs(args: string[]): string[] {
-  return args.map((arg) => arg.trim()).filter((arg) => arg && !isUnsafeChromiumArg(arg));
+  return args.map((arg) => arg.trim()).filter((arg) => arg && !isWrapperOwnedChromiumArg(arg));
 }
 
 function sanitizeLaunchOptions(launchOptions: Record<string, unknown> | undefined): Record<string, unknown> {
-  const sanitized: Record<string, unknown> = {
-    chromiumSandbox: true,
-    ...(launchOptions ?? {}),
-  };
+  const sanitized: Record<string, unknown> = { ...(launchOptions ?? {}) };
+
+  // CloakBrowser owns the browser compatibility policy and forwards this option to Playwright, whose
+  // supported default is false. Forcing true makes Chromium 151 start a process but never complete the
+  // remote-debugging-pipe handshake, even with no extensions or fingerprint flags. Remove both legacy
+  // true and false overrides so wrapper upgrades retain one authoritative default.
+  delete sanitized.chromiumSandbox;
 
   if (Array.isArray(sanitized.args)) {
-    sanitized.args = sanitized.args.filter((arg) => typeof arg !== "string" || !isUnsafeChromiumArg(arg));
+    sanitized.args = sanitized.args.filter((arg) => typeof arg !== "string" || !isWrapperOwnedChromiumArg(arg));
   }
-  if (sanitized.chromiumSandbox === false) sanitized.chromiumSandbox = true;
   return sanitized;
 }
 
-function hasUnsafeLaunchConfiguration(profile: BrowserProfile): boolean {
-  if (profile.runtime.extraArgs.some(isUnsafeChromiumArg)) return true;
+function hasUnsupportedChromiumSandboxOverride(profile: BrowserProfile): boolean {
   try {
     const launchOptions = parseOptionalJsonObject("launchOptions", profile.advanced.launchOptionsJson);
-    return (
-      launchOptions?.chromiumSandbox === false ||
-      (Array.isArray(launchOptions?.args) && launchOptions.args.some((arg) => typeof arg === "string" && isUnsafeChromiumArg(arg)))
-    );
+    return launchOptions?.chromiumSandbox === true;
   } catch {
     return false;
   }
@@ -1204,14 +1202,14 @@ export function preflightProfile(
   pushPreflight(items, preflightFromAudit(validateJsonAudit("context-json", "advanced", "contextOptions JSON", profile.advanced.contextOptionsJson)));
   pushPreflight(items, preflightFromAudit(validateJsonAudit("human-json", "advanced", "humanConfig JSON", profile.advanced.humanConfigJson)));
 
-  if (hasUnsafeLaunchConfiguration(profile)) {
+  if (hasUnsupportedChromiumSandboxOverride(profile)) {
     pushPreflight(items, {
       id: "chromium-sandbox",
       category: "runtime",
       severity: "warn",
       title: "Chromium 沙箱",
-      detail: "检测到 --no-sandbox 或 chromiumSandbox=false；CBPanel 会忽略该不安全配置并强制启用 Chromium sandbox。",
-      actions: [openTabAction("advanced", "移除不安全参数")],
+      detail: "检测到 chromiumSandbox=true；CBPanel 会忽略该覆盖并使用当前 CloakBrowser/Playwright 默认值（--no-sandbox），避免 Chromium 151 卡在启动握手阶段。",
+      actions: [openTabAction("advanced", "移除手动覆盖")],
     });
   }
 
@@ -1781,13 +1779,13 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
   pushAudit(items, validateJsonAudit("context-json", "advanced", "contextOptions JSON", profile.advanced.contextOptionsJson));
   pushAudit(items, validateJsonAudit("human-json", "advanced", "humanConfig JSON", profile.advanced.humanConfigJson));
 
-  if (hasUnsafeLaunchConfiguration(profile)) {
+  if (hasUnsupportedChromiumSandboxOverride(profile)) {
     pushAudit(items, {
       id: "chromium-sandbox",
       category: "runtime",
       severity: "warn",
       title: "Chromium 沙箱",
-      detail: "检测到 --no-sandbox 或 chromiumSandbox=false；启动映射会忽略该配置并保持沙箱开启。",
+      detail: "检测到 chromiumSandbox=true；启动映射会忽略该覆盖并使用当前 SDK 默认值（--no-sandbox）。",
     });
   }
 

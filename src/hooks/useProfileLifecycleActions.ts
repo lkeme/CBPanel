@@ -11,6 +11,16 @@ import { launchGeoSummary } from "../lib/launchGeoDisplay";
 import type { BrowserEnvironment, NetworkCheckResult } from "../shared/entities";
 import { networkCheckSummaryText } from "../shared/networkCheckDisplay";
 import {
+  abortProfileLaunchRequest,
+  isAbortError,
+  launchResponseMatchesRequest,
+  launchResponseOutcome,
+  type ProfileLaunchRequest,
+  registerProfileLaunchRequest,
+  rekeyProfileLaunchRequest,
+  upsertSessionByGeneration,
+} from "./profileLaunchState";
+import {
   type BrowserProfile,
   type PanelState,
   type ProfilePreflightReport,
@@ -25,9 +35,10 @@ export function useProfileLifecycleActions({
   draft,
   draftIsNew,
   draftProxyLibraryIds,
+  launchRequestsRef,
   loadState,
   localProxyDraftIds,
-  pendingLaunchIdsRef,
+  markLaunchPending,
   setBusy,
   setConfirmDialog,
   setDraft,
@@ -35,7 +46,6 @@ export function useProfileLifecycleActions({
   setDraftProxyLibraryIds,
   setDrawerMode,
   setLocalProxyDraftIds,
-  setPendingLaunchIds,
   setPreflight,
   setProxyCheck,
   setSelectedId,
@@ -51,9 +61,10 @@ export function useProfileLifecycleActions({
   draft: BrowserProfile | null;
   draftIsNew: boolean;
   draftProxyLibraryIds: Record<string, string>;
+  launchRequestsRef: MutableRefObject<Map<string, ProfileLaunchRequest>>;
   loadState: () => Promise<unknown>;
   localProxyDraftIds: Set<string>;
-  pendingLaunchIdsRef: MutableRefObject<Set<string>>;
+  markLaunchPending: (id: string, pending: boolean) => void;
   setBusy: Dispatch<SetStateAction<string>>;
   setConfirmDialog: Dispatch<SetStateAction<ConfirmDialogState>>;
   setDraft: Dispatch<SetStateAction<BrowserProfile | null>>;
@@ -61,7 +72,6 @@ export function useProfileLifecycleActions({
   setDraftProxyLibraryIds: Dispatch<SetStateAction<Record<string, string>>>;
   setDrawerMode: Dispatch<SetStateAction<DrawerMode>>;
   setLocalProxyDraftIds: Dispatch<SetStateAction<Set<string>>>;
-  setPendingLaunchIds: Dispatch<SetStateAction<Set<string>>>;
   setPreflight: Dispatch<SetStateAction<ProfilePreflightReport | null>>;
   setProxyCheck: Dispatch<SetStateAction<string>>;
   setSelectedId: Dispatch<SetStateAction<string>>;
@@ -208,87 +218,94 @@ export function useProfileLifecycleActions({
 
   async function launchProfile(id = draft?.id) {
     if (!id) return;
-    if (pendingLaunchIdsRef.current.has(id)) return;
+    if (launchRequestsRef.current.has(id)) return;
     if (browserCoreMissing) {
       showBrowserCoreMissing();
       return;
     }
+    const profile = draftIsNew && draft?.id === id
+      ? draft
+      : state?.profiles.find((item) => item.id === id);
+    if (!profile) return;
+
+    const request = registerProfileLaunchRequest(
+      launchRequestsRef.current,
+      id,
+      state?.sessions.find((session) => session.profileId === id),
+    );
     markLaunchPending(id, true);
-    if (draftIsNew && draft && id === draft.id) {
-      setBusy(`launch:${draft.id}`);
-      let attemptedLaunchId: string | null = null;
-      try {
-        const saved = await persistDraft(false);
-        if (!saved) return;
-        attemptedLaunchId = saved.id;
-        const session = await api<SessionSummary>(`/api/environments/${saved.id}/launch`, { method: "POST" });
-        upsertSession(session);
-        toast(
-          session.lastError ? "info" : "success",
-          session.lastError ?? t(session.launch?.headless ? "toast.launchedHeadless" : "toast.launched"),
-        );
-        window.setTimeout(() => void loadState(), 1000);
-      } catch (error) {
-        toast("error", launchErrorMessage(error, t));
-        if (attemptedLaunchId) {
-          setSelectedId(attemptedLaunchId);
-          setDrawerMode("details");
-          window.setTimeout(() => void loadState(), 300);
-        }
-      } finally {
-        setBusy("");
-        markLaunchPending(id, false);
-      }
-      return;
-    }
-    const profile = state?.profiles.find((item) => item.id === id);
-    if (!profile) {
-      markLaunchPending(id, false);
-      return;
-    }
-    setBusy(`launch:${id}`);
+    let requestProfileId = id;
     let attemptedLaunchId: string | null = null;
     try {
       let launchTarget = profile;
       if (draft?.id === id) {
         const saved = await persistDraft(false);
-        if (!saved) return;
+        if (!saved) {
+          finishLaunchRequest(requestProfileId, request);
+          return;
+        }
         launchTarget = saved;
       }
+      if (launchTarget.id !== requestProfileId) {
+        if (!rekeyProfileLaunchRequest(launchRequestsRef.current, requestProfileId, launchTarget.id, request)) {
+          finishLaunchRequest(requestProfileId, request);
+          return;
+        }
+        markLaunchPending(requestProfileId, false);
+        requestProfileId = launchTarget.id;
+        markLaunchPending(requestProfileId, true);
+      }
       attemptedLaunchId = launchTarget.id;
-      const session = await api<SessionSummary>(`/api/environments/${launchTarget.id}/launch`, { method: "POST" });
+      const session = await api<SessionSummary>(`/api/environments/${launchTarget.id}/launch`, {
+        method: "POST",
+        signal: request.controller.signal,
+      });
+      if (launchRequestsRef.current.get(requestProfileId) !== request) return;
+      if (!launchResponseMatchesRequest(request, session)) return;
       upsertSession(session);
-      toast(
-        session.lastError ? "info" : "success",
-        session.lastError ?? t(session.launch?.headless ? "toast.launchedHeadless" : "toast.launched"),
-      );
-      window.setTimeout(() => void loadState(), 1000);
+      const outcome = launchResponseOutcome(session);
+      if (session.startedAt) request.observedStartedAt = session.startedAt;
+      if (outcome.kind === "pending") return;
+      finishLaunchRequest(requestProfileId, request);
+      if (outcome.kind === "running") {
+        toast(
+          outcome.tone,
+          outcome.message ?? t(outcome.headless ? "toast.launchedHeadless" : "toast.launched"),
+        );
+        return;
+      }
+      const fallbackKey = outcome.status === "stopped"
+        ? "toast.launchStopped"
+        : outcome.status === "stopping"
+          ? "toast.launchStopping"
+          : "toast.launchFailed";
+      toast(outcome.tone, outcome.message ?? t(fallbackKey));
+      if (attemptedLaunchId) {
+        setSelectedId(attemptedLaunchId);
+        setDrawerMode("details");
+      }
     } catch (error) {
+      if (request.controller.signal.aborted || isAbortError(error)) return;
+      finishLaunchRequest(requestProfileId, request);
       toast("error", launchErrorMessage(error, t));
       if (attemptedLaunchId) {
         setSelectedId(attemptedLaunchId);
         setDrawerMode("details");
-        window.setTimeout(() => void loadState(), 300);
       }
-    } finally {
-      setBusy("");
-      markLaunchPending(id, false);
+      void loadState().catch(() => undefined);
     }
   }
 
-  function markLaunchPending(id: string, pending: boolean) {
-    const next = new Set(pendingLaunchIdsRef.current);
-    if (pending) {
-      next.add(id);
-    } else {
-      next.delete(id);
-    }
-    pendingLaunchIdsRef.current = next;
-    setPendingLaunchIds(next);
+  function finishLaunchRequest(id: string, request: ProfileLaunchRequest) {
+    if (!abortProfileLaunchRequest(launchRequestsRef.current, id, request)) return;
+    markLaunchPending(id, false);
   }
 
   async function stopProfile(id = draft?.id) {
     if (!id) return;
+    if (abortProfileLaunchRequest(launchRequestsRef.current, id)) {
+      markLaunchPending(id, false);
+    }
     setBusy(`stop:${id}`);
     try {
       const session = await api<SessionSummary>(`/api/environments/${id}/stop`, { method: "POST" });
@@ -341,12 +358,9 @@ export function useProfileLifecycleActions({
   function upsertSession(session: SessionSummary) {
     setState((current) => {
       if (!current) return current;
-      const exists = current.sessions.some((item) => item.profileId === session.profileId);
       return {
         ...current,
-        sessions: exists
-          ? current.sessions.map((item) => (item.profileId === session.profileId ? session : item))
-          : [...current.sessions, session],
+        sessions: upsertSessionByGeneration(current.sessions, session),
       };
     });
   }

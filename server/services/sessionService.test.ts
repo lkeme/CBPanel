@@ -18,13 +18,17 @@ import {
   buildExtensionRegistrationPreflightLaunchOptions,
   formatNetworkCheckDetail,
   getOrCreatePlaywrightPage,
+  getOrCreatePuppeteerPage,
   gotoStartUrl,
   loadUnpackedExtensionRegistrations,
   migrateExtensionRegistrations,
   parseDevToolsActivePort,
+  playwrightRegistrationMigrationBrowser,
   prepareExtensionRegistrationPreflightUserDataDir,
   puppeteerRegistrationMigrationBrowser,
   rawCdpRegistrationPreflightProcess,
+  recoverRegisteredExtensionPages,
+  registeredExtensionErrorNavigation,
   SessionService,
   withRawCdpConnection,
 } from "./sessionService";
@@ -65,6 +69,7 @@ test("browser evaluate callback serialization health rejects sourceless native-c
 type TestRuntimeHandle = {
   close: () => Promise<void>;
   pageUrl: () => string | undefined;
+  ready: Promise<{ warning?: string }>;
 };
 
 class ControlledRuntimeSessionService extends SessionService {
@@ -84,6 +89,7 @@ class ControlledRuntimeSessionService extends SessionService {
         this.closeCount += 1;
       },
       pageUrl: () => "about:blank",
+      ready: Promise.resolve({}),
     });
   }
 }
@@ -274,6 +280,163 @@ test("stopAll waits for a launching runtime before closing it", async () => {
   assert.equal(session?.status, "stopped");
 });
 
+test("an external browser close settles a launch whose ready initialization never finishes", async () => {
+  const service = new ProvisionalRuntimeSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "external-close-during-ready-test" });
+  const launch = service.launchProfile(profile);
+  await waitFor(() => service.started);
+
+  service.simulateExternalClose(profile.id);
+  const launched = await launch;
+
+  assert.equal(launched.status, "stopped");
+  assert.equal(service.listSessions()[0]?.status, "stopped");
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
+  service.failReady();
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
+test("stop closes a provisional runtime without waiting for its ready initialization", async () => {
+  const service = new ProvisionalRuntimeSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "stop-provisional-runtime-test" });
+  const launch = service.launchProfile(profile);
+  await waitFor(() => service.started);
+
+  const stop = service.stopProfile(profile.id);
+  const [launched, stopped] = await Promise.all([launch, stop]);
+
+  assert.notEqual(launched.status, "launching");
+  assert.equal(stopped.status, "stopped");
+  assert.equal(service.closeCount, 1);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
+});
+
+test("a formal startup deadline retains ownership until a late handle is closed and cannot revive the session", async () => {
+  const service = new LateFormalHandleSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "late-formal-handle-test" });
+
+  await assert.rejects(service.launchProfile(profile), (error) => {
+    assert.equal((error as { code?: string }).code, "BROWSER_LAUNCH_TIMEOUT");
+    assert.equal((error as { operation?: string }).operation, "browser startup");
+    return true;
+  });
+  assert.equal(service.listSessions()[0]?.status, "error");
+  assert.equal(service.listSessions()[0]?.closeUnconfirmed, true);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+
+  service.releaseRuntime();
+  await waitFor(() => service.closeCount === 1 && service.profileIdsHoldingRuntime().size === 0);
+  const settled = service.listSessions()[0];
+  assert.equal(settled?.status, "error");
+  assert.match(settled?.lastError ?? "", /formal launch timed out/);
+  assert.equal(settled?.events?.filter((event) => event.message === "启动清理未确认").length, 1);
+});
+
+test("a never-settling failed-launch cleanup is bounded and a late close only releases its hold", async () => {
+  const service = new FailedReadyCleanupSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "failed-ready-cleanup-test" });
+  const startedAt = Date.now();
+
+  await assert.rejects(service.launchProfile(profile), /formal initialization failed/);
+
+  assert.ok(Date.now() - startedAt < 100, "failed launch cleanup exceeded its bounded test budget");
+  assert.equal(service.closeCount, 1);
+  assert.equal(service.listSessions()[0]?.status, "error");
+  assert.equal(service.listSessions()[0]?.closeUnconfirmed, true);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+
+  service.releaseClose();
+  await waitFor(() => service.profileIdsHoldingRuntime().size === 0);
+  const settled = service.listSessions()[0];
+  assert.equal(settled?.status, "error");
+  assert.equal(settled?.lastError, "formal initialization failed");
+  assert.equal(settled?.events?.filter((event) => event.message === "启动清理未确认").length, 1);
+});
+
+test("an external close during failed-launch cleanup prevents a false unconfirmed hold", async () => {
+  const service = new FailedReadyCleanupSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "external-close-during-failed-cleanup-test" });
+  const launch = service.launchProfile(profile).then(
+    () => undefined,
+    (error: Error) => error,
+  );
+  await waitFor(() => service.closeCount === 1);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+  assert.equal(service.listSessions()[0]?.closeUnconfirmed, true);
+
+  service.confirmExternalClose(profile.id);
+  const failure = await launch;
+
+  assert.equal(failure?.message, "formal initialization failed");
+  const session = service.listSessions().find((item) => item.profileId === profile.id);
+  assert.equal(session?.status, "error");
+  assert.equal(session?.lastError, "formal initialization failed");
+  assert.equal(session?.closeUnconfirmed, undefined);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
+  const stoppedAgain = await service.stopProfile(profile.id);
+  assert.equal(stoppedAgain.status, "error");
+  assert.equal(stoppedAgain.lastError, "formal initialization failed");
+  assert.equal(stoppedAgain.closeUnconfirmed, undefined);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
+  service.releaseClose();
+});
+
+test("a rejected failed-launch cleanup retains its generation until an external close confirms exit", async () => {
+  const service = new RejectedFailedLaunchCleanupSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "rejected-failed-launch-cleanup-test" });
+
+  await assert.rejects(service.launchProfile(profile), /formal initialization failed/);
+
+  assert.equal(service.closeCount, 1);
+  assert.equal(service.listSessions()[0]?.status, "error");
+  assert.equal(service.listSessions()[0]?.closeUnconfirmed, true);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+
+  service.confirmExternalClose(profile.id);
+  const settled = service.listSessions()[0];
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
+  assert.equal(settled?.status, "error");
+  assert.equal(settled?.lastError, "formal initialization failed");
+  assert.equal(settled?.events?.filter((event) => event.message === "浏览器窗口已关闭").length, 1);
+});
+
+test("stopAll keeps the shutdown launch gate closed after session cleanup", async () => {
+  const service = new ControlledRuntimeSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const first = defaultProfile({ id: "stop-all-gate-first" });
+  const launch = service.launchProfile(first);
+  await waitFor(() => Boolean(service.listSessions()[0]?.launch));
+  service.releaseRuntime();
+  await launch;
+  await service.stopAll();
+
+  await assert.rejects(
+    service.launchProfile(defaultProfile({ id: "stop-all-gate-second" })),
+    { status: 409 },
+  );
+  assert.equal(service.listSessions().some((session) => session.profileId === "stop-all-gate-second"), false);
+});
+
 test("launchProfile surfaces extension launch warnings as a warn session event", async () => {
   const profile = defaultProfile({ id: "extension-warning-launch-test" });
   const service = new ControlledRuntimeSessionService({
@@ -430,11 +593,41 @@ class ThrowingPageUrlSessionService extends SessionService {
         if (this.deniedProfileId === profileId) throw new Error("并发会话数已达上限");
         return "about:blank";
       },
+      ready: Promise.resolve({}),
     };
   }
 
   denyPageUrl(profileId: string): void {
     this.deniedProfileId = profileId;
+  }
+}
+
+class ThrowingInitialPageUrlSessionService extends SessionService {
+  closeCount = 0;
+  private resolveClose!: () => void;
+  private readonly closeGate = new Promise<void>((resolve) => {
+    this.resolveClose = resolve;
+  });
+
+  protected override closeTimeoutMs(): number {
+    return 15;
+  }
+
+  protected override async startRuntime(): Promise<TestRuntimeHandle> {
+    return {
+      close: () => {
+        this.closeCount += 1;
+        return this.closeGate;
+      },
+      pageUrl: () => {
+        throw new Error("initial page URL read failed");
+      },
+      ready: Promise.resolve({}),
+    };
+  }
+
+  confirmClose(): void {
+    this.resolveClose();
   }
 }
 
@@ -462,12 +655,77 @@ class WedgedCloseSessionService extends SessionService {
           : new Promise<void>(() => undefined);
       },
       pageUrl: () => "about:blank",
+      ready: Promise.resolve({}),
     };
   }
 
   // Stands in for watchExternalClose: the browser finally exiting, or the operator ending the process.
   simulateExternalClose(profileId: string): void {
     this.markSessionStopped(profileId, "浏览器窗口已关闭");
+  }
+}
+
+class RetryRejectedCloseSessionService extends SessionService {
+  closeCalls = 0;
+
+  protected override async startRuntime(): Promise<TestRuntimeHandle> {
+    return {
+      close: async () => {
+        this.closeCalls += 1;
+        if (this.closeCalls === 1) throw new Error("first close failed");
+      },
+      pageUrl: () => "about:blank",
+      ready: Promise.resolve({}),
+    };
+  }
+}
+
+class MultiGenerationShutdownSessionService extends SessionService {
+  readonly closeCalls = [0, 0];
+  private generation = 0;
+
+  protected override async startRuntime(): Promise<TestRuntimeHandle> {
+    const generation = this.generation++;
+    return {
+      close: async () => {
+        this.closeCalls[generation] = (this.closeCalls[generation] ?? 0) + 1;
+        if (generation === 0 && this.closeCalls[generation] === 1) {
+          throw new Error("old generation first close failed");
+        }
+      },
+      pageUrl: () => `about:blank#generation-${generation}`,
+      ready: Promise.resolve({}),
+    };
+  }
+}
+
+class LateOldGenerationShutdownSessionService extends SessionService {
+  readonly closeCalls = [0, 0];
+  private generation = 0;
+  private resolveOldRetry!: () => void;
+  private readonly oldRetryGate = new Promise<void>((resolve) => {
+    this.resolveOldRetry = resolve;
+  });
+
+  protected override closeTimeoutMs(): number {
+    return 15;
+  }
+
+  protected override async startRuntime(): Promise<TestRuntimeHandle> {
+    const generation = this.generation++;
+    return {
+      close: async () => {
+        this.closeCalls[generation] = (this.closeCalls[generation] ?? 0) + 1;
+        if (generation === 0 && this.closeCalls[generation] === 1) throw new Error("old first close failed");
+        if (generation === 0) await this.oldRetryGate;
+      },
+      pageUrl: () => "about:blank",
+      ready: Promise.resolve({}),
+    };
+  }
+
+  confirmOldRetry(): void {
+    this.resolveOldRetry();
   }
 }
 
@@ -484,7 +742,142 @@ class RegistrationCaptureSessionService extends SessionService {
     return {
       close: async () => undefined,
       pageUrl: () => "about:blank",
+      ready: Promise.resolve({}),
     };
+  }
+}
+
+class ProvisionalRuntimeSessionService extends SessionService {
+  closeCount = 0;
+  started = false;
+  private resolveReady!: (value: { warning?: string }) => void;
+  private rejectReady!: (error: Error) => void;
+  private readonly ready = new Promise<{ warning?: string }>((resolve, reject) => {
+    this.resolveReady = resolve;
+    this.rejectReady = reject;
+  });
+
+  protected override formalLaunchTimeoutMs(): number {
+    return 100;
+  }
+
+  protected override closeTimeoutMs(): number {
+    return 20;
+  }
+
+  protected override async startRuntime(): Promise<TestRuntimeHandle> {
+    this.started = true;
+    return {
+      close: async () => {
+        this.closeCount += 1;
+      },
+      pageUrl: () => "about:blank",
+      ready: this.ready,
+    };
+  }
+
+  finishReady(): void {
+    this.resolveReady({});
+  }
+
+  failReady(error = new Error("formal initialization failed")): void {
+    this.rejectReady(error);
+  }
+
+  simulateExternalClose(profileId: string): void {
+    this.markSessionStopped(profileId, "浏览器窗口已关闭");
+  }
+}
+
+class LateFormalHandleSessionService extends SessionService {
+  closeCount = 0;
+  private resolveRuntime!: (runtime: TestRuntimeHandle) => void;
+  private readonly runtime = new Promise<TestRuntimeHandle>((resolve) => {
+    this.resolveRuntime = resolve;
+  });
+
+  protected override formalLaunchTimeoutMs(): number {
+    return 20;
+  }
+
+  protected override closeTimeoutMs(): number {
+    return 15;
+  }
+
+  protected override async startRuntime(): Promise<TestRuntimeHandle> {
+    return this.runtime;
+  }
+
+  releaseRuntime(): void {
+    this.resolveRuntime({
+      close: async () => {
+        this.closeCount += 1;
+      },
+      pageUrl: () => "about:blank",
+      ready: Promise.resolve({}),
+    });
+  }
+}
+
+class FailedReadyCleanupSessionService extends SessionService {
+  closeCount = 0;
+  private resolveClose!: () => void;
+  private readonly closeGate = new Promise<void>((resolve) => {
+    this.resolveClose = resolve;
+  });
+
+  protected override formalLaunchTimeoutMs(): number {
+    return 100;
+  }
+
+  protected override closeTimeoutMs(): number {
+    return 15;
+  }
+
+  protected override async startRuntime(): Promise<TestRuntimeHandle> {
+    return {
+      close: () => {
+        this.closeCount += 1;
+        return this.closeGate;
+      },
+      pageUrl: () => "about:blank",
+      ready: Promise.reject(new Error("formal initialization failed")),
+    };
+  }
+
+  releaseClose(): void {
+    this.resolveClose();
+  }
+
+  confirmExternalClose(profileId: string): void {
+    this.markSessionStopped(profileId, "浏览器窗口已关闭");
+  }
+}
+
+class RejectedFailedLaunchCleanupSessionService extends SessionService {
+  closeCount = 0;
+
+  protected override formalLaunchTimeoutMs(): number {
+    return 100;
+  }
+
+  protected override closeTimeoutMs(): number {
+    return 15;
+  }
+
+  protected override async startRuntime(): Promise<TestRuntimeHandle> {
+    return {
+      close: async () => {
+        this.closeCount += 1;
+        throw new Error("cleanup rejected");
+      },
+      pageUrl: () => "about:blank",
+      ready: Promise.reject(new Error("formal initialization failed")),
+    };
+  }
+
+  confirmExternalClose(profileId: string): void {
+    this.markSessionStopped(profileId, "浏览器窗口已关闭");
   }
 }
 
@@ -538,6 +931,7 @@ class RegistrationPreflightSessionService extends SessionService {
     return {
       close: async () => undefined,
       pageUrl: () => "about:blank",
+      ready: Promise.resolve({}),
     };
   }
 }
@@ -982,6 +1376,288 @@ test("the Puppeteer migration adapter binds page evaluation and close methods", 
 
   assert.deepEqual(toggles, [false]);
   assert.equal(closed, true);
+});
+
+test("blocked extension navigation classification requires the exact error root and a bound Chrome ID", () => {
+  const oneTab = extensionRegistration({
+    name: "OneTab",
+    browserExtensionId: "chphlpgkkbolifaimnlloiipkdnihall",
+    workerRelativePath: "service-worker.js",
+  });
+  const frame = {
+    url: "chrome-error://chromewebdata/",
+    unreachableUrl: "chrome-extension://chphlpgkkbolifaimnlloiipkdnihall/onetab.html",
+  };
+
+  assert.equal(registeredExtensionErrorNavigation(frame, [oneTab])?.registration, oneTab);
+  for (const candidate of [
+    { ...frame, url: frame.unreachableUrl },
+    { ...frame, unreachableUrl: "https://example.invalid/onetab.html" },
+    { ...frame, unreachableUrl: "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/onetab.html" },
+    { ...frame, unreachableUrl: "not a URL" },
+  ]) assert.equal(registeredExtensionErrorNavigation(candidate, [oneTab]), undefined);
+});
+
+test("registered extension error-page recovery uses exact CDP frames for Playwright and Puppeteer", async (context) => {
+  const oneTab = extensionRegistration({
+    name: "OneTab",
+    browserExtensionId: "chphlpgkkbolifaimnlloiipkdnihall",
+    workerRelativePath: "service-worker.js",
+    runtimeRevision: "onetab-runtime-revision",
+    migrationRequired: false,
+  });
+  const blockedFrame = {
+    url: "chrome-error://chromewebdata/",
+    unreachableUrl: "chrome-extension://chphlpgkkbolifaimnlloiipkdnihall/onetab.html",
+  };
+  const loadedFrame = { url: blockedFrame.unreachableUrl };
+
+  await context.test("Playwright", async () => {
+    let frame: { url: string; unreachableUrl?: string } = blockedFrame;
+    let reloads = 0;
+    let detaches = 0;
+    const page = {
+      url: () => blockedFrame.unreachableUrl,
+      reload: async () => {
+        reloads += 1;
+        frame = loadedFrame;
+      },
+    };
+    const contextFixture = {
+      pages: () => [page],
+      serviceWorkers: () => [{
+        url: () => registrationWorkerUrl(oneTab),
+        evaluate: async () => oneTab.runtimeRevision,
+      }],
+      newCDPSession: async () => ({
+        send: async () => ({ frameTree: { frame } }),
+        detach: async () => { detaches += 1; },
+      }),
+      newPage: async () => { throw new Error("management page must not open"); },
+    } as unknown as Parameters<typeof playwrightRegistrationMigrationBrowser>[0];
+
+    const report = await recoverRegisteredExtensionPages(
+      playwrightRegistrationMigrationBrowser(contextFixture),
+      [oneTab],
+      50,
+    );
+
+    assert.deepEqual(report, { recovered: [blockedFrame.unreachableUrl], warnings: [] });
+    assert.equal(reloads, 1);
+    assert.equal(detaches, 2);
+  });
+
+  await context.test("Puppeteer", async () => {
+    let frame: { url: string; unreachableUrl?: string } = blockedFrame;
+    let reloads = 0;
+    let detaches = 0;
+    const page = {
+      url: () => blockedFrame.unreachableUrl,
+      goto: async () => undefined,
+      reload: async () => {
+        reloads += 1;
+        frame = loadedFrame;
+      },
+      createCDPSession: async () => ({
+        send: async () => ({ frameTree: { frame } }),
+        detach: async () => { detaches += 1; },
+      }),
+    };
+    const browser = {
+      close: async () => undefined,
+      newPage: async () => page,
+      pages: async () => [page],
+      targets: () => [{
+        type: () => "service_worker",
+        url: () => registrationWorkerUrl(oneTab),
+        worker: async () => ({ evaluate: async () => oneTab.runtimeRevision }),
+      }],
+    } as unknown as Parameters<typeof puppeteerRegistrationMigrationBrowser>[0];
+
+    const report = await recoverRegisteredExtensionPages(
+      puppeteerRegistrationMigrationBrowser(browser),
+      [oneTab],
+      50,
+    );
+
+    assert.deepEqual(report, { recovered: [blockedFrame.unreachableUrl], warnings: [] });
+    assert.equal(reloads, 1);
+    assert.equal(detaches, 2);
+  });
+});
+
+test("extension error-page recovery leaves unrelated pages untouched and reports bounded failures", async () => {
+  const oneTab = extensionRegistration({
+    name: "OneTab",
+    browserExtensionId: "chphlpgkkbolifaimnlloiipkdnihall",
+    workerRelativePath: "service-worker.js",
+    runtimeRevision: "onetab-runtime-revision",
+    migrationRequired: false,
+  });
+  let reloads = 0;
+  const frames = [
+    { url: "chrome-extension://chphlpgkkbolifaimnlloiipkdnihall/onetab.html" },
+    { url: "chrome-error://chromewebdata/", unreachableUrl: "https://example.invalid/" },
+    {
+      url: "chrome-error://chromewebdata/",
+      unreachableUrl: "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/unbound.html",
+    },
+  ];
+  const untouched = frames.map((frame) => ({
+    readRootFrame: async () => frame,
+    reload: async () => { reloads += 1; },
+  }));
+  const report = await recoverRegisteredExtensionPages({
+    listWorkers: async () => [],
+    listExtensionPages: async () => untouched,
+  }, [oneTab], 20);
+
+  assert.deepEqual(report, { recovered: [], warnings: [] });
+  assert.equal(reloads, 0);
+
+  const blocked = {
+    url: "chrome-error://chromewebdata/",
+    unreachableUrl: "chrome-extension://chphlpgkkbolifaimnlloiipkdnihall/onetab.html",
+  };
+  const wrongWorkerReport = await recoverRegisteredExtensionPages({
+    listWorkers: async () => [{
+      url: registrationWorkerUrl(oneTab),
+      readRuntimeRevision: async () => "stale-runtime-revision",
+    }],
+    listExtensionPages: async () => [{
+      readRootFrame: async () => blocked,
+      reload: async () => { reloads += 1; },
+    }],
+  }, [oneTab], 10);
+
+  assert.equal(wrongWorkerReport.recovered.length, 0);
+  assert.equal(wrongWorkerReport.warnings.length, 1);
+  assert.match(wrongWorkerReport.warnings[0] ?? "", /runtime revision/);
+  assert.equal(reloads, 0);
+});
+
+test("worker enumeration and revision checks share the extension recovery deadline", async () => {
+  const oneTab = extensionRegistration({
+    name: "OneTab",
+    browserExtensionId: "chphlpgkkbolifaimnlloiipkdnihall",
+    workerRelativePath: "service-worker.js",
+    runtimeRevision: "onetab-runtime-revision",
+    migrationRequired: false,
+  });
+  const blocked = {
+    url: "chrome-error://chromewebdata/",
+    unreachableUrl: "chrome-extension://chphlpgkkbolifaimnlloiipkdnihall/onetab.html",
+  };
+  let reloads = 0;
+  const report = await recoverRegisteredExtensionPages({
+    listWorkers: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return [{
+        url: registrationWorkerUrl(oneTab),
+        readRuntimeRevision: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return oneTab.runtimeRevision;
+        },
+      }];
+    },
+    listExtensionPages: async () => [{
+      readRootFrame: async () => blocked,
+      reload: async () => { reloads += 1; },
+    }],
+  }, [oneTab], 50);
+
+  assert.equal(report.recovered.length, 0);
+  assert.equal(report.warnings.length, 1);
+  assert.match(report.warnings[0] ?? "", /timed out/);
+  assert.equal(reloads, 0);
+});
+
+test("timed-out CDP root-frame reads deterministically detach every page session", async () => {
+  const registration = extensionRegistration({ migrationRequired: false });
+  let detaches = 0;
+  const page = {
+    url: () => "chrome-error://chromewebdata/",
+    goto: async () => undefined,
+    reload: async () => undefined,
+    createCDPSession: async () => ({
+      send: async () => new Promise<never>(() => undefined),
+      detach: async () => { detaches += 1; },
+    }),
+  };
+  const browser = {
+    close: async () => undefined,
+    newPage: async () => page,
+    pages: async () => [page],
+    targets: () => [],
+  } as unknown as Parameters<typeof puppeteerRegistrationMigrationBrowser>[0];
+
+  const adapter = puppeteerRegistrationMigrationBrowser(browser);
+  for (let attempt = 1; attempt <= 12; attempt += 1) {
+    const report = await recoverRegisteredExtensionPages(adapter, [registration], 5);
+    assert.equal(report.recovered.length, 0);
+    assert.equal(report.warnings.length, 1);
+    assert.match(report.warnings[0] ?? "", /timed out/);
+    assert.equal(detaches, attempt, `attempt ${attempt} returned before its CDP session detached`);
+  }
+});
+
+test("a CDP page session created after its timeout is detached exactly once", async () => {
+  const registration = extensionRegistration({ migrationRequired: false });
+  let resolveCreation!: (session: { send: () => Promise<unknown>; detach: () => Promise<void> }) => void;
+  const creation = new Promise<{ send: () => Promise<unknown>; detach: () => Promise<void> }>((resolve) => {
+    resolveCreation = resolve;
+  });
+  let detaches = 0;
+  const page = {
+    url: () => "chrome-error://chromewebdata/",
+    goto: async () => undefined,
+    reload: async () => undefined,
+    createCDPSession: async () => creation,
+  };
+  const browser = {
+    close: async () => undefined,
+    newPage: async () => page,
+    pages: async () => [page],
+    targets: () => [],
+  } as unknown as Parameters<typeof puppeteerRegistrationMigrationBrowser>[0];
+
+  const report = await recoverRegisteredExtensionPages(
+    puppeteerRegistrationMigrationBrowser(browser),
+    [registration],
+    5,
+  );
+  assert.equal(report.recovered.length, 0);
+  assert.equal(report.warnings.length, 1);
+  assert.match(report.warnings[0] ?? "", /page-session creation timed out/);
+  assert.equal(detaches, 0, "the timed-out session has not been created yet");
+
+  resolveCreation({
+    send: async () => ({ frameTree: { frame: { url: "about:blank" } } }),
+    detach: async () => { detaches += 1; },
+  });
+  await waitFor(() => detaches === 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(detaches, 1);
+});
+
+test("extension recovery stops starting new target reads after its global deadline", async () => {
+  const registration = extensionRegistration({ migrationRequired: false });
+  let reads = 0;
+  const targets = Array.from({ length: 4 }, () => ({
+    readRootFrame: async () => {
+      reads += 1;
+      await new Promise((resolve) => setTimeout(resolve, 8));
+      return { url: "about:blank" };
+    },
+    reload: async () => undefined,
+  }));
+
+  await recoverRegisteredExtensionPages({
+    listWorkers: async () => [],
+    listExtensionPages: async () => targets,
+  }, [registration], 5);
+
+  assert.equal(reads, 1);
 });
 
 test("registration preflight launch options are minimal and never include extension paths", () => {
@@ -1815,6 +2491,42 @@ test("ready registrations skip the isolated preflight", async () => {
   assert.deepEqual(marked, []);
 });
 
+test("a stopped generation is rechecked before registration preflight can spawn Chromium", async () => {
+  const profile = defaultProfile({ id: "stopped-before-preflight-spawn-test" });
+  const registration = extensionRegistration();
+  let releaseEnsure!: () => void;
+  const ensureGate = new Promise<void>((resolve) => {
+    releaseEnsure = resolve;
+  });
+  const service = new RegistrationPreflightSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: {
+      resolveEnvironment: async () => ({
+        environment: { extensionIds: ["extension-1"] },
+        profile: profile.runtime,
+      }),
+      ensureExtensionsInstalled: async () => {
+        await ensureGate;
+        return { paths: [registration.runtimePath], warnings: [], registrations: [registration] };
+      },
+    } as unknown as ExtensionService,
+  }, async () => {
+    throw new Error("preflight must not spawn for a stopped generation");
+  });
+
+  const launch = service.launchProfile(profile);
+  await waitFor(() => service.listSessions()[0]?.status === "launching");
+  const stopped = await service.stopProfile(profile.id);
+  releaseEnsure();
+  const launched = await launch;
+
+  assert.equal(stopped.status, "stopped");
+  assert.equal(launched.status, "stopped");
+  assert.equal(service.preflightLaunches, 0);
+  assert.equal(service.formalStarts, 0);
+});
+
 test("preflight launch, command, and close failures never start the formal browser or mark ready", async (context) => {
   const cases = [
     {
@@ -1911,6 +2623,166 @@ test("preflight launch, command, and close failures never start the formal brows
   }
 });
 
+test("preflight command failure preserves its root diagnosis when cleanup also fails", async () => {
+  const profile = defaultProfile({ id: "preflight-command-and-cleanup-failure-test" });
+  const registration = extensionRegistration();
+  const marked: ExtensionLaunchRegistration[] = [];
+  const commandFailure = new Error("service-worker clear root failure");
+  const cleanupFailure = new Error("preflight cleanup secondary failure");
+  const harness = registrationPreflightProcess({
+    onSend: async () => { throw commandFailure; },
+    onClose: async () => { throw cleanupFailure; },
+  });
+  const service = new RegistrationPreflightSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+  }, async () => harness.process, undefined, 20);
+
+  const failure = await service.launchProfile(profile).then(
+    () => undefined,
+    (error: Error) => error,
+  );
+
+  assert.equal(failure, commandFailure);
+  const session = service.listSessions().find((item) => item.profileId === profile.id);
+  assert.equal(session?.status, "error");
+  assert.equal(session?.lastError, commandFailure.message);
+  assert.equal(session?.closeUnconfirmed, true);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+  assert.equal(session?.events?.filter((event) => event.message === "启动失败").length, 1);
+  assert.match(session?.events?.find((event) => event.message === "启动失败")?.detail ?? "", /root failure/);
+  assert.equal(session?.events?.filter((event) => event.message === "Extension registration preflight close failed").length, 1);
+  assert.match(
+    session?.events?.find((event) => event.message === "Extension registration preflight close failed")?.detail ?? "",
+    /cleanup secondary failure/,
+  );
+  assert.deepEqual(marked, []);
+  assert.equal(service.formalStarts, 0);
+});
+
+test("preflight graceful-finish failure remains primary when forced cleanup also fails", async () => {
+  const profile = defaultProfile({ id: "preflight-finish-and-cleanup-failure-test" });
+  const registration = extensionRegistration();
+  const marked: ExtensionLaunchRegistration[] = [];
+  const finishFailure = new Error("registration flush primary failure");
+  const cleanupFailure = new Error("forced cleanup secondary failure");
+  const harness = registrationPreflightProcess({
+    onFinish: async () => { throw finishFailure; },
+    onClose: async () => { throw cleanupFailure; },
+  });
+  const service = new RegistrationPreflightSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+  }, async () => harness.process, undefined, 20);
+
+  const failure = await service.launchProfile(profile).then(
+    () => undefined,
+    (error: Error) => error,
+  );
+
+  assert.equal(failure, finishFailure);
+  const session = service.listSessions().find((item) => item.profileId === profile.id);
+  assert.equal(session?.status, "error");
+  assert.equal(session?.lastError, finishFailure.message);
+  assert.equal(session?.closeUnconfirmed, true);
+  assert.equal(session?.events?.filter((event) => event.message === "启动失败").length, 1);
+  assert.match(session?.events?.find((event) => event.message === "启动失败")?.detail ?? "", /flush primary/);
+  assert.equal(session?.events?.filter((event) => event.message === "Extension registration preflight close failed").length, 1);
+  assert.match(
+    session?.events?.find((event) => event.message === "Extension registration preflight close failed")?.detail ?? "",
+    /cleanup secondary/,
+  );
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+  assert.deepEqual(marked, []);
+  assert.equal(service.formalStarts, 0);
+});
+
+test("late preflight cleanup success releases the primary-failure generation hold", async () => {
+  const profile = defaultProfile({ id: "preflight-primary-late-cleanup-success-test" });
+  const registration = extensionRegistration();
+  const marked: ExtensionLaunchRegistration[] = [];
+  const commandFailure = new Error("service-worker clear primary failure");
+  let resolveCleanup!: () => void;
+  const cleanupGate = new Promise<void>((resolve) => {
+    resolveCleanup = resolve;
+  });
+  const harness = registrationPreflightProcess({
+    onSend: async () => { throw commandFailure; },
+    onClose: async () => cleanupGate,
+  });
+  const service = new RegistrationPreflightSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+  }, async () => harness.process, undefined, 20);
+
+  const failure = await service.launchProfile(profile).then(
+    () => undefined,
+    (error: Error) => error,
+  );
+
+  assert.equal(failure, commandFailure);
+  let session = service.listSessions().find((item) => item.profileId === profile.id);
+  assert.equal(session?.status, "error");
+  assert.equal(session?.lastError, commandFailure.message);
+  assert.equal(session?.closeUnconfirmed, true);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+  assert.equal(session?.events?.filter((event) => event.message === "Extension registration preflight close failed").length, 1);
+
+  resolveCleanup();
+  await waitFor(() => service.profileIdsHoldingRuntime().size === 0);
+
+  session = service.listSessions().find((item) => item.profileId === profile.id);
+  assert.equal(session?.status, "error");
+  assert.equal(session?.lastError, commandFailure.message);
+  assert.equal(session?.closeUnconfirmed, undefined);
+  assert.equal(session?.events?.filter((event) => event.message === "启动失败").length, 1);
+  assert.equal(session?.events?.filter((event) => event.message === "Extension registration preflight close failed").length, 1);
+  assert.deepEqual(marked, []);
+});
+
+test("a late preflight handle cleanup preserves the launch-timeout error", async () => {
+  const profile = defaultProfile({ id: "preflight-late-handle-timeout-test" });
+  const registration = extensionRegistration();
+  const marked: ExtensionLaunchRegistration[] = [];
+  const harness = registrationPreflightProcess();
+  let resolvePreflight!: (process: ExtensionRegistrationPreflightProcess) => void;
+  const preflightGate = new Promise<ExtensionRegistrationPreflightProcess>((resolve) => {
+    resolvePreflight = resolve;
+  });
+  const service = new RegistrationPreflightSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+  }, async () => preflightGate, undefined, 10);
+
+  const failure = await service.launchProfile(profile).then(
+    () => undefined,
+    (error: Error & { code?: string }) => error,
+  );
+
+  assert.equal(failure?.code, "EXTENSION_REGISTRATION_PREFLIGHT_TIMEOUT");
+  const failed = service.listSessions().find((item) => item.profileId === profile.id);
+  assert.equal(failed?.status, "error");
+  assert.equal(failed?.closeUnconfirmed, true);
+  const primaryError = failed?.lastError;
+  assert.ok(primaryError);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+
+  resolvePreflight(harness.process);
+  await waitFor(() => service.profileIdsHoldingRuntime().size === 0);
+
+  const settled = service.listSessions().find((item) => item.profileId === profile.id);
+  assert.equal(settled?.status, "error");
+  assert.equal(settled?.lastError, primaryError);
+  assert.equal(settled?.closeUnconfirmed, undefined);
+  assert.equal(harness.closeCalls(), 1);
+  assert.equal(service.formalStarts, 0);
+  assert.deepEqual(marked, []);
+});
+
 test("stopProfile during registration preflight closes that exact generation and prevents formal launch", async () => {
   const profile = defaultProfile({ id: "stop-during-registration-preflight-test" });
   const registration = extensionRegistration();
@@ -1981,6 +2853,7 @@ class DelayedCloseSessionService extends SessionService {
     return {
       close: () => new Promise<void>((resolve) => this.closeResolvers.push(resolve)),
       pageUrl: () => "about:blank",
+      ready: Promise.resolve({}),
     };
   }
 
@@ -2123,6 +2996,26 @@ test("a close that throws also keeps the profile counted as holding its files", 
   assert.equal(failed.closeUnconfirmed, true);
   assert.match(failed.lastError ?? "", /关闭失败/);
   assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+});
+
+test("a rejected close can be retried by Stop while concurrent callers still share one attempt", async () => {
+  const service = new RetryRejectedCloseSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "retry-rejected-close-test" });
+  await service.launchProfile(profile);
+
+  const first = await service.stopProfile(profile.id);
+  assert.equal(first.status, "error");
+  assert.equal(first.closeUnconfirmed, true);
+  assert.equal(service.closeCalls, 1);
+
+  const second = await service.stopProfile(profile.id);
+  assert.equal(second.status, "stopped");
+  assert.equal(second.closeUnconfirmed, undefined);
+  assert.equal(service.closeCalls, 2);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
 });
 
 test("the failure diagnosis survives in the event log after a close event clears the session", async () => {
@@ -2279,6 +3172,72 @@ test("stopAll stays bounded when every session is wedged", async () => {
   assert.equal(service.listSessions().every((item) => item.status === "error"), true);
 });
 
+test("stopAll retries old unconfirmed generations without letting them mutate the current generation", async () => {
+  const service = new MultiGenerationShutdownSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "stop-all-multi-generation-test" });
+  await service.launchProfile(profile);
+
+  const firstStop = await service.stopProfile(profile.id);
+  assert.equal(firstStop.status, "error");
+  assert.equal(firstStop.closeUnconfirmed, true);
+  await service.launchProfile(profile);
+  assert.equal(service.listSessions()[0]?.status, "running");
+
+  await service.stopAll();
+
+  assert.deepEqual(service.closeCalls, [2, 1]);
+  assert.equal(service.listSessions()[0]?.status, "stopped");
+  assert.equal(service.listSessions()[0]?.closeUnconfirmed, undefined);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
+  assert.equal(service.hasActiveSession(profile.id), false);
+});
+
+test("the first Stop of an active current generation also retries older unconfirmed generations", async () => {
+  const service = new MultiGenerationShutdownSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "stop-retry-old-profile-generation-test" });
+  await service.launchProfile(profile);
+  await service.stopProfile(profile.id);
+  await service.launchProfile(profile);
+
+  const currentStopped = await service.stopProfile(profile.id);
+  assert.deepEqual(service.closeCalls, [2, 1]);
+  assert.equal(currentStopped.status, "stopped");
+  assert.equal(currentStopped.closeUnconfirmed, undefined);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
+
+  const retried = await service.stopProfile(profile.id);
+  assert.deepEqual(service.closeCalls, [2, 1]);
+  assert.equal(retried.status, "stopped");
+  assert.equal(retried.closeUnconfirmed, undefined);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
+});
+
+test("a late old-generation shutdown retry releases its hold after the bounded stopAll returns", async () => {
+  const service = new LateOldGenerationShutdownSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "late-old-generation-shutdown-test" });
+  await service.launchProfile(profile);
+  await service.stopProfile(profile.id);
+  await service.launchProfile(profile);
+
+  await service.stopAll();
+
+  assert.deepEqual(service.closeCalls, [2, 1]);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+  service.confirmOldRetry();
+  await waitFor(() => service.profileIdsHoldingRuntime().size === 0);
+  assert.equal(service.listSessions()[0]?.status, "stopped");
+  assert.equal(service.listSessions()[0]?.closeUnconfirmed, undefined);
+});
+
 test("formatNetworkCheckDetail keeps legacy geo fallback for stored old checks", () => {
   const detail = formatNetworkCheckDetail({
     checkedAt: "2026-06-03T00:00:00.000Z",
@@ -2313,11 +3272,12 @@ test("getOrCreatePlaywrightPage always creates a page for a context without page
   assert.equal(page, createdPage);
 });
 
-test("getOrCreatePlaywrightPage reuses the first existing page", async () => {
-  const existingPage = { id: "existing" };
+test("getOrCreatePlaywrightPage prefers an existing about:blank page", async () => {
+  const existingPage = { id: "existing", url: () => "https://example.com/" };
+  const blankPage = { id: "second", url: () => "about:blank" };
   let newPageCalls = 0;
   const context = {
-    pages: () => [existingPage, { id: "second" }],
+    pages: () => [existingPage, blankPage],
     newPage: async () => {
       newPageCalls += 1;
       return { id: "created" };
@@ -2327,7 +3287,58 @@ test("getOrCreatePlaywrightPage reuses the first existing page", async () => {
   const page = await getOrCreatePlaywrightPage(context);
 
   assert.equal(newPageCalls, 0);
-  assert.equal(page, existingPage);
+  assert.equal(page, blankPage);
+});
+
+test("safe start-page selection preserves a restored OneTab page and prefers about:blank", async () => {
+  const oneTab = {
+    id: "onetab",
+    url: () => "chrome-extension://chphlpgkkbolifaimnlloiipkdnihall/onetab.html",
+  };
+  const blank = { id: "blank", url: () => "about:blank" };
+  let newPageCalls = 0;
+  const context = {
+    pages: () => [oneTab, blank],
+    newPage: async () => {
+      newPageCalls += 1;
+      return { id: "created", url: () => "about:blank" };
+    },
+  } as unknown as Parameters<typeof getOrCreatePlaywrightPage>[0];
+
+  const page = await getOrCreatePlaywrightPage(context);
+
+  assert.equal(page, blank);
+  assert.equal(newPageCalls, 0);
+});
+
+test("safe start-page selection creates a page instead of overwriting only extension or error pages", async () => {
+  const restored = [
+    { url: () => "chrome-extension://chphlpgkkbolifaimnlloiipkdnihall/onetab.html" },
+    { url: () => "chrome-error://chromewebdata/" },
+  ];
+  const created = { url: () => "about:blank" };
+  let playwrightCreates = 0;
+  let puppeteerCreates = 0;
+
+  const playwrightPage = await getOrCreatePlaywrightPage({
+    pages: () => restored,
+    newPage: async () => {
+      playwrightCreates += 1;
+      return created;
+    },
+  } as unknown as Parameters<typeof getOrCreatePlaywrightPage>[0]);
+  const puppeteerPage = await getOrCreatePuppeteerPage({
+    pages: async () => restored,
+    newPage: async () => {
+      puppeteerCreates += 1;
+      return created;
+    },
+  } as unknown as Parameters<typeof getOrCreatePuppeteerPage>[0]);
+
+  assert.equal(playwrightPage, created);
+  assert.equal(puppeteerPage, created);
+  assert.equal(playwrightCreates, 1);
+  assert.equal(puppeteerCreates, 1);
 });
 
 // Upstream already maps a Pro binary's licence exit codes to a readable reason and throws
@@ -2368,6 +3379,32 @@ test("any other launch failure keeps its own error untouched", async () => {
   assert.equal(failed?.message, "Target page, context or browser has been closed");
 });
 
+test("stopping a formally failed launch remains terminal error after confirmed cleanup", async () => {
+  const failure = new Error("formal runtime startup failed");
+  const service = new FailingRuntimeSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({
+      installed: true,
+      binaryPath: "C:/fake/chrome.exe",
+      version: "test",
+    }),
+  }, failure);
+  const profile = defaultProfile({ id: "stop-formally-failed-launch-test" });
+
+  await assert.rejects(service.launchProfile(profile), (error) => error === failure);
+  const stopped = await service.stopProfile(profile.id);
+  const listed = service.listSessions().find((session) => session.profileId === profile.id);
+
+  assert.equal(stopped.status, "error");
+  assert.equal(listed?.status, "error");
+  assert.equal(stopped.lastError, failure.message);
+  assert.equal(listed?.lastError, failure.message);
+  assert.equal(typeof stopped.stoppedAt, "string");
+  assert.equal(service.hasActiveSession(profile.id), false);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
+  assert.equal(stopped.closeUnconfirmed, undefined);
+});
+
 // 0.5.4 surfaces a licence denial that resolves after the CDP handshake on the first page call, and for a
 // profile with a start URL that call is this goto. Degrading it to a warning reported a running session over
 // a browser the licence server was killing.
@@ -2392,6 +3429,41 @@ test("a start page that merely fails to load stays a warning", async () => {
 
   assert.match(warning ?? "", /^启动成功，但起始页加载失败：/);
   assert.match(warning ?? "", /ERR_NAME_NOT_RESOLVED/);
+});
+
+test("an initial page URL read failure never commits running and keeps cleanup ownership until close confirms", async () => {
+  const service = new ThrowingInitialPageUrlSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({
+      installed: true,
+      binaryPath: "C:/fake/chrome.exe",
+      version: "test",
+    }),
+  });
+  const profile = defaultProfile({ id: "initial-page-url-read-failure-test" });
+
+  const failure = await service.launchProfile(profile).then(
+    () => undefined,
+    (error: Error) => error,
+  );
+
+  assert.equal(failure?.message, "initial page URL read failed");
+  assert.equal(service.closeCount, 1);
+  let session = service.listSessions().find((item) => item.profileId === profile.id);
+  assert.equal(session?.status, "error");
+  assert.equal(session?.lastError, "initial page URL read failed");
+  assert.equal(session?.closeUnconfirmed, true);
+  assert.equal(session?.events?.some((event) => event.message === "CloakBrowser 已启动"), false);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+
+  service.confirmClose();
+  await waitFor(() => service.profileIdsHoldingRuntime().size === 0);
+
+  session = service.listSessions().find((item) => item.profileId === profile.id);
+  assert.equal(session?.status, "error");
+  assert.equal(session?.lastError, "initial page URL read failed");
+  assert.equal(session?.closeUnconfirmed, undefined);
+  assert.equal(service.closeCount, 1, "bounded cleanup and late confirmation must share one close call");
 });
 
 // The licence guard 0.5.4 installs wraps the synchronous pages() and url() that pageUrl() is built from, and

@@ -387,12 +387,12 @@ test("advanced json options are merged into context launch preview", () => {
 
   const preview = buildLaunchPreview(profile, "D:/profiles/profile-test");
 
-  assert.deepEqual(preview.options.launchOptions, { chromiumSandbox: true, timeout: 60000 });
+  assert.deepEqual(preview.options.launchOptions, { timeout: 60000 });
   assert.deepEqual(preview.options.humanConfig, { typing_delay: 100 });
   assert.deepEqual(preview.options.contextOptions, { permissions: ["geolocation"], locale: "en-US" });
 });
 
-test("launch preview strips unsafe chromium sandbox overrides", () => {
+test("launch preview defers Chromium sandbox compatibility to the wrapper", () => {
   const profile = defaultProfile({
     runtime: {
       ...defaultProfile().runtime,
@@ -400,7 +400,7 @@ test("launch preview strips unsafe chromium sandbox overrides", () => {
     },
     advanced: {
       ...defaultProfile().advanced,
-      launchOptionsJson: '{ "chromiumSandbox": false, "args": ["--no-sandbox", "--remote-debugging-port=0"] }',
+      launchOptionsJson: '{ "chromiumSandbox": true, "args": ["--no-sandbox", "--remote-debugging-port=0"] }',
     },
   });
 
@@ -410,9 +410,15 @@ test("launch preview strips unsafe chromium sandbox overrides", () => {
   assert.equal((preview.options.args as string[]).includes("--no-sandbox"), false);
   assert.equal((preview.options.args as string[]).includes("--disable-http2"), true);
   assert.deepEqual(preview.options.launchOptions, {
-    chromiumSandbox: true,
     args: ["--remote-debugging-port=0"],
   });
+  const falseOverride = buildLaunchPreview(defaultProfile({
+    advanced: {
+      ...defaultProfile().advanced,
+      launchOptionsJson: '{ "chromiumSandbox": false, "timeout": 1234 }',
+    },
+  }));
+  assert.deepEqual(falseOverride.options.launchOptions, { timeout: 1234 });
   const report = preflightProfile(profile);
   assert.equal(report.items.find((item) => item.id === "chromium-sandbox")?.severity, "warn");
 });
