@@ -108,7 +108,13 @@ function assertPackagedDependencies(payload) {
   if (failed.length > 0) {
     throw new Error(`Packaged sidecar dependency check failed: ${JSON.stringify(failed)}`);
   }
-  const expected = ["playwright-core", "puppeteer-core", "socks-proxy-agent", "undici"];
+  const expected = [
+    "playwright-core",
+    "puppeteer-core",
+    "socks-proxy-agent",
+    "undici",
+    "browser-evaluate-serialization",
+  ];
   const missing = expected.filter((name) => !payload.dependencies.some((dependency) => dependency.name === name && dependency.ok));
   if (missing.length > 0) {
     throw new Error(`Packaged sidecar dependency check missed expected dependencies: ${missing.join(", ")}.`);

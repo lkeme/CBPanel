@@ -1926,6 +1926,52 @@ async function readLifecycleRuntimeRevisionInWorker(): Promise<string> {
   });
 }
 
+export type BrowserEvaluateCallbackSerializationHealth = {
+  name: string;
+  ok: boolean;
+  error?: string;
+};
+
+type BrowserEvaluateCallback = (...args: never[]) => unknown;
+type BrowserEvaluateCallbackSourceReader = (callback: BrowserEvaluateCallback) => string;
+
+const REGISTRATION_BROWSER_EVALUATE_CALLBACKS = [
+  {
+    name: "readLifecycleRuntimeRevisionInWorker",
+    callback: readLifecycleRuntimeRevisionInWorker,
+  },
+  {
+    name: "inspectManagedExtensionInBrowser",
+    callback: inspectManagedExtensionInBrowser,
+  },
+  {
+    name: "setManagedExtensionEnabledInBrowser",
+    callback: setManagedExtensionEnabledInBrowser,
+  },
+] satisfies ReadonlyArray<{
+  name: string;
+  callback: BrowserEvaluateCallback;
+}>;
+
+/** @internal Release-smoke projection for the exact callbacks passed to browser evaluate APIs. */
+export function browserEvaluateCallbackSerializationHealth(
+  readSource: BrowserEvaluateCallbackSourceReader = (callback) => Function.prototype.toString.call(callback),
+): BrowserEvaluateCallbackSerializationHealth[] {
+  return REGISTRATION_BROWSER_EVALUATE_CALLBACKS.map(({ name, callback }) => {
+    try {
+      const source = readSource(callback);
+      new Function(`(${source})`);
+      return { name, ok: true };
+    } catch (error) {
+      return {
+        name,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+}
+
 async function loadCloakBrowser(): Promise<CloakBrowserModule> {
   return await import("cloakbrowser");
 }

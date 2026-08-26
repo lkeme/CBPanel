@@ -33,7 +33,10 @@ import { EnvironmentPackageService } from "./services/environmentPackageService"
 import { GithubMirrorProbeService } from "./services/githubMirrorProbeService";
 import { installPackagedInspectorShim } from "./services/packagedRuntime";
 import { ProxyService } from "./services/proxyService";
-import { SessionService } from "./services/sessionService";
+import {
+  browserEvaluateCallbackSerializationHealth,
+  SessionService,
+} from "./services/sessionService";
 import { SqlitePanelRepository } from "./storage/sqliteStore";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -336,6 +339,19 @@ async function releaseSmokeDependencyHealth(): Promise<ReleaseSmokeDependencyHea
     inspectReleaseSmokeDependency("socks-proxy-agent", () => import("socks-proxy-agent")),
     inspectReleaseSmokeDependency("undici", () => import("undici")),
   ]);
+  const callbackHealth = browserEvaluateCallbackSerializationHealth();
+  const failedCallbacks = callbackHealth.filter((callback) => !callback.ok);
+  dependencies.push({
+    name: "browser-evaluate-serialization",
+    ok: failedCallbacks.length === 0,
+    ...(failedCallbacks.length > 0
+      ? {
+          error: failedCallbacks
+            .map((callback) => `${callback.name}: ${callback.error ?? "unknown serialization failure"}`)
+            .join("; "),
+        }
+      : {}),
+  });
   return {
     packaged: PACKAGED_RUNTIME,
     dependencies,

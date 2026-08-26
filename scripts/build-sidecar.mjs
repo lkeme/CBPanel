@@ -77,6 +77,7 @@ try {
       target,
       "--output",
       output,
+      "--public",
       "--public-packages",
       "*",
       "--fallback-to-source",

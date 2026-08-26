@@ -14,6 +14,7 @@ import {
   type ExtensionRegistrationMigrationBrowser,
   type ExtensionRegistrationPreflightLaunchOptions,
   type ExtensionRegistrationPreflightProcess,
+  browserEvaluateCallbackSerializationHealth,
   buildExtensionRegistrationPreflightLaunchOptions,
   formatNetworkCheckDetail,
   getOrCreatePlaywrightPage,
@@ -27,6 +28,39 @@ import {
   SessionService,
   withRawCdpConnection,
 } from "./sessionService";
+
+test("browser evaluate callback serialization health covers the exact registration callbacks", () => {
+  assert.deepEqual(browserEvaluateCallbackSerializationHealth(), [
+    { name: "readLifecycleRuntimeRevisionInWorker", ok: true },
+    { name: "inspectManagedExtensionInBrowser", ok: true },
+    { name: "setManagedExtensionEnabledInBrowser", ok: true },
+  ]);
+});
+
+test("browser evaluate callback serialization health rejects sourceless native-code functions", () => {
+  const nativeCodeSource = Function.prototype.toString.call(
+    function fixtureCallback() {}.bind(undefined),
+  );
+  assert.match(nativeCodeSource, /\[native code\]/);
+
+  const health = browserEvaluateCallbackSerializationHealth(
+    () => nativeCodeSource,
+  );
+
+  assert.deepEqual(
+    health.map(({ name, ok }) => ({ name, ok })),
+    [
+      { name: "readLifecycleRuntimeRevisionInWorker", ok: false },
+      { name: "inspectManagedExtensionInBrowser", ok: false },
+      { name: "setManagedExtensionEnabledInBrowser", ok: false },
+    ],
+  );
+  assert.equal(
+    health.every((callback) => typeof callback.error === "string" && callback.error.length > 0),
+    true,
+  );
+  assert.equal(health.some((callback) => Object.hasOwn(callback, "source")), false);
+});
 
 type TestRuntimeHandle = {
   close: () => Promise<void>;
