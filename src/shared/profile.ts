@@ -1048,6 +1048,13 @@ function hasUnsupportedChromiumSandboxOverride(profile: BrowserProfile): boolean
   }
 }
 
+function chromiumSandboxOverrideDetail(profile: BrowserProfile): string {
+  if (profile.runtime.launcher === "puppeteer-browser") {
+    return "检测到仅适用于 Playwright 的 chromiumSandbox=true；CBPanel 会忽略该覆盖，并将实际 Chromium 沙箱参数交由 CloakBrowser/Puppeteer 的当前启动参数策略。";
+  }
+  return "检测到 chromiumSandbox=true；CBPanel 会忽略该覆盖。Playwright 当前默认使用 --no-sandbox，避免 Chromium 151 卡在启动握手阶段。";
+}
+
 export function buildFingerprintArgs(profile: BrowserProfile): string[] {
   const fp = profile.fingerprint;
   const args: string[] = [];
@@ -1208,7 +1215,7 @@ export function preflightProfile(
       category: "runtime",
       severity: "warn",
       title: "Chromium 沙箱",
-      detail: "检测到 chromiumSandbox=true；CBPanel 会忽略该覆盖并使用当前 CloakBrowser/Playwright 默认值（--no-sandbox），避免 Chromium 151 卡在启动握手阶段。",
+      detail: chromiumSandboxOverrideDetail(profile),
       actions: [openTabAction("advanced", "移除手动覆盖")],
     });
   }
@@ -1785,7 +1792,7 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
       category: "runtime",
       severity: "warn",
       title: "Chromium 沙箱",
-      detail: "检测到 chromiumSandbox=true；启动映射会忽略该覆盖并使用当前 SDK 默认值（--no-sandbox）。",
+      detail: chromiumSandboxOverrideDetail(profile),
     });
   }
 

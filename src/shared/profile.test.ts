@@ -392,35 +392,66 @@ test("advanced json options are merged into context launch preview", () => {
   assert.deepEqual(preview.options.contextOptions, { permissions: ["geolocation"], locale: "en-US" });
 });
 
-test("launch preview defers Chromium sandbox compatibility to the wrapper", () => {
-  const profile = defaultProfile({
-    runtime: {
-      ...defaultProfile().runtime,
-      extraArgs: ["--no-sandbox", "--disable-http2"],
-    },
-    advanced: {
-      ...defaultProfile().advanced,
-      launchOptionsJson: '{ "chromiumSandbox": true, "args": ["--no-sandbox", "--remote-debugging-port=0"] }',
-    },
-  });
+test("launch preview delegates Chromium sandbox compatibility in every launcher and profile mode", () => {
+  const scenarios = [
+    { launcher: "playwright-context", mode: "persistent", sdkLauncher: "launchPersistentContext" },
+    { launcher: "playwright-context", mode: "ephemeral", sdkLauncher: "launchContext" },
+    { launcher: "playwright-browser", mode: "persistent", sdkLauncher: "launch" },
+    { launcher: "playwright-browser", mode: "ephemeral", sdkLauncher: "launch" },
+    { launcher: "puppeteer-browser", mode: "persistent", sdkLauncher: "puppeteerLaunchPersistentContext" },
+    { launcher: "puppeteer-browser", mode: "ephemeral", sdkLauncher: "puppeteerLaunch" },
+  ] as const;
 
-  const preview = buildLaunchPreview(profile, "D:/profiles/profile-test");
+  for (const scenario of scenarios) {
+    const profile = defaultProfile({
+      mode: scenario.mode,
+      runtime: {
+        ...defaultProfile().runtime,
+        launcher: scenario.launcher,
+        stealthArgs: false,
+        extraArgs: ["--no-sandbox", "--disable-http2"],
+      },
+      advanced: {
+        ...defaultProfile().advanced,
+        launchOptionsJson: '{ "chromiumSandbox": true, "args": ["--no-sandbox", "--remote-debugging-port=0"] }',
+      },
+    });
 
-  assert.ok(Array.isArray(preview.options.args));
-  assert.equal((preview.options.args as string[]).includes("--no-sandbox"), false);
-  assert.equal((preview.options.args as string[]).includes("--disable-http2"), true);
-  assert.deepEqual(preview.options.launchOptions, {
-    args: ["--remote-debugging-port=0"],
-  });
-  const falseOverride = buildLaunchPreview(defaultProfile({
-    advanced: {
-      ...defaultProfile().advanced,
-      launchOptionsJson: '{ "chromiumSandbox": false, "timeout": 1234 }',
-    },
-  }));
-  assert.deepEqual(falseOverride.options.launchOptions, { timeout: 1234 });
-  const report = preflightProfile(profile);
-  assert.equal(report.items.find((item) => item.id === "chromium-sandbox")?.severity, "warn");
+    const preview = buildLaunchPreview(profile, "D:/profiles/profile-test");
+    assert.equal(preview.launcher, scenario.sdkLauncher);
+    assert.ok(Array.isArray(preview.options.args));
+    assert.equal((preview.options.args as string[]).includes("--no-sandbox"), false);
+    assert.equal((preview.options.args as string[]).includes("--disable-http2"), true);
+    assert.deepEqual(preview.options.launchOptions, {
+      args: ["--remote-debugging-port=0"],
+    });
+
+    const falseOverride = buildLaunchPreview(defaultProfile({
+      mode: scenario.mode,
+      runtime: {
+        ...defaultProfile().runtime,
+        launcher: scenario.launcher,
+        stealthArgs: false,
+      },
+      advanced: {
+        ...defaultProfile().advanced,
+        launchOptionsJson: '{ "chromiumSandbox": false, "timeout": 1234 }',
+      },
+    }));
+    assert.deepEqual(falseOverride.options.launchOptions, { timeout: 1234 });
+
+    const preflightWarning = preflightProfile(profile).items.find((item) => item.id === "chromium-sandbox");
+    const auditWarning = auditProfile(profile).items.find((item) => item.id === "chromium-sandbox");
+    assert.equal(preflightWarning?.severity, "warn");
+    assert.equal(auditWarning?.detail, preflightWarning?.detail);
+    if (scenario.launcher === "puppeteer-browser") {
+      assert.match(preflightWarning?.detail ?? "", /CloakBrowser\/Puppeteer/);
+      assert.doesNotMatch(preflightWarning?.detail ?? "", /Playwright 当前默认使用 --no-sandbox/);
+    } else {
+      assert.match(preflightWarning?.detail ?? "", /Playwright 当前默认使用 --no-sandbox/);
+      assert.doesNotMatch(preflightWarning?.detail ?? "", /CloakBrowser\/Puppeteer/);
+    }
+  }
 });
 
 test("display proxy mask preserves username without exposing password", () => {

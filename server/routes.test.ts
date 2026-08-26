@@ -31,6 +31,40 @@ after(async () => {
   await panel?.dispose();
 });
 
+test("a tokened Stop cancels the matching launch even when no session exists yet", async () => {
+  const environment = await createEnvironment("Stop Before Launch Route");
+  const launchRequestId = "launch-route-ordering-regression";
+  try {
+    const invalid = await panel.request("POST", `/api/environments/${environment.id}/launch`, {
+      launchRequestId: "contains spaces",
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal((invalid.body as { code?: string }).code, "LAUNCH_REQUEST_ID_INVALID");
+
+    const stopped = await panel.request("POST", `/api/environments/${environment.id}/stop`, {
+      launchRequestId,
+    });
+    assert.equal(stopped.status, 200);
+    assert.equal((stopped.body as SessionSummary).status, "stopped");
+
+    const delayedLaunch = await panel.request("POST", `/api/environments/${environment.id}/launch`, {
+      launchRequestId,
+    });
+    assert.equal(delayedLaunch.status, 409);
+    assert.equal((delayedLaunch.body as { code?: string }).code, "BROWSER_LAUNCH_CANCELLED");
+
+    const state = await panel.request("GET", "/api/state");
+    assert.equal(
+      (state.body as { sessions: SessionSummary[] }).sessions.some(
+        (session) => session.profileId === environment.id,
+      ),
+      false,
+    );
+  } finally {
+    await panel.request("DELETE", `/api/environments/${environment.id}`);
+  }
+});
+
 // The precondition for restoreEnvironment, and the reason this is its own case rather than a line inside a
 // bigger one: a soft delete that also removed the directory would look completely correct from the API —
 // the row is in the trash, restore answers 200 — and the loss would only surface the next time that

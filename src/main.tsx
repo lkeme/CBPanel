@@ -39,6 +39,7 @@ import {
   type PanelState,
   type ProfilePreflightAction,
   type ProfilePreflightReport,
+  type SessionSummary,
   applyProfileConfigShare,
   buildProxyUrl,
   createProfileConfigShareString,
@@ -77,10 +78,17 @@ import { useBrowserCoreActions } from "./hooks/useBrowserCoreActions";
 import { useDiagnosticsActions } from "./hooks/useDiagnosticsActions";
 import { useExtensionActions } from "./hooks/useExtensionActions";
 import {
+  type AbortableSingleFlight,
+  abortSingleFlight,
+  isAbortError,
+  launchResponseOutcome,
   type ProfileLaunchRequest,
+  type ProfileStopRequest,
   mergeSessionSnapshotByGeneration,
+  profileLifecycleActionState,
   reconcileProfileLaunchRequests,
-  runSingleFlight,
+  runAbortableSingleFlight,
+  SESSION_STATE_POLL_TIMEOUT_MS,
   shouldPollProfileSessions,
 } from "./hooks/profileLaunchState";
 import { useProfileLifecycleActions } from "./hooks/useProfileLifecycleActions";
@@ -308,6 +316,7 @@ function App() {
   const [workbenchView, setWorkbenchView] = useState<WorkbenchView>("profiles");
   const [busy, setBusy] = useState("");
   const [pendingLaunchIds, setPendingLaunchIds] = useState<Set<string>>(() => new Set());
+  const [pendingStopIds, setPendingStopIds] = useState<Set<string>>(() => new Set());
   const [localProxyDraftIds, setLocalProxyDraftIds] = useState<Set<string>>(() => new Set());
   const [draftProxyLibraryIds, setDraftProxyLibraryIds] = useState<Record<string, string>>({});
   const [confirmDialog, setConfirmDialog] = useDeferredOpenState<ConfirmDialogState>(null, {
@@ -364,7 +373,9 @@ function App() {
   const importInput = useRef<HTMLInputElement>(null);
   const pendingLaunchIdsRef = useRef<Set<string>>(new Set());
   const launchRequestsRef = useRef<Map<string, ProfileLaunchRequest>>(new Map());
-  const sessionPollInFlightRef = useRef<Promise<void> | null>(null);
+  const pendingStopIdsRef = useRef<Set<string>>(new Set());
+  const stopRequestsRef = useRef<Map<string, ProfileStopRequest>>(new Map());
+  const sessionPollInFlightRef = useRef<AbortableSingleFlight>({ controller: null, current: null });
   const confirmedSettingsRef = useRef<AppSettings | null>(null);
   const optimisticSettingsRef = useRef<AppSettings | null>(null);
   const settingsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -382,6 +393,9 @@ function App() {
   useEffect(() => () => {
     for (const request of launchRequestsRef.current.values()) request.controller.abort();
     launchRequestsRef.current.clear();
+    for (const request of stopRequestsRef.current.values()) request.controller.abort();
+    stopRequestsRef.current.clear();
+    abortSingleFlight(sessionPollInFlightRef.current);
   }, []);
 
   useEffect(() => {
@@ -478,8 +492,8 @@ function App() {
     return [...tags].sort((left, right) => left.localeCompare(right));
   }, [state?.profiles]);
   const shouldPollSessions = useMemo(
-    () => shouldPollProfileSessions(state?.sessions ?? [], pendingLaunchIds.size),
-    [pendingLaunchIds, state?.sessions],
+    () => shouldPollProfileSessions(state?.sessions ?? [], pendingLaunchIds.size, pendingStopIds.size),
+    [pendingLaunchIds, pendingStopIds, state?.sessions],
   );
   const moduleStats = useMemo(() => buildModuleStats(state, sessionsByProfileId, locale), [locale, sessionsByProfileId, state]);
   const filteredProfiles = useMemo(() => {
@@ -525,11 +539,14 @@ function App() {
     if (!shouldPollSessions) return;
     let disposed = false;
     const poll = () => {
-      if (disposed || sessionPollInFlightRef.current) return;
-      void runSingleFlight(
-        sessionPollInFlightRef,
-        loadState,
-        (error) => console.warn("Session state polling failed", error),
+      if (disposed) return;
+      void runAbortableSingleFlight(
+        sessionPollInFlightRef.current,
+        SESSION_STATE_POLL_TIMEOUT_MS,
+        (signal) => loadState(signal),
+        (error) => {
+          if (!isAbortError(error)) console.warn("Session state polling failed", error);
+        },
       );
     };
     poll();
@@ -539,8 +556,9 @@ function App() {
     return () => {
       disposed = true;
       window.clearInterval(interval);
+      abortSingleFlight(sessionPollInFlightRef.current);
     };
-  }, [shouldPollSessions]);
+  }, [locale, shouldPollSessions]);
 
   useEffect(() => {
     if (!browserCoreOperationActive(binaryInfo?.core?.operation) && !isBrowserCoreBusy(busy)) return;
@@ -557,10 +575,11 @@ function App() {
   const normalizedSettings = normalizeSettings(settings);
   const sidebarCollapsed = normalizedSettings.desktop.sidebarMode === "collapsed";
   const draftSession = draft ? sessionsByProfileId.get(draft.id) : undefined;
-  // Includes an unconfirmed close so the drawer keeps offering Stop: that session is not running, but a
-  // browser may still be alive and Stop is the retry.
-  const draftRunning = draftSession?.status === "running" || draftSession?.status === "launching"
-    || draftSession?.closeUnconfirmed === true;
+  const draftActionState = profileLifecycleActionState(
+    draftSession,
+    Boolean(draft && pendingLaunchIds.has(draft.id)),
+    Boolean(draft && pendingStopIds.has(draft.id)),
+  );
   const pageSize = normalizedSettings.table.pageSize;
   const totalPages = Math.max(1, Math.ceil(filteredProfiles.length / pageSize));
   const currentPage = Math.min(profilePage, totalPages);
@@ -598,10 +617,16 @@ function App() {
     await Promise.all([loadState(), loadBinaryInfo(false), loadRuntimeInfo(), loadDiagnostics()]);
   }
 
-  async function loadState(): Promise<PanelState> {
-    const next = await api<PanelState>("/api/state");
-    const settledLaunchIds = reconcileProfileLaunchRequests(launchRequestsRef.current, next.sessions);
-    for (const profileId of settledLaunchIds) markLaunchPending(profileId, false);
+  async function loadState(signal?: AbortSignal): Promise<PanelState> {
+    const next = await api<PanelState>("/api/state", { signal });
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException("Session state request was aborted", "AbortError");
+    }
+    const settledLaunches = reconcileProfileLaunchRequests(launchRequestsRef.current, next.sessions);
+    for (const { profileId, session } of settledLaunches) {
+      markLaunchPending(profileId, false);
+      reportSettledLaunch(session);
+    }
     const optimisticSettings = optimisticSettingsRef.current;
     if (!optimisticSettings) {
       confirmedSettingsRef.current = normalizeSettings(next.settings);
@@ -621,6 +646,34 @@ function App() {
     else next.delete(id);
     pendingLaunchIdsRef.current = next;
     setPendingLaunchIds(next);
+  }
+
+  function markStopPending(id: string, pending: boolean) {
+    const next = new Set(pendingStopIdsRef.current);
+    if (pending) next.add(id);
+    else next.delete(id);
+    pendingStopIdsRef.current = next;
+    setPendingStopIds(next);
+  }
+
+  function reportSettledLaunch(session: SessionSummary) {
+    const outcome = launchResponseOutcome(session);
+    if (outcome.kind === "pending") return;
+    if (outcome.kind === "running") {
+      toast(
+        outcome.tone,
+        outcome.message ?? t(outcome.headless ? "toast.launchedHeadless" : "toast.launched"),
+      );
+      return;
+    }
+    const fallbackKey = outcome.status === "stopped"
+      ? "toast.launchStopped"
+      : outcome.status === "stopping"
+        ? "toast.launchStopping"
+        : "toast.launchFailed";
+    toast(outcome.tone, outcome.message ?? t(fallbackKey));
+    setSelectedId(session.profileId);
+    setDrawerMode("details");
   }
 
   async function loadRuntimeInfo() {
@@ -821,6 +874,8 @@ function App() {
     loadState,
     localProxyDraftIds,
     markLaunchPending,
+    markStopPending,
+    reportSettledLaunch,
     setBusy,
     setConfirmDialog,
     setDraft,
@@ -835,6 +890,7 @@ function App() {
     setState,
     setWorkbenchView,
     state,
+    stopRequestsRef,
     t,
     locale,
     toast,
@@ -1162,7 +1218,11 @@ function App() {
     }
     for (const profile of selectedProfiles) {
       const session = sessionsByProfileId.get(profile.id);
-      if (session?.status === "running" || session?.status === "launching") continue;
+      if (profileLifecycleActionState(
+        session,
+        pendingLaunchIds.has(profile.id),
+        pendingStopIds.has(profile.id),
+      ).canStop) continue;
       await launchProfile(profile.id);
     }
   }
@@ -1170,7 +1230,11 @@ function App() {
   async function stopSelectedProfiles() {
     for (const profile of selectedProfiles) {
       const session = sessionsByProfileId.get(profile.id);
-      if (session?.status === "running" || session?.status === "launching" || session?.closeUnconfirmed) {
+      if (profileLifecycleActionState(
+        session,
+        pendingLaunchIds.has(profile.id),
+        pendingStopIds.has(profile.id),
+      ).canStop) {
         await stopProfile(profile.id);
       }
     }
@@ -1435,6 +1499,7 @@ function App() {
                       profiles={pagedProfiles}
                       proxies={state?.proxies ?? []}
                       pendingLaunchIds={pendingLaunchIds}
+                      pendingStopIds={pendingStopIds}
                       selectedId={selectedId}
                       selectedIds={selectedIds}
                       sessionsByProfileId={sessionsByProfileId}
@@ -1574,7 +1639,8 @@ function App() {
           proxyCheck={proxyCheck}
           proxyLibraryDraftIds={draftProxyLibraryIds}
           browserCoreMissing={browserCoreMissing}
-          running={draftRunning}
+          canStop={draftActionState.canStop}
+          stopPending={draftActionState.stopPending}
           resolveProxyGeoip={resolveProxyGeoip}
           saveDraft={saveDraft}
           saveDraftProxyToLibrary={saveDraftProxyToLibrary}

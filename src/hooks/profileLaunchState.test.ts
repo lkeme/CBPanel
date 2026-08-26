@@ -4,13 +4,19 @@ import test from "node:test";
 import type { SessionSummary } from "../shared/profile";
 import {
   abortProfileLaunchRequest,
+  abortProfileStopRequest,
+  abortSingleFlight,
+  armProfileStopRequestDeadline,
   launchResponseMatchesRequest,
   launchResponseOutcome,
   mergeSessionSnapshotByGeneration,
+  profileLifecycleActionState,
+  raceAbortSignal,
   reconcileProfileLaunchRequests,
   registerProfileLaunchRequest,
+  registerProfileStopRequest,
   rekeyProfileLaunchRequest,
-  runSingleFlight,
+  runAbortableSingleFlight,
   shouldPollProfileSessions,
   upsertSessionByGeneration,
 } from "./profileLaunchState";
@@ -72,9 +78,52 @@ test("pending reconciliation ignores the previous generation and settles the obs
 
   assert.deepEqual(
     reconcileProfileLaunchRequests(requests, [session("profile-a", "error", SECOND_GENERATION)]),
-    ["profile-a"],
+    [{ profileId: "profile-a", session: session("profile-a", "error", SECOND_GENERATION) }],
   );
   assert.equal(request.controller.signal.aborted, true);
+  assert.equal(requests.has("profile-a"), false);
+  assert.deepEqual(
+    reconcileProfileLaunchRequests(requests, [session("profile-a", "error", SECOND_GENERATION)]),
+    [],
+  );
+});
+
+test("polling can own one running launch outcome and suppress the late HTTP owner", () => {
+  const requests = new Map();
+  const request = registerProfileLaunchRequest(
+    requests,
+    "profile-a",
+    session("profile-a", "stopped", FIRST_GENERATION),
+  );
+  const running = session("profile-a", "running", SECOND_GENERATION);
+
+  assert.deepEqual(reconcileProfileLaunchRequests(requests, [running]), [
+    { profileId: "profile-a", session: running },
+  ]);
+  assert.equal(request.controller.signal.aborted, true);
+  assert.equal(requests.has("profile-a"), false);
+  assert.deepEqual(reconcileProfileLaunchRequests(requests, [running]), []);
+});
+
+test("a transport-unconfirmed launch cancellation stays pending while the server is still active", () => {
+  const requests = new Map();
+  const request = registerProfileLaunchRequest(
+    requests,
+    "profile-a",
+    session("profile-a", "stopped", FIRST_GENERATION),
+  );
+  request.cancellationPending = true;
+  request.controller.abort();
+
+  assert.deepEqual(
+    reconcileProfileLaunchRequests(requests, [session("profile-a", "running", SECOND_GENERATION)]),
+    [],
+  );
+  assert.equal(requests.get("profile-a"), request);
+  assert.deepEqual(
+    reconcileProfileLaunchRequests(requests, [session("profile-a", "stopped", SECOND_GENERATION)]),
+    [{ profileId: "profile-a", session: session("profile-a", "stopped", SECOND_GENERATION) }],
+  );
   assert.equal(requests.has("profile-a"), false);
 });
 
@@ -88,7 +137,7 @@ test("a terminal generation can settle pending even when polling missed launchin
 
   assert.deepEqual(
     reconcileProfileLaunchRequests(requests, [session("profile-a", "stopped", SECOND_GENERATION)]),
-    ["profile-a"],
+    [{ profileId: "profile-a", session: session("profile-a", "stopped", SECOND_GENERATION) }],
   );
   assert.equal(request.controller.signal.aborted, true);
 });
@@ -246,6 +295,7 @@ test("only a healthy running launch response has a success outcome", () => {
 
 test("pending launches and unconfirmed closes keep session polling active", () => {
   assert.equal(shouldPollProfileSessions([], 1), true);
+  assert.equal(shouldPollProfileSessions([], 0, 1), true);
   assert.equal(shouldPollProfileSessions([session("profile-a", "launching", SECOND_GENERATION)], 0), true);
   assert.equal(shouldPollProfileSessions([session("profile-a", "running", SECOND_GENERATION)], 0), true);
   assert.equal(shouldPollProfileSessions([session("profile-a", "stopping", SECOND_GENERATION)], 0), true);
@@ -260,10 +310,10 @@ test("pending launches and unconfirmed closes keep session polling active", () =
 });
 
 test("session polling is caught single-flight and can retry after settlement", async () => {
-  const flight = { current: null as Promise<void> | null };
+  const flight = { controller: null, current: null as Promise<void> | null };
   let attempts = 0;
   let release: (() => void) | undefined;
-  const task = () => {
+  const task = (_signal: AbortSignal) => {
     attempts += 1;
     return new Promise<void>((resolve) => {
       release = resolve;
@@ -271,23 +321,142 @@ test("session polling is caught single-flight and can retry after settlement", a
   };
 
   const failUnexpectedly = (error: unknown) => assert.fail(error instanceof Error ? error : String(error));
-  const first = runSingleFlight(flight, task, failUnexpectedly);
-  const duplicate = runSingleFlight(flight, task, failUnexpectedly);
+  const first = runAbortableSingleFlight(flight, 1_000, task, failUnexpectedly);
+  const duplicate = runAbortableSingleFlight(flight, 1_000, task, failUnexpectedly);
   assert.equal(first, duplicate);
   await Promise.resolve();
   assert.equal(attempts, 1);
   release?.();
   await first;
   assert.equal(flight.current, null);
+  assert.equal(flight.controller, null);
 
   const errors: unknown[] = [];
-  await runSingleFlight(flight, async () => {
+  await runAbortableSingleFlight(flight, 1_000, async () => {
     attempts += 1;
     throw new Error("offline");
   }, (error) => errors.push(error));
   assert.equal(attempts, 2);
   assert.equal((errors[0] as Error).message, "offline");
   assert.equal(flight.current, null);
+});
+
+test("a never-settling poll is aborted by its deadline and the next poll can run", async () => {
+  const flight = { controller: null, current: null as Promise<void> | null };
+  const errors: unknown[] = [];
+  let attempts = 0;
+
+  await runAbortableSingleFlight(
+    flight,
+    10,
+    async () => {
+      attempts += 1;
+      await new Promise<never>(() => undefined);
+    },
+    (error) => errors.push(error),
+  );
+
+  assert.equal(attempts, 1);
+  assert.equal((errors[0] as Error).name, "TimeoutError");
+  assert.equal(flight.current, null);
+  assert.equal(flight.controller, null);
+
+  await runAbortableSingleFlight(
+    flight,
+    1_000,
+    async () => {
+      attempts += 1;
+    },
+    (error) => assert.fail(error instanceof Error ? error : String(error)),
+  );
+  assert.equal(attempts, 2);
+});
+
+test("poll cleanup aborts the active request and releases single-flight ownership", async () => {
+  const flight = { controller: null, current: null as Promise<void> | null };
+  const errors: unknown[] = [];
+  const polling = runAbortableSingleFlight(
+    flight,
+    1_000,
+    async () => {
+      await new Promise<never>(() => undefined);
+    },
+    (error) => errors.push(error),
+  );
+
+  abortSingleFlight(flight);
+  await polling;
+
+  assert.equal((errors[0] as Error).name, "AbortError");
+  assert.equal(flight.current, null);
+  assert.equal(flight.controller, null);
+});
+
+test("profile Stop registration is single-flight and identity guarded", () => {
+  const requests = new Map();
+  const first = registerProfileStopRequest(requests, "profile-a");
+  assert.ok(first);
+
+  assert.equal(registerProfileStopRequest(requests, "profile-a"), undefined);
+  assert.equal(abortProfileStopRequest(requests, "profile-a", { ...first }), false);
+  assert.equal(first.controller.signal.aborted, false);
+  assert.equal(abortProfileStopRequest(requests, "profile-a", first), true);
+  assert.equal(first.controller.signal.aborted, true);
+  assert.equal(requests.has("profile-a"), false);
+});
+
+test("a profile Stop request owns an aborting transport deadline", async () => {
+  const request = registerProfileStopRequest(new Map(), "profile-a");
+  assert.ok(request);
+  const clearDeadline = armProfileStopRequestDeadline(request, 10);
+
+  await new Promise<void>((resolve) => {
+    request.controller.signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+  clearDeadline();
+
+  assert.equal(request.timedOut, true);
+  assert.equal(request.controller.signal.aborted, true);
+  assert.equal((request.controller.signal.reason as Error).name, "TimeoutError");
+});
+
+test("an abort signal settles its caller even when the transport ignores cancellation", async () => {
+  const controller = new AbortController();
+  const waiting = raceAbortSignal(controller.signal, new Promise<never>(() => undefined));
+
+  controller.abort(new DOMException("deadline", "TimeoutError"));
+
+  await assert.rejects(waiting, (error) => {
+    assert.equal((error as Error).name, "TimeoutError");
+    return true;
+  });
+});
+
+test("local pending lifecycle state keeps Stop reachable and serializes its UI", () => {
+  assert.deepEqual(profileLifecycleActionState(undefined, true, false), {
+    canStop: true,
+    stopPending: false,
+  });
+  assert.deepEqual(profileLifecycleActionState(undefined, false, true), {
+    canStop: true,
+    stopPending: true,
+  });
+  assert.deepEqual(
+    profileLifecycleActionState(session("profile-a", "stopping", SECOND_GENERATION), false, false),
+    { canStop: true, stopPending: true },
+  );
+  assert.deepEqual(
+    profileLifecycleActionState(
+      { ...session("profile-a", "error", SECOND_GENERATION), closeUnconfirmed: true },
+      false,
+      true,
+    ),
+    { canStop: true, stopPending: true },
+  );
+  assert.deepEqual(
+    profileLifecycleActionState(session("profile-a", "stopped", SECOND_GENERATION), false, false),
+    { canStop: false, stopPending: false },
+  );
 });
 
 function session(

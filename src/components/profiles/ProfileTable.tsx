@@ -27,6 +27,7 @@ import {
   buildNetworkCheckSuccessParts,
   networkCheckSummaryText,
 } from "../../shared/networkCheckDisplay";
+import { profileLifecycleActionState } from "../../hooks/profileLaunchState";
 import { columnLabels, type ProfileColumnId } from "./columns";
 
 type Environment = NonNullable<PanelState["environments"]>[number];
@@ -36,6 +37,7 @@ export function ProfileTable({
   columns,
   environments,
   pendingLaunchIds,
+  pendingStopIds,
   profiles,
   proxies,
   selectedId,
@@ -56,6 +58,7 @@ export function ProfileTable({
   columns: ProfileColumnConfig[];
   environments: Environment[];
   pendingLaunchIds: Set<string>;
+  pendingStopIds: Set<string>;
   profiles: BrowserProfile[];
   proxies: ProxyEntity[];
   selectedId: string;
@@ -108,13 +111,11 @@ export function ProfileTable({
             const proxy = environment?.proxyId ? proxiesById.get(environment.proxyId) : undefined;
             const status = session?.status ?? "stopped";
             const launchPending = pendingLaunchIds.has(profile.id);
-            // Not the same as "is running": a stop whose close was never confirmed leaves the session in
-            // error with a browser that may still be alive, and Stop is the retry the panel tells the
-            // user to reach for. Offering Launch there instead both fails on the locked profile
-            // directory and lets destructive operations think the files are free.
-            const canStop = status === "running" || status === "launching" || status === "stopping"
-              || session?.closeUnconfirmed === true;
-            const stopPending = status === "stopping";
+            const actionState = profileLifecycleActionState(
+              session,
+              launchPending,
+              pendingStopIds.has(profile.id),
+            );
             return (
               <div
                 className={`profile-table-row ${profile.id === selectedId ? "active" : ""}`}
@@ -126,10 +127,10 @@ export function ProfileTable({
                   <div className={`cell col-${column.id} ${columnAlignClass(column.id as ProfileColumnId)}`} key={`${profile.id}-${column.id}`}>
                     {renderCell({
                       columnId: column.id as ProfileColumnId,
-                      canStop,
+                      canStop: actionState.canStop,
                       profile,
                       launchPending,
-                      stopPending,
+                      stopPending: actionState.stopPending,
                       environment,
                       proxy,
                       selected: selectedIds.has(profile.id),

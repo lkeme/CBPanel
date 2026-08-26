@@ -785,6 +785,7 @@ export const enUS: Dictionary = {
   "toast.launchFailed": "Browser launch failed",
   "toast.stopped": "Session stopped",
   "toast.stopUnconfirmed": "The browser did not confirm it closed and may still be running. Try Stop again, or end the browser process yourself.",
+  "toast.stopRequestTimeout": "The Stop request timed out. Refreshing the browser state.",
   "toast.preflightPass": "Preflight passed",
   "toast.preflightPassWithWarnings": "Preflight passed with {count} warning||Preflight passed with {count} warnings",
   "toast.preflightFail": "Preflight found {count} failed item||Preflight found {count} failed items",

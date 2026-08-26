@@ -12,6 +12,7 @@ import {
   EXTENSION_LIFECYCLE_INJECTOR_VERSION,
   EXTENSION_LIFECYCLE_NAMESPACE,
   ExtensionRuntimeService,
+  assertWindowsExtensionRuntimePathBudget,
 } from "./extensionRuntimeService";
 import {
   buildExtensionRegistrationPreflightLaunchOptions,
@@ -136,7 +137,7 @@ test("reference materialization refreshes when source code changes without a ver
   await fs.rm(root, { recursive: true, force: true });
 });
 
-test("MV3 registration URLs are deterministic and short for production-length IDs", async () => {
+test("MV3 registration URLs are deterministic for production-length IDs", async () => {
   const root = await makeTempDir();
   const source = await writeExtension(root, "long-registration-source", {
     manifest_version: 3,
@@ -161,8 +162,6 @@ test("MV3 registration URLs are deterministic and short for production-length ID
     new RegExp(`^${EXTENSION_LIFECYCLE_NAMESPACE}-worker-v${EXTENSION_LIFECYCLE_INJECTOR_VERSION}-[A-Za-z0-9_-]{22}\\.js$`),
   );
   assert.equal(path.posix.dirname(firstLayout.wrapper), "nested");
-  const productionTail = path.join("extension-runtimes", environmentId, extensionId, firstLayout.wrapper);
-  assert.ok(productionTail.length < 180, `MV3 runtime path tail is too long for portable Windows installs: ${productionTail.length}`);
 
   const changed = await service.materialize({
     ...input,
@@ -172,6 +171,100 @@ test("MV3 registration URLs are deterministic and short for production-length ID
   assert.notEqual(changed.registration?.runtimeRevision, first.registration?.runtimeRevision);
   assert.notEqual(changed.registration?.workerRelativePath, first.registration?.workerRelativePath);
   await fs.rm(root, { recursive: true, force: true });
+});
+
+test("Windows runtime path budget accepts the real portable root and rejects the long packaged root", () => {
+  const environmentId = "profile-e506462b-6e5f-4c2d-b4ff-7c0e5a4aae6b";
+  const extensionId = "extension-87f3e24e-630b-413d-9a85-e57216851c6f";
+  const revision = "A".repeat(22);
+  const generatedPaths = [
+    `${EXTENSION_LIFECYCLE_NAMESPACE}/config-v4-${revision}.js`,
+    `${EXTENSION_LIFECYCLE_NAMESPACE}/bootstrap-v4-${revision}.js`,
+    `${EXTENSION_LIFECYCLE_NAMESPACE}-worker-v4-${revision}.js`,
+  ];
+  const realOutputDir = path.win32.join(
+    "E:\\PortableApps\\Browsers\\CBPanel\\portable-data\\extension-runtimes",
+    environmentId,
+    extensionId,
+  );
+
+  assert.doesNotThrow(() => assertWindowsExtensionRuntimePathBudget(
+    "OneTab",
+    realOutputDir,
+    generatedPaths,
+    "win32",
+  ));
+  assert.equal(
+    generatedPaths.every((relativePath) => path.win32.resolve(
+      realOutputDir,
+      relativePath.replaceAll("/", "\\"),
+    ).length <= 259),
+    true,
+  );
+
+  const longOutputDir = path.win32.join(
+    "C:\\Users\\PortableUser\\AppData\\Local\\Temp\\cbpanel-packaged-onetab-t92rj" +
+      "\\CBPanel-win-portable\\portable-data\\extension-runtimes",
+    "profile-0f60553-073b-493e-82d5-160cbb4ca874",
+    "extension-8ffa05c0-3f0b-4810-98d6-bca6f801b164",
+  );
+  const offendingPath = generatedPaths
+    .map((relativePath) => path.win32.resolve(longOutputDir, relativePath.replaceAll("/", "\\")))
+    .sort((left, right) => right.length - left.length)[0]!;
+  assert.equal(offendingPath.length > 259, true);
+  assert.throws(
+    () => assertWindowsExtensionRuntimePathBudget("OneTab", longOutputDir, generatedPaths, "win32"),
+    (error: unknown) => {
+      const typed = error as { status?: unknown; code?: unknown; message?: unknown };
+      assert.equal(typed.status, 409);
+      assert.equal(typed.code, "EXTENSION_RUNTIME_PATH_TOO_LONG");
+      assert.equal(typeof typed.message, "string");
+      assert.match(typed.message as string, /OneTab/);
+      assert.match(typed.message as string, new RegExp(`当前 ${offendingPath.length} 个字符，上限 259 个字符`));
+      assert.equal((typed.message as string).includes(offendingPath), true);
+      assert.match(typed.message as string, /C:\\CBPanel|E:\\CBPanel/);
+      return true;
+    },
+  );
+  assert.doesNotThrow(() => assertWindowsExtensionRuntimePathBudget(
+    "OneTab",
+    longOutputDir,
+    generatedPaths,
+    "linux",
+  ));
+});
+
+test("overlong Windows runtime fails before materialization publishes any files", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const root = await makeTempDir();
+  try {
+    const source = await writeExtension(root, "overlong-runtime-source", {
+      manifest_version: 3,
+      name: "Overlong Runtime",
+      version: "1.0.0",
+      key: MANIFEST_KEY,
+      background: { service_worker: "nested/worker.js" },
+    }, { "nested/worker.js": "globalThis.overlongRuntime = true;\n" });
+    const runtimeDir = path.join(root, "portable-data", "r".repeat(120), "extension-runtimes");
+    const service = new ExtensionRuntimeService({
+      runtimeDir,
+      browserDataDir: path.join(root, "browser-data"),
+    });
+
+    await assert.rejects(service.materialize({
+      environmentId: "profile-12345678-1234-1234-1234-123456789abc",
+      extension: extensionEntity(
+        "extension-12345678-1234-1234-1234-123456789abc",
+        source,
+        "reference",
+      ),
+      lifecycleRevision: "binding-overlong-runtime",
+    }), hasErrorCode("EXTENSION_RUNTIME_PATH_TOO_LONG"));
+    assert.equal(await exists(runtimeDir), false);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("concurrent materialization of one environment extension shares one complete runtime copy", async () => {

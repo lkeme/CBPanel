@@ -74,6 +74,7 @@ const CONFIG_FILE = "config.js";
 const BOOTSTRAP_FILE = "bootstrap.js";
 const SIGNATURE_FILE = "materialization.json";
 const MATERIALIZATION_METADATA_PATH = `${EXTENSION_LIFECYCLE_NAMESPACE}/${SIGNATURE_FILE}`;
+const WINDOWS_CHROMIUM_FILE_PATH_LIMIT = 259;
 
 /**
  * Creates disposable per-environment extension copies. Only these copies are adapted; the canonical
@@ -196,9 +197,17 @@ export class ExtensionRuntimeService {
       runtimeRevision,
     };
     const signature = materializationSignature(manifest, config, background, sourceRevision);
-    const workerRelativePath = mv3Background
-      ? mv3ResourcePaths(signature, mv3Background.original).wrapper
+    const mv3Resources = mv3Background
+      ? mv3ResourcePaths(signature, mv3Background.original)
       : undefined;
+    if (mv3Resources) {
+      assertWindowsExtensionRuntimePathBudget(
+        input.extension.name,
+        outputDir,
+        Object.values(mv3Resources),
+      );
+    }
+    const workerRelativePath = mv3Resources?.wrapper;
     const registration = browserExtensionId && workerRelativePath ? {
       browserExtensionId,
       workerRelativePath,
@@ -864,6 +873,43 @@ function lifecycleReservedPath(relativePath: string): Error {
   });
 }
 
+function extensionRuntimePathTooLong(
+  extensionName: string,
+  offendingPath: string,
+  pathLength: number,
+): Error {
+  return Object.assign(new Error(
+    `扩展 ${extensionName} 的受保护运行时文件路径过长，Chromium 无法可靠加载` +
+      `（当前 ${pathLength} 个字符，上限 ${WINDOWS_CHROMIUM_FILE_PATH_LIMIT} 个字符）：${offendingPath}。` +
+      "请将 CBPanel 便携目录移动到更靠近磁盘根目录的短路径（例如 C:\\CBPanel 或 E:\\CBPanel）后重试。",
+  ), {
+    status: 409,
+    code: "EXTENSION_RUNTIME_PATH_TOO_LONG",
+  });
+}
+
+/** @internal Enforces the file-path budget used by Chromium's unpacked-extension loader on Windows. */
+export function assertWindowsExtensionRuntimePathBudget(
+  extensionName: string,
+  outputDir: string,
+  generatedRelativePaths: Iterable<string>,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform !== "win32") return;
+  const absoluteOutputDir = path.win32.resolve(outputDir);
+  let offending: { path: string; length: number } | undefined;
+  for (const relativePath of generatedRelativePaths) {
+    const absolutePath = path.win32.resolve(absoluteOutputDir, relativePath.replaceAll("/", "\\"));
+    if (
+      absolutePath.length > WINDOWS_CHROMIUM_FILE_PATH_LIMIT
+      && (!offending || absolutePath.length > offending.length)
+    ) {
+      offending = { path: absolutePath, length: absolutePath.length };
+    }
+  }
+  if (offending) throw extensionRuntimePathTooLong(extensionName, offending.path, offending.length);
+}
+
 function relativeModuleSpecifier(fromDirectory: string, target: string): string {
   const relative = path.posix.relative(fromDirectory === "." ? "" : fromDirectory, target);
   return relative.startsWith(".") ? relative : `./${relative}`;
@@ -873,8 +919,9 @@ function mv3ResourcePaths(
   signature: string,
   originalWorker: string,
 ): { config: string; bootstrap: string; wrapper: string } {
-  // Keep enough entropy to make collisions impractical without pushing long portable Windows
-  // installation paths past MAX_PATH. The complete signature remains in materialization.json.
+  // Keep enough entropy to make collisions impractical without needlessly consuming the portable
+  // Windows path budget. The full absolute path guard still rejects an overlong installation root,
+  // and the complete signature remains in materialization.json.
   const revision = Buffer.from(signature.slice(0, 32), "hex").toString("base64url");
   const suffix = `v${EXTENSION_LIFECYCLE_INJECTOR_VERSION}-${revision}`;
   const originalDirectory = path.posix.dirname(originalWorker);

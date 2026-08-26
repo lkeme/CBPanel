@@ -212,7 +212,9 @@ impl RuntimeState {
             };
             if !exited {
                 let _ = child.kill();
-                let _ = child.wait();
+                // TerminateProcess/kill can fail, and Child::wait has no deadline. Never let one
+                // uncontrollable sidecar keep the ExitRequested gate in RUNNING forever.
+                let _ = wait_for_child_exit(&mut child, SIDECAR_FORCED_EXIT_WAIT);
             }
             self.config.sidecar = SidecarStatus {
                 status: "stopped",
@@ -227,6 +229,7 @@ impl RuntimeState {
 const SIDECAR_SHUTDOWN_IDLE: u8 = 0;
 const SIDECAR_SHUTDOWN_RUNNING: u8 = 1;
 const SIDECAR_SHUTDOWN_COMPLETE: u8 = 2;
+const SIDECAR_FORCED_EXIT_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidecarShutdownAction {
@@ -1620,5 +1623,30 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(runtime.sidecar_port, None);
         assert_eq!(runtime.sidecar_token, None);
+    }
+
+    #[test]
+    fn sidecar_child_wait_returns_when_a_live_child_exceeds_its_budget() {
+        let mut command = if cfg!(target_os = "windows") {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping", "127.0.0.1", "-n", "6"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 5"]);
+            command
+        };
+        let mut child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("bounded-wait fixture should start");
+        let started = Instant::now();
+
+        assert!(!wait_for_child_exit(&mut child, Duration::from_millis(20)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let _ = child.kill();
+        assert!(wait_for_child_exit(&mut child, SIDECAR_FORCED_EXIT_WAIT));
     }
 }

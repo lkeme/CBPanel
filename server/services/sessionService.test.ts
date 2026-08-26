@@ -74,12 +74,14 @@ type TestRuntimeHandle = {
 
 class ControlledRuntimeSessionService extends SessionService {
   closeCount = 0;
+  startCount = 0;
   private resolveRuntime!: (runtime: TestRuntimeHandle) => void;
   private readonly runtimeReady = new Promise<TestRuntimeHandle>((resolve) => {
     this.resolveRuntime = resolve;
   });
 
   protected override async startRuntime(_profile: BrowserProfile): Promise<TestRuntimeHandle> {
+    this.startCount += 1;
     return this.runtimeReady;
   }
 
@@ -253,6 +255,49 @@ test("a data operation that starts mid-launch is rechecked before runtime creati
   assert.equal(service.listSessions().find((item) => item.profileId === profile.id)?.status, "error");
 });
 
+test("Stop during formal launch preparation prevents the actual SDK spawn boundary", async () => {
+  const service = new FormalSpawnBoundarySessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "formal-spawn-boundary-stop-test" });
+
+  const launching = service.launchProfile(profile);
+  await waitFor(() => service.entered);
+  const stopping = service.stopProfile(profile.id);
+  await waitFor(() => service.listSessions()[0]?.status === "stopping");
+  service.release();
+  const [launchResult, stopResult] = await Promise.all([launching, stopping]);
+
+  assert.equal(service.spawnCount, 0);
+  assert.notEqual(launchResult.status, "launching");
+  assert.notEqual(launchResult.status, "running");
+  assert.equal(stopResult.status, "stopped");
+  assert.equal(service.listSessions()[0]?.status, "stopped");
+});
+
+test("a global gate that closes during formal preparation prevents the actual SDK spawn boundary", async () => {
+  let operation: string | undefined;
+  const service = new FormalSpawnBoundarySessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    activeDataOperation: () => operation,
+  });
+  const profile = defaultProfile({ id: "formal-spawn-boundary-global-gate-test" });
+
+  const launching = service.launchProfile(profile);
+  await waitFor(() => service.entered);
+  operation = "恢复应用备份";
+  service.release();
+
+  await assert.rejects(launching, (error) => {
+    assert.equal((error as { code?: string }).code, "ENVIRONMENT_DATA_OPERATION_IN_PROGRESS");
+    return true;
+  });
+  assert.equal(service.spawnCount, 0);
+  assert.equal(service.listSessions()[0]?.status, "error");
+});
+
 test("stopAll waits for a launching runtime before closing it", async () => {
   const service = new ControlledRuntimeSessionService({
     browserDataDir: "data/browser-data-test",
@@ -365,6 +410,37 @@ test("a never-settling failed-launch cleanup is bounded and a late close only re
   assert.equal(settled?.events?.filter((event) => event.message === "启动清理未确认").length, 1);
 });
 
+test("a timed-out Stop retry preserves the formal launch root error", async () => {
+  const service = new FailedReadyCleanupSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "failed-launch-stop-retry-root-test" });
+
+  const failure = await service.launchProfile(profile).then(
+    () => undefined,
+    (error: Error) => error,
+  );
+  assert.equal(failure?.message, "formal initialization failed");
+  assert.equal(service.listSessions()[0]?.lastError, failure?.message);
+
+  const stopped = await service.stopProfile(profile.id);
+
+  assert.equal(stopped.status, "error");
+  assert.equal(stopped.lastError, failure?.message);
+  assert.equal(stopped.closeUnconfirmed, true);
+  assert.equal(stopped.events?.filter((event) => event.message === "启动失败").length, 1);
+  assert.equal(stopped.events?.filter((event) => event.message === "停止超时").length, 1);
+  assert.match(
+    stopped.events?.find((event) => event.message === "停止超时")?.detail ?? "",
+    /浏览器可能仍在运行/,
+  );
+
+  service.releaseClose();
+  await waitFor(() => service.profileIdsHoldingRuntime().size === 0);
+  assert.equal(service.listSessions()[0]?.lastError, failure?.message);
+});
+
 test("an external close during failed-launch cleanup prevents a false unconfirmed hold", async () => {
   const service = new FailedReadyCleanupSessionService({
     browserDataDir: "data/browser-data-test",
@@ -435,6 +511,93 @@ test("stopAll keeps the shutdown launch gate closed after session cleanup", asyn
     { status: 409 },
   );
   assert.equal(service.listSessions().some((session) => session.profileId === "stop-all-gate-second"), false);
+});
+
+test("startedAt is strictly monotonic per profile when the wall clock is equal or moves backward", async () => {
+  const service = new ControlledRuntimeSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "monotonic-started-at-test" });
+  const originalNow = Date.now;
+  const baseMs = 1_700_000_000_000;
+  let wallClockMs = baseMs;
+  service.releaseRuntime();
+
+  try {
+    Date.now = () => wallClockMs;
+    const first = await service.launchProfile(profile);
+    await service.stopProfile(profile.id);
+
+    const second = await service.launchProfile(profile);
+    await service.stopProfile(profile.id);
+
+    wallClockMs = baseMs - 60_000;
+    const third = await service.launchProfile(profile);
+    await service.stopProfile(profile.id);
+
+    assert.equal(first.startedAt, new Date(baseMs).toISOString());
+    assert.equal(second.startedAt, new Date(baseMs + 1).toISOString());
+    assert.equal(third.startedAt, new Date(baseMs + 2).toISOString());
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("a tokened Stop that overtakes session creation rejects the delayed launch and its replay", async () => {
+  const service = new ControlledRuntimeSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "stop-before-route-launch-registration-test" });
+  const otherProfile = defaultProfile({ id: "stop-before-route-launch-other-profile-test" });
+  const delayedRequestId = "launch-delayed-route-request";
+
+  const stopped = await service.stopProfile(profile.id, delayedRequestId);
+  assert.equal(stopped.status, "stopped");
+  await service.stopProfile(otherProfile.id, delayedRequestId);
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await assert.rejects(service.launchProfile(profile, delayedRequestId), (error) => {
+      assert.equal((error as { code?: string }).code, "BROWSER_LAUNCH_CANCELLED");
+      return true;
+    });
+  }
+  assert.equal(service.startCount, 0);
+  assert.deepEqual(service.listSessions(), []);
+  await assert.rejects(service.launchProfile(otherProfile, delayedRequestId), (error) => {
+    assert.equal((error as { code?: string }).code, "BROWSER_LAUNCH_CANCELLED");
+    return true;
+  });
+
+  service.releaseRuntime();
+  const fresh = await service.launchProfile(profile, "launch-fresh-route-request");
+  assert.equal(fresh.status, "running");
+  assert.equal(service.startCount, 1);
+  await service.stopProfile(profile.id);
+});
+
+test("a tokened Stop records cancellation even when an older stopped generation is retained", async () => {
+  const service = new ControlledRuntimeSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+  });
+  const profile = defaultProfile({ id: "stop-before-route-launch-with-old-session-test" });
+  service.releaseRuntime();
+  await service.launchProfile(profile, "launch-previous-generation");
+  await service.stopProfile(profile.id);
+
+  const stopped = await service.stopProfile(profile.id, "launch-delayed-after-old-generation");
+  assert.equal(stopped.status, "stopped");
+  await assert.rejects(
+    service.launchProfile(profile, "launch-delayed-after-old-generation"),
+    (error) => {
+      assert.equal((error as { code?: string }).code, "BROWSER_LAUNCH_CANCELLED");
+      return true;
+    },
+  );
+  assert.equal(service.startCount, 1);
+  assert.equal(service.listSessions()[0]?.status, "stopped");
 });
 
 test("launchProfile surfaces extension launch warnings as a warn session event", async () => {
@@ -599,6 +762,34 @@ class ThrowingPageUrlSessionService extends SessionService {
 
   denyPageUrl(profileId: string): void {
     this.deniedProfileId = profileId;
+  }
+}
+
+class FormalSpawnBoundarySessionService extends SessionService {
+  spawnCount = 0;
+  entered = false;
+  private releasePreparation!: () => void;
+  private readonly preparationGate = new Promise<void>((resolve) => {
+    this.releasePreparation = resolve;
+  });
+
+  protected override async startRuntime(
+    _profile: BrowserProfile,
+    session: object,
+  ): Promise<TestRuntimeHandle> {
+    this.entered = true;
+    await this.preparationGate;
+    this.assertGenerationMaySpawn(session);
+    this.spawnCount += 1;
+    return {
+      close: async () => undefined,
+      pageUrl: () => "about:blank",
+      ready: Promise.resolve({}),
+    };
+  }
+
+  release(): void {
+    this.releasePreparation();
   }
 }
 
@@ -891,6 +1082,7 @@ class RegistrationPreflightSessionService extends SessionService {
     options: ConstructorParameters<typeof SessionService>[0],
     private readonly launchPreflight: (
       options: ExtensionRegistrationPreflightLaunchOptions,
+      assertMaySpawn?: () => void,
     ) => Promise<ExtensionRegistrationPreflightProcess>,
     private readonly formalBrowser?: ExtensionRegistrationMigrationBrowser,
     private readonly preflightTimeoutMs = 8,
@@ -912,11 +1104,12 @@ class RegistrationPreflightSessionService extends SessionService {
 
   protected override async launchRegistrationPreflightProcess(
     options: ExtensionRegistrationPreflightLaunchOptions,
+    assertMaySpawn?: () => void,
   ): Promise<ExtensionRegistrationPreflightProcess> {
     this.preflightLaunches += 1;
     this.preflightOptions = options;
     this.order.push("preflight-launch");
-    return this.launchPreflight(options);
+    return this.launchPreflight(options, assertMaySpawn);
   }
 
   protected override async startRuntime(
@@ -1312,6 +1505,75 @@ test("registration migration bounds every browser-facing operation and keeps com
       assert.equal(marks, 0);
     });
   }
+});
+
+test("a management page close failure stays secondary to the migration root error", async () => {
+  const registration = extensionRegistration();
+  const primary = new Error("primary management inspection failure");
+  const secondary = new Error("secondary management page close failure");
+  let closeCalls = 0;
+  let marks = 0;
+  const browser: ExtensionRegistrationMigrationBrowser = {
+    listWorkers: async () => [],
+    openManagementPage: async () => ({
+      inspect: async () => { throw primary; },
+      setEnabled: async () => undefined,
+      close: async () => {
+        closeCalls += 1;
+        throw secondary;
+      },
+    }),
+  };
+
+  const failure = await migrateExtensionRegistrations(browser, [registration], async () => {
+    marks += 1;
+  }, 20).then(
+    () => undefined,
+    (error: Error & { secondaryCleanupDiagnostics?: Array<{ event: string; detail: string }> }) => error,
+  );
+
+  assert.equal(failure, primary);
+  assert.equal(closeCalls, 1);
+  assert.equal(marks, 0);
+  assert.deepEqual(failure?.secondaryCleanupDiagnostics, [{
+    event: "Extension registration management page close failed",
+    detail: secondary.message,
+  }]);
+});
+
+test("a management page that arrives after its open deadline is closed exactly once", async () => {
+  const registration = extensionRegistration();
+  type ManagementPage = Awaited<ReturnType<ExtensionRegistrationMigrationBrowser["openManagementPage"]>>;
+  let resolveOpen!: (page: ManagementPage) => void;
+  const openGate = new Promise<ManagementPage>((resolve) => {
+    resolveOpen = resolve;
+  });
+  let closeCalls = 0;
+  const latePage: ManagementPage = {
+    inspect: async () => ({
+      id: registration.browserExtensionId,
+      path: registration.runtimePath,
+      enabled: true,
+      mayDisable: true,
+    }),
+    setEnabled: async () => undefined,
+    close: async () => {
+      closeCalls += 1;
+    },
+  };
+  const migration = migrateExtensionRegistrations({
+    listWorkers: async () => [],
+    openManagementPage: async () => openGate,
+  }, [registration], async () => undefined, 5);
+
+  await assert.rejects(migration, (error) => {
+    assert.equal((error as { operation?: string }).operation, "management page open");
+    return true;
+  });
+  resolveOpen(latePage);
+  await waitFor(() => closeCalls === 1);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(closeCalls, 1);
 });
 
 test("a failed enable stays pending and the next launch enables an already-disabled extension only", async () => {
@@ -1835,6 +2097,39 @@ test("raw registration preflight releases only child errors that prove spawn nev
     await closing;
     assert.equal(closed, true);
   });
+});
+
+test("raw registration preflight retries a rejected close attempt", async () => {
+  let killCalls = 0;
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: undefined;
+    stderr: undefined;
+    pid: number;
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    kill: () => boolean;
+  };
+  child.stdout = undefined;
+  child.stderr = undefined;
+  child.pid = 42_425;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.kill = () => {
+    killCalls += 1;
+    if (killCalls === 1) throw new Error("transient kill failure");
+    queueMicrotask(() => child.emit("exit", 0, null));
+    return true;
+  };
+  const process = rawCdpRegistrationPreflightProcess(
+    child as unknown as ChildProcess,
+    path.resolve("data/nonexistent-preflight/DevToolsActivePort"),
+    50,
+  );
+
+  await assert.rejects(process.close(), /transient kill failure/);
+  await process.close();
+
+  assert.equal(killCalls, 2);
 });
 
 test("raw registration preflight clears on the page target and loads unpacked runtimes on the browser target", async () => {
@@ -2527,6 +2822,90 @@ test("a stopped generation is rechecked before registration preflight can spawn 
   assert.equal(service.formalStarts, 0);
 });
 
+test("Stop during async preflight preparation prevents the actual maintenance spawn boundary", async () => {
+  const profile = defaultProfile({ id: "preflight-actual-spawn-boundary-test" });
+  const registration = extensionRegistration();
+  const marked: ExtensionLaunchRegistration[] = [];
+  let enterPreparation!: () => void;
+  const preparationEntered = new Promise<void>((resolve) => {
+    enterPreparation = resolve;
+  });
+  let releasePreparation!: () => void;
+  const preparationGate = new Promise<void>((resolve) => {
+    releasePreparation = resolve;
+  });
+  let spawnCount = 0;
+  const service = new RegistrationPreflightSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+  }, async (_options, assertMaySpawn) => {
+    enterPreparation();
+    await preparationGate;
+    assertMaySpawn?.();
+    spawnCount += 1;
+    return registrationPreflightProcess().process;
+  }, undefined, 200);
+
+  const launching = service.launchProfile(profile);
+  await preparationEntered;
+  const stopping = service.stopProfile(profile.id);
+  await waitFor(() => service.listSessions()[0]?.status === "stopping");
+  releasePreparation();
+  const [launchResult, stopResult] = await Promise.all([launching, stopping]);
+
+  assert.equal(spawnCount, 0);
+  assert.equal(service.preflightLaunches, 1);
+  assert.equal(service.formalStarts, 0);
+  assert.deepEqual(marked, []);
+  assert.notEqual(launchResult.status, "launching");
+  assert.notEqual(launchResult.status, "running");
+  assert.equal(stopResult.status, "stopped");
+  assert.equal(service.listSessions()[0]?.status, "stopped");
+});
+
+test("a global gate that closes during preflight preparation prevents the maintenance spawn boundary", async () => {
+  const profile = defaultProfile({ id: "preflight-actual-spawn-global-gate-test" });
+  const registration = extensionRegistration();
+  const marked: ExtensionLaunchRegistration[] = [];
+  let operation: string | undefined;
+  let enterPreparation!: () => void;
+  const preparationEntered = new Promise<void>((resolve) => {
+    enterPreparation = resolve;
+  });
+  let releasePreparation!: () => void;
+  const preparationGate = new Promise<void>((resolve) => {
+    releasePreparation = resolve;
+  });
+  let spawnCount = 0;
+  const service = new RegistrationPreflightSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    activeDataOperation: () => operation,
+    extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+  }, async (_options, assertMaySpawn) => {
+    enterPreparation();
+    await preparationGate;
+    assertMaySpawn?.();
+    spawnCount += 1;
+    return registrationPreflightProcess().process;
+  }, undefined, 200);
+
+  const launching = service.launchProfile(profile);
+  await preparationEntered;
+  operation = "恢复应用备份";
+  releasePreparation();
+
+  await assert.rejects(launching, (error) => {
+    assert.equal((error as { code?: string }).code, "ENVIRONMENT_DATA_OPERATION_IN_PROGRESS");
+    return true;
+  });
+  assert.equal(spawnCount, 0);
+  assert.equal(service.formalStarts, 0);
+  assert.deepEqual(marked, []);
+  assert.equal(service.listSessions()[0]?.status, "error");
+});
+
 test("preflight launch, command, and close failures never start the formal browser or mark ready", async (context) => {
   const cases = [
     {
@@ -2661,6 +3040,49 @@ test("preflight command failure preserves its root diagnosis when cleanup also f
   assert.equal(service.formalStarts, 0);
 });
 
+test("a management page cleanup failure is reported without replacing the formal migration root", async () => {
+  const profile = defaultProfile({ id: "formal-migration-management-cleanup-test" });
+  const registration = extensionRegistration();
+  const marked: ExtensionLaunchRegistration[] = [];
+  const primary = new Error("formal migration inspection root failure");
+  const secondary = new Error("formal migration management close secondary failure");
+  let closeCalls = 0;
+  const formalBrowser: ExtensionRegistrationMigrationBrowser = {
+    listWorkers: async () => [],
+    openManagementPage: async () => ({
+      inspect: async () => { throw primary; },
+      setEnabled: async () => undefined,
+      close: async () => {
+        closeCalls += 1;
+        throw secondary;
+      },
+    }),
+  };
+  const service = new RegistrationPreflightSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+  }, async () => registrationPreflightProcess().process, formalBrowser, 20);
+
+  const failure = await service.launchProfile(profile).then(
+    () => undefined,
+    (error: Error) => error,
+  );
+
+  assert.equal(failure, primary);
+  assert.equal(closeCalls, 1);
+  const session = service.listSessions()[0];
+  assert.equal(session?.status, "error");
+  assert.equal(session?.lastError, primary.message);
+  assert.equal(session?.events?.filter((event) => event.message === "启动失败").length, 1);
+  assert.deepEqual(
+    session?.events?.filter((event) => event.message === "Extension registration management page close failed")
+      .map((event) => event.detail),
+    [secondary.message],
+  );
+  assert.deepEqual(marked, []);
+});
+
 test("preflight graceful-finish failure remains primary when forced cleanup also fails", async () => {
   const profile = defaultProfile({ id: "preflight-finish-and-cleanup-failure-test" });
   const registration = extensionRegistration();
@@ -2764,11 +3186,13 @@ test("a late preflight handle cleanup preserves the launch-timeout error", async
   );
 
   assert.equal(failure?.code, "EXTENSION_REGISTRATION_PREFLIGHT_TIMEOUT");
+  assert.equal(failure?.message, "Extension registration preflight launch timed out");
   const failed = service.listSessions().find((item) => item.profileId === profile.id);
   assert.equal(failed?.status, "error");
   assert.equal(failed?.closeUnconfirmed, true);
-  const primaryError = failed?.lastError;
-  assert.ok(primaryError);
+  assert.equal(failed?.lastError, failure?.message);
+  assert.equal(failed?.events?.filter((event) => event.message === "启动失败").length, 1);
+  assert.equal(failed?.events?.filter((event) => event.message === "启动清理未确认").length, 1);
   assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
 
   resolvePreflight(harness.process);
@@ -2776,10 +3200,56 @@ test("a late preflight handle cleanup preserves the launch-timeout error", async
 
   const settled = service.listSessions().find((item) => item.profileId === profile.id);
   assert.equal(settled?.status, "error");
-  assert.equal(settled?.lastError, primaryError);
+  assert.equal(settled?.lastError, failure?.message);
   assert.equal(settled?.closeUnconfirmed, undefined);
+  assert.equal(settled?.events?.filter((event) => event.message === "启动失败").length, 1);
   assert.equal(harness.closeCalls(), 1);
   assert.equal(service.formalStarts, 0);
+  assert.deepEqual(marked, []);
+});
+
+test("a preflight handle close that succeeds after its late-close budget releases the exact hold", async () => {
+  const profile = defaultProfile({ id: "preflight-late-handle-late-close-success-test" });
+  const registration = extensionRegistration();
+  const marked: ExtensionLaunchRegistration[] = [];
+  let resolveClose!: () => void;
+  const closeGate = new Promise<void>((resolve) => {
+    resolveClose = resolve;
+  });
+  const harness = registrationPreflightProcess({ onClose: async () => closeGate });
+  let resolvePreflight!: (process: ExtensionRegistrationPreflightProcess) => void;
+  const preflightGate = new Promise<ExtensionRegistrationPreflightProcess>((resolve) => {
+    resolvePreflight = resolve;
+  });
+  const service = new RegistrationPreflightSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+  }, async () => preflightGate, undefined, 10);
+
+  const failure = await service.launchProfile(profile).then(
+    () => undefined,
+    (error: Error & { code?: string }) => error,
+  );
+  assert.equal(failure?.code, "EXTENSION_REGISTRATION_PREFLIGHT_TIMEOUT");
+  assert.equal(service.listSessions()[0]?.lastError, failure?.message);
+
+  resolvePreflight(harness.process);
+  await waitFor(() => harness.closeCalls() === 1);
+  await waitFor(() => service.listSessions()[0]?.events?.some(
+    (event) => event.message === "Extension registration preflight close failed",
+  ) === true);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+
+  resolveClose();
+  await waitFor(() => service.profileIdsHoldingRuntime().size === 0);
+
+  const settled = service.listSessions()[0];
+  assert.equal(settled?.status, "error");
+  assert.equal(settled?.lastError, failure?.message);
+  assert.equal(settled?.closeUnconfirmed, undefined);
+  assert.equal(settled?.events?.filter((event) => event.message === "启动失败").length, 1);
+  assert.equal(harness.closeCalls(), 1);
   assert.deepEqual(marked, []);
 });
 

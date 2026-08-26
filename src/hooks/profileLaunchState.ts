@@ -1,10 +1,35 @@
-import type { SessionSummary } from "../shared/profile";
+import { createId, type SessionSummary } from "../shared/profile";
 
 export interface ProfileLaunchRequest {
   controller: AbortController;
+  requestId: string;
+  cancellationPending?: boolean;
   baselineStartedAt?: string;
   observedStartedAt?: string;
 }
+
+export interface ProfileStopRequest {
+  controller: AbortController;
+  timedOut: boolean;
+}
+
+export interface AbortableSingleFlight {
+  controller: AbortController | null;
+  current: Promise<void> | null;
+}
+
+export interface SettledProfileLaunch {
+  profileId: string;
+  session: SessionSummary;
+}
+
+export interface ProfileLifecycleActionState {
+  canStop: boolean;
+  stopPending: boolean;
+}
+
+export const SESSION_STATE_POLL_TIMEOUT_MS = 5_000;
+export const PROFILE_STOP_REQUEST_TIMEOUT_MS = 10_000;
 
 export type LaunchResponseOutcome =
   | { kind: "pending" }
@@ -25,6 +50,7 @@ export function registerProfileLaunchRequest(
   if (previous) previous.controller.abort();
   const request: ProfileLaunchRequest = {
     controller: new AbortController(),
+    requestId: createId("launch"),
     baselineStartedAt: baselineSession?.startedAt,
   };
   requests.set(profileId, request);
@@ -56,6 +82,68 @@ export function abortProfileLaunchRequest(
   return true;
 }
 
+export function registerProfileStopRequest(
+  requests: Map<string, ProfileStopRequest>,
+  profileId: string,
+): ProfileStopRequest | undefined {
+  if (requests.has(profileId)) return undefined;
+  const request: ProfileStopRequest = {
+    controller: new AbortController(),
+    timedOut: false,
+  };
+  requests.set(profileId, request);
+  return request;
+}
+
+export function abortProfileStopRequest(
+  requests: Map<string, ProfileStopRequest>,
+  profileId: string,
+  expected?: ProfileStopRequest,
+): boolean {
+  const request = requests.get(profileId);
+  if (!request || (expected && request !== expected)) return false;
+  requests.delete(profileId);
+  request.controller.abort();
+  return true;
+}
+
+export function armProfileStopRequestDeadline(
+  request: ProfileStopRequest,
+  timeoutMs: number,
+): () => void {
+  const timeout = setTimeout(() => {
+    request.timedOut = true;
+    request.controller.abort(timeoutError("Stop request timed out"));
+  }, Math.max(1, timeoutMs));
+  return () => clearTimeout(timeout);
+}
+
+export function raceAbortSignal<Result>(
+  signal: AbortSignal,
+  work: Promise<Result>,
+): Promise<Result> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? abortError("Request was aborted"));
+  }
+  return new Promise<Result>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason ?? abortError("Request was aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 /**
  * Reconcile long-running launch HTTP requests from the authoritative session
  * list. A previous terminal session is not evidence about the launch which is
@@ -65,19 +153,23 @@ export function abortProfileLaunchRequest(
 export function reconcileProfileLaunchRequests(
   requests: Map<string, ProfileLaunchRequest>,
   sessions: SessionSummary[],
-): string[] {
+): SettledProfileLaunch[] {
   const sessionsByProfileId = new Map(sessions.map((session) => [session.profileId, session]));
-  const settledProfileIds: string[] = [];
+  const settledLaunches: SettledProfileLaunch[] = [];
   for (const [profileId, request] of requests) {
     const session = sessionsByProfileId.get(profileId);
     if (!sessionFromPendingGeneration(request, session)) continue;
     request.observedStartedAt = session?.startedAt;
     if (session?.status === "launching") continue;
+    if (
+      request.cancellationPending
+      && (session?.status === "running" || session?.status === "stopping")
+    ) continue;
     requests.delete(profileId);
     request.controller.abort();
-    settledProfileIds.push(profileId);
+    settledLaunches.push({ profileId, session });
   }
-  return settledProfileIds;
+  return settledLaunches;
 }
 
 export function launchResponseMatchesRequest(
@@ -87,8 +179,12 @@ export function launchResponseMatchesRequest(
   return sessionFromPendingGeneration(request, session);
 }
 
-export function shouldPollProfileSessions(sessions: SessionSummary[], pendingLaunchCount: number): boolean {
-  if (pendingLaunchCount > 0) return true;
+export function shouldPollProfileSessions(
+  sessions: SessionSummary[],
+  pendingLaunchCount: number,
+  pendingStopCount = 0,
+): boolean {
+  if (pendingLaunchCount > 0 || pendingStopCount > 0) return true;
   return sessions.some(
     (session) =>
       session.closeUnconfirmed === true
@@ -98,21 +194,52 @@ export function shouldPollProfileSessions(sessions: SessionSummary[], pendingLau
   );
 }
 
-export function runSingleFlight(
-  flight: { current: Promise<void> | null },
-  task: () => Promise<unknown>,
+export function runAbortableSingleFlight(
+  flight: AbortableSingleFlight,
+  timeoutMs: number,
+  task: (signal: AbortSignal) => Promise<unknown>,
   onError: (error: unknown) => void,
 ): Promise<void> {
   if (flight.current) return flight.current;
-  const request = Promise.resolve()
-    .then(task)
+  const controller = new AbortController();
+  flight.controller = controller;
+  const timeout = setTimeout(() => {
+    controller.abort(timeoutError("Session state request timed out"));
+  }, Math.max(1, timeoutMs));
+  const request = raceAbortSignal(
+    controller.signal,
+    Promise.resolve().then(() => task(controller.signal)),
+  )
     .then(() => undefined)
     .catch(onError)
     .finally(() => {
-      if (flight.current === request) flight.current = null;
+      clearTimeout(timeout);
+      if (flight.current === request) {
+        flight.current = null;
+        flight.controller = null;
+      }
     });
   flight.current = request;
   return request;
+}
+
+export function abortSingleFlight(flight: AbortableSingleFlight): void {
+  flight.controller?.abort(abortError("Session state polling was stopped"));
+}
+
+export function profileLifecycleActionState(
+  session: SessionSummary | undefined,
+  launchPending: boolean,
+  stopRequestPending: boolean,
+): ProfileLifecycleActionState {
+  const serverCanStop = session?.status === "running"
+    || session?.status === "launching"
+    || session?.status === "stopping"
+    || session?.closeUnconfirmed === true;
+  return {
+    canStop: launchPending || stopRequestPending || serverCanStop,
+    stopPending: stopRequestPending || session?.status === "stopping",
+  };
 }
 
 export function upsertSessionByGeneration(
@@ -167,7 +294,10 @@ export function launchResponseOutcome(session: SessionSummary): LaunchResponseOu
 }
 
 export function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
+  return typeof error === "object"
+    && error !== null
+    && "name" in error
+    && error.name === "AbortError";
 }
 
 function sessionFromPendingGeneration(
@@ -208,4 +338,12 @@ function compareStartedAt(left: string, right: string): number {
     return Math.sign(leftTimestamp - rightTimestamp);
   }
   return left.localeCompare(right);
+}
+
+function abortError(message: string): DOMException {
+  return new DOMException(message, "AbortError");
+}
+
+function timeoutError(message: string): DOMException {
+  return new DOMException(message, "TimeoutError");
 }

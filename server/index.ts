@@ -24,6 +24,7 @@ import {
   readUnbindEnvironmentIds,
   readUploadedArchive,
 } from "./lib/extensionRequest";
+import { launchProfileFromRequest, stopProfileFromRequest } from "./lib/sessionRequest";
 import { BinaryService } from "./services/binaryService";
 import { AppBackupService } from "./services/appBackupService";
 import { DesktopRuntimeService } from "./services/desktopRuntimeService";
@@ -828,9 +829,13 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/environments/:id/launch", async (request, response) => {
     try {
-      const profile = await repository.getProfile(request.params.id);
-      if (!profile) throw Object.assign(new Error("环境不存在"), { status: 404 });
-      response.json(await sessionService.launchProfile(profile));
+      response.json(await launchProfileFromRequest(
+        request.params.id,
+        request.body,
+        (profileId) => repository.getProfile(profileId),
+        sessionService,
+        "环境不存在",
+      ));
     } catch (error) {
       sendError(response, error);
     }
@@ -862,7 +867,7 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/environments/:id/stop", async (request, response) => {
     try {
-      response.json(await sessionService.stopProfile(request.params.id));
+      response.json(await stopProfileFromRequest(request.params.id, request.body, sessionService));
     } catch (error) {
       sendError(response, error);
     }
@@ -1416,9 +1421,13 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/profiles/:id/launch", async (request, response) => {
     try {
-      const profile = await repository.getProfile(request.params.id);
-      if (!profile) throw Object.assign(new Error("配置不存在"), { status: 404 });
-      response.json(await sessionService.launchProfile(profile));
+      response.json(await launchProfileFromRequest(
+        request.params.id,
+        request.body,
+        (profileId) => repository.getProfile(profileId),
+        sessionService,
+        "配置不存在",
+      ));
     } catch (error) {
       sendError(response, error);
     }
@@ -1436,7 +1445,7 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/profiles/:id/stop", async (request, response) => {
     try {
-      response.json(await sessionService.stopProfile(request.params.id));
+      response.json(await stopProfileFromRequest(request.params.id, request.body, sessionService));
     } catch (error) {
       sendError(response, error);
     }

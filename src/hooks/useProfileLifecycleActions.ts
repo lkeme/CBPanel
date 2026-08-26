@@ -12,12 +12,19 @@ import type { BrowserEnvironment, NetworkCheckResult } from "../shared/entities"
 import { networkCheckSummaryText } from "../shared/networkCheckDisplay";
 import {
   abortProfileLaunchRequest,
+  abortProfileStopRequest,
+  armProfileStopRequestDeadline,
   isAbortError,
   launchResponseMatchesRequest,
-  launchResponseOutcome,
   type ProfileLaunchRequest,
+  type ProfileStopRequest,
+  PROFILE_STOP_REQUEST_TIMEOUT_MS,
   registerProfileLaunchRequest,
+  registerProfileStopRequest,
   rekeyProfileLaunchRequest,
+  raceAbortSignal,
+  runAbortableSingleFlight,
+  SESSION_STATE_POLL_TIMEOUT_MS,
   upsertSessionByGeneration,
 } from "./profileLaunchState";
 import {
@@ -39,6 +46,8 @@ export function useProfileLifecycleActions({
   loadState,
   localProxyDraftIds,
   markLaunchPending,
+  markStopPending,
+  reportSettledLaunch,
   setBusy,
   setConfirmDialog,
   setDraft,
@@ -53,6 +62,7 @@ export function useProfileLifecycleActions({
   setState,
   setWorkbenchView,
   state,
+  stopRequestsRef,
   t,
   locale,
   toast,
@@ -62,9 +72,11 @@ export function useProfileLifecycleActions({
   draftIsNew: boolean;
   draftProxyLibraryIds: Record<string, string>;
   launchRequestsRef: MutableRefObject<Map<string, ProfileLaunchRequest>>;
-  loadState: () => Promise<unknown>;
+  loadState: (signal?: AbortSignal) => Promise<unknown>;
   localProxyDraftIds: Set<string>;
   markLaunchPending: (id: string, pending: boolean) => void;
+  markStopPending: (id: string, pending: boolean) => void;
+  reportSettledLaunch: (session: SessionSummary) => void;
   setBusy: Dispatch<SetStateAction<string>>;
   setConfirmDialog: Dispatch<SetStateAction<ConfirmDialogState>>;
   setDraft: Dispatch<SetStateAction<BrowserProfile | null>>;
@@ -79,6 +91,7 @@ export function useProfileLifecycleActions({
   setState: Dispatch<SetStateAction<PanelState | null>>;
   setWorkbenchView: Dispatch<SetStateAction<WorkbenchView>>;
   state: PanelState | null;
+  stopRequestsRef: MutableRefObject<Map<string, ProfileStopRequest>>;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
   locale: Locale;
   toast: (kind: "success" | "error" | "info", text: string) => void;
@@ -257,33 +270,18 @@ export function useProfileLifecycleActions({
       }
       attemptedLaunchId = launchTarget.id;
       const session = await api<SessionSummary>(`/api/environments/${launchTarget.id}/launch`, {
+        body: JSON.stringify({ launchRequestId: request.requestId }),
         method: "POST",
         signal: request.controller.signal,
       });
+      if (request.controller.signal.aborted) return;
       if (launchRequestsRef.current.get(requestProfileId) !== request) return;
       if (!launchResponseMatchesRequest(request, session)) return;
       upsertSession(session);
-      const outcome = launchResponseOutcome(session);
       if (session.startedAt) request.observedStartedAt = session.startedAt;
-      if (outcome.kind === "pending") return;
+      if (session.status === "launching") return;
       finishLaunchRequest(requestProfileId, request);
-      if (outcome.kind === "running") {
-        toast(
-          outcome.tone,
-          outcome.message ?? t(outcome.headless ? "toast.launchedHeadless" : "toast.launched"),
-        );
-        return;
-      }
-      const fallbackKey = outcome.status === "stopped"
-        ? "toast.launchStopped"
-        : outcome.status === "stopping"
-          ? "toast.launchStopping"
-          : "toast.launchFailed";
-      toast(outcome.tone, outcome.message ?? t(fallbackKey));
-      if (attemptedLaunchId) {
-        setSelectedId(attemptedLaunchId);
-        setDrawerMode("details");
-      }
+      reportSettledLaunch(session);
     } catch (error) {
       if (request.controller.signal.aborted || isAbortError(error)) return;
       finishLaunchRequest(requestProfileId, request);
@@ -303,12 +301,33 @@ export function useProfileLifecycleActions({
 
   async function stopProfile(id = draft?.id) {
     if (!id) return;
-    if (abortProfileLaunchRequest(launchRequestsRef.current, id)) {
-      markLaunchPending(id, false);
+    const request = registerProfileStopRequest(stopRequestsRef.current, id);
+    if (!request) return;
+    const pendingLaunch = launchRequestsRef.current.get(id);
+    if (pendingLaunch) {
+      // Keep the request identity and launch-pending affordance until the server acknowledges Stop. A
+      // transport failure is not cancellation; retaining it keeps Stop reachable for an exact-token retry.
+      pendingLaunch.cancellationPending = true;
+      pendingLaunch.controller.abort();
     }
-    setBusy(`stop:${id}`);
+    markStopPending(id, true);
+    const clearStopDeadline = armProfileStopRequestDeadline(request, PROFILE_STOP_REQUEST_TIMEOUT_MS);
+    let reconcileAfterFailure = false;
     try {
-      const session = await api<SessionSummary>(`/api/environments/${id}/stop`, { method: "POST" });
+      const session = await raceAbortSignal(
+        request.controller.signal,
+        api<SessionSummary>(`/api/environments/${id}/stop`, {
+          body: pendingLaunch
+            ? JSON.stringify({ launchRequestId: pendingLaunch.requestId })
+            : undefined,
+          method: "POST",
+          signal: request.controller.signal,
+        }),
+      );
+      if (stopRequestsRef.current.get(id) !== request) return;
+      if (pendingLaunch && abortProfileLaunchRequest(launchRequestsRef.current, id, pendingLaunch)) {
+        markLaunchPending(id, false);
+      }
       upsertSession(session);
       // The server refuses to claim a process exit nobody observed, so the panel must not claim it
       // either: a green "session stopped" here was the last thing the user saw before the browser core
@@ -319,9 +338,26 @@ export function useProfileLifecycleActions({
         toast("success", t("toast.stopped"));
       }
     } catch (error) {
-      toast("error", (error as Error).message);
+      if (stopRequestsRef.current.get(id) !== request) return;
+      reconcileAfterFailure = true;
+      if (request.timedOut) {
+        toast("error", t("toast.stopRequestTimeout"));
+      } else {
+        toast("error", (error as Error).message);
+      }
     } finally {
-      setBusy("");
+      clearStopDeadline();
+    }
+    if (reconcileAfterFailure) {
+      await runAbortableSingleFlight(
+        { controller: null, current: null },
+        SESSION_STATE_POLL_TIMEOUT_MS,
+        (signal) => loadState(signal),
+        () => undefined,
+      );
+    }
+    if (abortProfileStopRequest(stopRequestsRef.current, id, request)) {
+      markStopPending(id, false);
     }
   }
 

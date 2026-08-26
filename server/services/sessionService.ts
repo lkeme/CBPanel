@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import type { Browser, BrowserContext } from "playwright-core";
 import {
   type BrowserProfile,
@@ -31,6 +32,15 @@ type RuntimeHandle = {
 
 type RuntimeReady = {
   warning?: string;
+};
+
+type SecondaryCleanupDiagnostic = {
+  event: string;
+  detail: string;
+};
+
+type ErrorWithSecondaryCleanupDiagnostics = {
+  secondaryCleanupDiagnostics?: SecondaryCleanupDiagnostic[];
 };
 
 type LaunchInterruption = {
@@ -75,6 +85,8 @@ const EXTENSION_PAGE_RECOVERY_TIMEOUT_MS = 5_000;
 const EXTENSION_REGISTRATION_PREFLIGHT_TIMEOUT_MS = 15_000;
 const EXTENSION_REGISTRATION_PREFLIGHT_LAUNCH_GRACE_MS = 1_000;
 const EXTENSION_REGISTRATION_PREFLIGHT_CLOSE_GRACE_MS = 3_000;
+const CANCELLED_LAUNCH_REQUEST_TTL_MS = 10 * 60_000;
+const MAX_CANCELLED_LAUNCH_REQUESTS = 2_048;
 
 type BrowserCoreRuntimeInfo = {
   installed: boolean;
@@ -213,6 +225,13 @@ export class SessionService {
   private readonly sessions = new Map<string, RunningSession>();
   /** Browser generations whose close was attempted but never confirmed, including replaced records. */
   private readonly unconfirmedCloses = new Set<RunningSession>();
+  /**
+   * Stop can overtake a launch route while that route is awaiting its profile read. Keep the opaque
+   * request identity so the delayed handler cannot create a browser after Stop already returned. The
+   * bounded insertion-ordered map also covers a client-aborted launch that never reaches this process.
+   */
+  private readonly cancelledLaunchRequests = new Map<string, number>();
+  private readonly lastStartedAtMs = new Map<string, number>();
   private readonly githubMirrorProbeService = new GithubMirrorProbeService();
   private stoppingAll = false;
 
@@ -252,7 +271,10 @@ export class SessionService {
     );
   }
 
-  async launchProfile(profile: BrowserProfile): Promise<SessionSummary> {
+  async launchProfile(profile: BrowserProfile, launchRequestId?: string): Promise<SessionSummary> {
+    if (launchRequestId && this.isLaunchRequestCancelled(profile.id, launchRequestId)) {
+      throw browserLaunchCancelledBeforeCreation();
+    }
     this.assertCanLaunch();
     if (this.hasActiveSession(profile.id)) {
       throw Object.assign(new Error("该配置已经在运行"), { status: 409 });
@@ -264,7 +286,7 @@ export class SessionService {
     const session: RunningSession = {
       profileId: profile.id,
       status: "launching",
-      startedAt: new Date().toISOString(),
+      startedAt: this.nextStartedAt(profile.id),
       events: [],
       launchInterruption: createLaunchInterruption(),
       // Carried over, not dropped: the record it replaces may be one whose close was never confirmed, and
@@ -390,6 +412,7 @@ export class SessionService {
       session.launchFailed = true;
       session.lastError = (error as Error).message;
       pushSessionEvent(session, "error", "启动失败", session.lastError);
+      recordSecondaryCleanupDiagnostics(session, error);
       session.launchInterruption.resolve();
       if (formalLaunchStarted) await this.cleanupFailedFormalLaunch(session, error);
       else {
@@ -400,8 +423,9 @@ export class SessionService {
     }
   }
 
-  async stopProfile(profileId: string): Promise<SessionSummary> {
+  async stopProfile(profileId: string, launchRequestId?: string): Promise<SessionSummary> {
     const session = this.sessions.get(profileId);
+    if (launchRequestId) this.recordCancelledLaunchRequest(profileId, launchRequestId);
     if (!session) {
       return { profileId, status: "stopped", stoppedAt: new Date().toISOString() };
     }
@@ -481,8 +505,9 @@ export class SessionService {
     this.unconfirmedCloses.add(session);
     session.launchInterruption.resolve();
     delete session.closingByPanel;
-    session.lastError = `${reason}：浏览器可能仍在运行。可再次点击停止，或手动结束该浏览器进程。`;
-    pushSessionEvent(session, "error", event, session.lastError);
+    const closeError = `${reason}：浏览器可能仍在运行。可再次点击停止，或手动结束该浏览器进程。`;
+    if (!session.launchFailed) session.lastError = closeError;
+    pushSessionEvent(session, "error", event, closeError);
   }
 
   private recordLateCloseFailure(profileId: string, error: unknown, expectedSession: RunningSession): void {
@@ -519,6 +544,46 @@ export class SessionService {
 
   private isCurrentLaunching(session: RunningSession): boolean {
     return this.isCurrentSession(session) && session.status === "launching";
+  }
+
+  protected assertGenerationMaySpawn(session: object): void {
+    const generation = session as RunningSession;
+    this.assertCanLaunch();
+    if (!this.isCurrentLaunching(generation)) {
+      throw browserLaunchCancelledBeforeCreation();
+    }
+  }
+
+  private recordCancelledLaunchRequest(profileId: string, launchRequestId: string): void {
+    this.pruneCancelledLaunchRequests();
+    const key = launchRequestCancellationKey(profileId, launchRequestId);
+    this.cancelledLaunchRequests.delete(key);
+    this.cancelledLaunchRequests.set(key, performance.now() + CANCELLED_LAUNCH_REQUEST_TTL_MS);
+    while (this.cancelledLaunchRequests.size > MAX_CANCELLED_LAUNCH_REQUESTS) {
+      const oldest = this.cancelledLaunchRequests.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.cancelledLaunchRequests.delete(oldest);
+    }
+  }
+
+  private isLaunchRequestCancelled(profileId: string, launchRequestId: string): boolean {
+    this.pruneCancelledLaunchRequests();
+    return this.cancelledLaunchRequests.has(launchRequestCancellationKey(profileId, launchRequestId));
+  }
+
+  private pruneCancelledLaunchRequests(): void {
+    const now = performance.now();
+    for (const [key, expiresAt] of this.cancelledLaunchRequests) {
+      if (expiresAt <= now) this.cancelledLaunchRequests.delete(key);
+    }
+  }
+
+  private nextStartedAt(profileId: string): string {
+    const wallClockMs = Date.now();
+    const previousMs = this.lastStartedAtMs.get(profileId);
+    const nextMs = previousMs === undefined ? wallClockMs : Math.max(wallClockMs, previousMs + 1);
+    this.lastStartedAtMs.set(profileId, nextMs);
+    return new Date(nextMs).toISOString();
   }
 
   private publishRuntimeHandle(session: RunningSession, runtime: RuntimeHandle): RuntimeHandle {
@@ -912,9 +977,11 @@ export class SessionService {
 
   protected async launchRegistrationPreflightProcess(
     options: ExtensionRegistrationPreflightLaunchOptions,
+    assertMaySpawn: () => void = () => undefined,
   ): Promise<ExtensionRegistrationPreflightProcess> {
     await assertRegistrationPreflightBinary(options.executablePath);
     const activePortPath = await prepareExtensionRegistrationPreflightUserDataDir(options.userDataDir);
+    assertMaySpawn();
     const child = spawn(options.executablePath, options.args, options.spawnOptions);
     return rawCdpRegistrationPreflightProcess(child, activePortPath, options.timeout);
   }
@@ -936,7 +1003,10 @@ export class SessionService {
     );
     pushSessionEvent(session, "info", "准备扩展注册迁移", `${pending.length} extension(s)`);
     if (!this.isCurrentLaunching(session)) return;
-    const launchWork = this.launchRegistrationPreflightProcess(options);
+    const launchWork = this.launchRegistrationPreflightProcess(
+      options,
+      () => this.assertGenerationMaySpawn(session),
+    );
     const preflightPromise = launchWork;
     session.registrationPreflightPromise = preflightPromise;
     let preflight: RegistrationPreflightRuntimeHandle;
@@ -954,20 +1024,35 @@ export class SessionService {
         delete session.registrationPreflightPromise;
       }
       if ((error as { code?: string }).code === "EXTENSION_REGISTRATION_PREFLIGHT_TIMEOUT") {
-        this.markCloseUnconfirmed(
-          profile.id,
-          "Extension registration preflight launch timed out before browser ownership could be confirmed",
-          "Extension registration preflight launch timed out",
+        this.retainGenerationRuntimeHold(
           session,
+          "Extension registration preflight launch timed out before browser ownership could be confirmed",
         );
         void preflightPromise.then(
           async (latePreflight) => {
-            const lateClose = latePreflight.close();
+            const lateClose = Promise.resolve().then(() => latePreflight.close());
             try {
               await boundedRegistrationPreflightOperation(lateClose, timeoutMs, "late close");
-              this.markSessionStopped(profile.id, "Extension registration preflight has stopped", session);
+              setImmediate(() => this.markSessionStopped(
+                profile.id,
+                "Extension registration preflight has stopped",
+                session,
+              ));
             } catch (lateError) {
-              this.recordLateCloseFailure(profile.id, lateError, session);
+              const detail = `Extension registration preflight close was not confirmed: ${errorMessage(lateError)}`;
+              this.retainGenerationRuntimeHold(session, detail);
+              pushSessionEvent(session, "error", "Extension registration preflight close failed", detail);
+              void lateClose.then(
+                () => this.markSessionStopped(
+                  profile.id,
+                  "Extension registration preflight has stopped",
+                  session,
+                ),
+                (settledError) => this.retainGenerationRuntimeHold(
+                  session,
+                  `Extension registration preflight close remained unconfirmed: ${errorMessage(settledError)}`,
+                ),
+              );
             }
           },
           () => {
@@ -1113,6 +1198,7 @@ export class SessionService {
     const runtime = await loadCloakBrowser();
     const preview = buildLaunchPreview(profile, this.profileDataDir(profile), browserVersionLaunchHints(binary.version));
     pushSessionEvent(session, "info", "调用 Playwright Context 启动器", preview.launcher);
+    this.assertGenerationMaySpawn(session);
     const context =
       preview.launcher === "launchPersistentContext"
         ? await runtime.launchPersistentContext(
@@ -1162,6 +1248,7 @@ export class SessionService {
     const runtime = await loadCloakBrowser();
     const preview = buildLaunchPreview(profile, this.profileDataDir(profile), browserVersionLaunchHints(binary.version));
     pushSessionEvent(session, "info", "调用 Playwright Browser 启动器", preview.launcher);
+    this.assertGenerationMaySpawn(session);
     const browser = await runtime.launch(preview.options as unknown as Parameters<CloakBrowserModule["launch"]>[0]);
     this.watchExternalClose(session, browser, "disconnected");
     let context: BrowserContext | undefined;
@@ -1195,6 +1282,7 @@ export class SessionService {
     const runtime = await loadCloakBrowserPuppeteer();
     const preview = buildLaunchPreview(profile, this.profileDataDir(profile), browserVersionLaunchHints(binary.version));
     pushSessionEvent(session, "info", "调用 Puppeteer 启动器", preview.launcher);
+    this.assertGenerationMaySpawn(session);
     const browser =
       preview.launcher === "puppeteerLaunchPersistentContext"
         ? await runtime.launchPersistentContext(
@@ -1421,17 +1509,16 @@ export function rawCdpRegistrationPreflightProcess(
 
   const cleanupBudgetMs = registrationPreflightCleanupBudgetMs(timeoutMs);
   let cancellationRequested = false;
-  let closePromise: Promise<void> | undefined;
+  const closeAttempt = idempotentAsync(async () => {
+    if (!exited) child.kill();
+    // The owning SessionService bounds this promise and retains the generation hold when needed. Keep
+    // observing the exact exit event after that bound so a late-but-confirmed forced exit can release the
+    // hold instead of leaving the profile falsely busy for the rest of the sidecar process.
+    await confirmedExitPromise;
+  });
   const close = () => {
     cancellationRequested = true;
-    closePromise ??= (async () => {
-      if (!exited) child.kill();
-      // The owning SessionService bounds this promise and retains the generation hold when needed. Keep
-      // observing the exact exit event after that bound so a late-but-confirmed forced exit can release the
-      // hold instead of leaving the profile falsely busy for the rest of the sidecar process.
-      await confirmedExitPromise;
-    })();
-    return closePromise;
+    return closeAttempt();
   };
 
   let finishPromise: Promise<void> | undefined;
@@ -1856,12 +1943,24 @@ export async function migrateExtensionRegistrations(
 
   if (needingToggle.length > 0) {
     const first = needingToggle[0]!;
-    const managementPage = await boundedExtensionRegistrationMigrationOperation(
-      Promise.resolve().then(() => browser.openManagementPage()),
-      timeoutMs,
-      first,
-      "management page open",
-    );
+    const managementPageWork = Promise.resolve().then(() => browser.openManagementPage());
+    let managementPage: ExtensionRegistrationManagementPage;
+    try {
+      managementPage = await boundedExtensionRegistrationMigrationOperation(
+        managementPageWork,
+        timeoutMs,
+        first,
+        "management page open",
+      );
+    } catch (error) {
+      void managementPageWork.then(
+        (latePage) => Promise.resolve().then(() => latePage.close()).catch(() => undefined),
+        () => undefined,
+      );
+      throw error;
+    }
+    let primaryError: unknown;
+    let hasPrimaryError = false;
     try {
       for (const registration of needingToggle) {
         const current = await boundedExtensionRegistrationMigrationOperation(
@@ -1902,13 +2001,26 @@ export async function migrateExtensionRegistrations(
         assertManagedRegistration(enabled, registration, false);
         if (!enabled.enabled) throw registrationMigrationError(registration, "extension did not become enabled");
       }
+    } catch (error) {
+      hasPrimaryError = true;
+      primaryError = error;
+      throw error;
     } finally {
-      await boundedExtensionRegistrationMigrationOperation(
-        Promise.resolve().then(() => managementPage.close()),
-        timeoutMs,
-        first,
-        "management page close",
-      );
+      try {
+        await boundedExtensionRegistrationMigrationOperation(
+          Promise.resolve().then(() => managementPage.close()),
+          timeoutMs,
+          first,
+          "management page close",
+        );
+      } catch (closeError) {
+        if (!hasPrimaryError) throw closeError;
+        attachSecondaryCleanupDiagnostic(
+          primaryError,
+          "Extension registration management page close failed",
+          closeError,
+        );
+      }
     }
   }
 
@@ -2596,8 +2708,39 @@ function formalLaunchTimeoutError(operation: string): Error {
   });
 }
 
+function browserLaunchCancelledBeforeCreation(): Error {
+  return Object.assign(new Error("Browser launch request was cancelled before process creation"), {
+    status: 409,
+    code: "BROWSER_LAUNCH_CANCELLED",
+  });
+}
+
+function launchRequestCancellationKey(profileId: string, launchRequestId: string): string {
+  return JSON.stringify([profileId, launchRequestId]);
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function attachSecondaryCleanupDiagnostic(primary: unknown, event: string, cleanupError: unknown): void {
+  if ((typeof primary !== "object" && typeof primary !== "function") || primary === null) return;
+  try {
+    const target = primary as ErrorWithSecondaryCleanupDiagnostics;
+    target.secondaryCleanupDiagnostics = [
+      ...(target.secondaryCleanupDiagnostics ?? []),
+      { event, detail: errorMessage(cleanupError) },
+    ];
+  } catch {
+    // A frozen/non-extensible primary error still remains the authoritative failure.
+  }
+}
+
+function recordSecondaryCleanupDiagnostics(session: RunningSession, error: unknown): void {
+  if ((typeof error !== "object" && typeof error !== "function") || error === null) return;
+  for (const diagnostic of (error as ErrorWithSecondaryCleanupDiagnostics).secondaryCleanupDiagnostics ?? []) {
+    pushSessionEvent(session, "error", diagnostic.event, diagnostic.detail);
+  }
 }
 
 // Resolves true when the work finished inside the budget, false when the budget ran out. The work is not

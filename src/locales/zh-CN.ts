@@ -779,6 +779,7 @@ export const zhCN = {
   "toast.launchFailed": "浏览器启动失败",
   "toast.stopped": "会话已停止",
   "toast.stopUnconfirmed": "浏览器未确认关闭，可能仍在运行。可再次点击停止，或手动结束该浏览器进程。",
+  "toast.stopRequestTimeout": "停止请求超时，正在重新读取浏览器状态。",
   "toast.preflightPass": "预检通过",
   "toast.preflightPassWithWarnings": "预检通过，{count} 项警告",
   "toast.preflightFail": "预检发现 {count} 个失败项",

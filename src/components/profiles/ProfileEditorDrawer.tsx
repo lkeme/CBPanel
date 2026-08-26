@@ -6,6 +6,7 @@ import {
   Fingerprint,
   Layers3,
   ListChecks,
+  LoaderCircle,
   Network,
   Play,
   Save,
@@ -52,7 +53,8 @@ export function ProfileEditorDrawer(props: {
   proxyCheck: string;
   proxyLibraryDraftIds: Record<string, string>;
   browserCoreMissing: boolean;
-  running: boolean;
+  canStop: boolean;
+  stopPending: boolean;
   resolveProxyGeoip: () => Promise<void>;
   saveDraft: () => Promise<BrowserProfile | null>;
   saveDraftProxyToLibrary: () => Promise<void>;
@@ -68,7 +70,7 @@ export function ProfileEditorDrawer(props: {
   shareConfigToClipboard: () => Promise<void>;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }) {
-  const { activeTab, close, draft, draftIsNew, running, saveDraft, setActiveTab, t } = props;
+  const { activeTab, canStop, close, draft, draftIsNew, saveDraft, setActiveTab, stopPending, t } = props;
   return (
     <Drawer
       title={draft.name}
@@ -94,10 +96,15 @@ export function ProfileEditorDrawer(props: {
             <ListChecks size={15} />
             {t("actions.preflight")}
           </button>
-          {running ? (
-            <button className="command danger" onClick={() => void props.stopProfile()} type="button">
-              <CircleStop size={15} />
-              {t("actions.stop")}
+          {canStop ? (
+            <button
+              className={`command danger ${stopPending ? "loading" : ""}`}
+              disabled={stopPending}
+              onClick={() => void props.stopProfile()}
+              type="button"
+            >
+              {stopPending ? <LoaderCircle size={15} aria-hidden="true" /> : <CircleStop size={15} />}
+              {stopPending ? t("status.stopping") : t("actions.stop")}
             </button>
           ) : (
             <button className="command success" disabled={props.browserCoreMissing} onClick={() => void props.launchProfile()} title={props.browserCoreMissing ? t("browserCore.missingAction") : undefined} type="button">
