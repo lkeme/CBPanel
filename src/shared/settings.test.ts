@@ -51,6 +51,12 @@ test("normalizeSettings returns stable defaults", () => {
   assert.equal(settings.networkTrace.timeoutSeconds, 8);
   assert.equal(settings.networkTrace.githubMirrorProviderId, DEFAULT_GITHUB_MIRROR_PROVIDER_ID);
   assert.equal(settings.networkTrace.customGithubMirrorPrefix, "");
+  assert.deepEqual(settings.extensionAcquisition, {
+    crxsosoSearchEnabled: true,
+    googleArtifactEnabled: true,
+    crxsosoArtifactEnabled: true,
+    crxsosoDisclosureVersionAccepted: 0,
+  });
   assert.equal(settings.table.columns.length, DEFAULT_PROFILE_COLUMNS.length);
   assert.deepEqual(
     settings.table.columns.map((column) => column.id),
@@ -746,6 +752,60 @@ test("mergeSettings applies partial patches without losing sibling groups", () =
   assert.equal(settings.appearance.language, DEFAULT_APP_SETTINGS.appearance.language);
   assert.equal(settings.table.showInspector, false);
   assert.equal(settings.storage.primary, "sqlite");
+});
+
+test("extension acquisition settings preserve independent capabilities and disclosure", () => {
+  const settings = normalizeSettings({
+    extensionAcquisition: {
+      crxsosoSearchEnabled: false,
+      googleArtifactEnabled: false,
+      crxsosoArtifactEnabled: true,
+      crxsosoDisclosureVersionAccepted: 1,
+    },
+  });
+  assert.deepEqual(settings.extensionAcquisition, {
+    crxsosoSearchEnabled: false,
+    googleArtifactEnabled: false,
+    crxsosoArtifactEnabled: true,
+    crxsosoDisclosureVersionAccepted: 1,
+  });
+
+  const merged = mergeSettings(settings, {
+    extensionAcquisition: { googleArtifactEnabled: true },
+  });
+  assert.deepEqual(merged.extensionAcquisition, {
+    crxsosoSearchEnabled: false,
+    googleArtifactEnabled: true,
+    crxsosoArtifactEnabled: true,
+    crxsosoDisclosureVersionAccepted: 1,
+  });
+
+  assert.equal(normalizeSettings({
+    extensionAcquisition: { crxsosoDisclosureVersionAccepted: -1 },
+  }).extensionAcquisition.crxsosoDisclosureVersionAccepted, 0);
+  assert.equal(normalizeSettings({
+    extensionAcquisition: { crxsosoDisclosureVersionAccepted: 1.5 },
+  }).extensionAcquisition.crxsosoDisclosureVersionAccepted, 0);
+  assert.equal(normalizeSettings({
+    extensionAcquisition: { crxsosoDisclosureVersionAccepted: 2 },
+  }).extensionAcquisition.crxsosoDisclosureVersionAccepted, 0);
+  assert.equal(normalizeSettings({
+    extensionAcquisition: { crxsosoDisclosureVersionAccepted: Number.MAX_SAFE_INTEGER },
+  }).extensionAcquisition.crxsosoDisclosureVersionAccepted, 0);
+
+  for (let mask = 0; mask < 8; mask += 1) {
+    const combination = normalizeSettings({
+      extensionAcquisition: {
+        crxsosoSearchEnabled: Boolean(mask & 1),
+        googleArtifactEnabled: Boolean(mask & 2),
+        crxsosoArtifactEnabled: Boolean(mask & 4),
+        crxsosoDisclosureVersionAccepted: 0,
+      },
+    }).extensionAcquisition;
+    assert.equal(combination.crxsosoSearchEnabled, Boolean(mask & 1));
+    assert.equal(combination.googleArtifactEnabled, Boolean(mask & 2));
+    assert.equal(combination.crxsosoArtifactEnabled, Boolean(mask & 4));
+  }
 });
 
 test("mergeSettings applies browser core partial patches without losing sibling settings", () => {

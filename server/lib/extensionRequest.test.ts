@@ -8,9 +8,10 @@ import {
   payloadTooLargeMessage,
   readBindEnvironmentIds,
   readDirectoryMode,
-  readExtensionWriteBody,
+  readExtensionPreferencePatch,
   readImportConflictHeaders,
   readImportConflictOptions,
+  readLegacyRemoteExtensionCreateBody,
   readUnbindEnvironmentIds,
   readUploadedArchive,
 } from "./extensionRequest";
@@ -79,7 +80,7 @@ test("readImportConflictOptions and headers accept reuse/overwrite/create", () =
   );
 });
 
-test("extension write bodies drop every server-owned field", () => {
+test("extension preference patches construct a strict status/update-policy allowlist", () => {
   const body = {
     name: "Renamed",
     status: "disabled",
@@ -99,13 +100,42 @@ test("extension write bodies drop every server-owned field", () => {
     lastError: "spoofed",
   };
 
-  const created = readExtensionWriteBody(body, { allowSourceKind: true });
-  const patched = readExtensionWriteBody(body, { allowSourceKind: false });
+  assert.deepEqual(readExtensionPreferencePatch(body), { status: "disabled", updatePolicy: "auto" });
+  assert.deepEqual(readExtensionPreferencePatch(undefined), {});
+  assert.deepEqual(readExtensionPreferencePatch("nonsense"), {});
+  assert.throws(() => readExtensionPreferencePatch({ status: "paused" }), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, "EXTENSION_STATUS_INVALID");
+    return true;
+  });
+  assert.throws(() => readExtensionPreferencePatch({ updatePolicy: "mirror" }), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, "EXTENSION_UPDATE_POLICY_INVALID");
+    return true;
+  });
+});
 
-  assert.deepEqual(created, { name: "Renamed", status: "disabled", updatePolicy: "auto", sourceKind: "remote-zip" });
-  assert.deepEqual(patched, { name: "Renamed", status: "disabled", updatePolicy: "auto" });
-  assert.deepEqual(readExtensionWriteBody(undefined, { allowSourceKind: false }), {});
-  assert.deepEqual(readExtensionWriteBody("nonsense", { allowSourceKind: true }), {});
+test("legacy remote creation has a separate bounded decoder", () => {
+  assert.deepEqual(readLegacyRemoteExtensionCreateBody({
+    sourceKind: "remote-crx",
+    sourceUrl: " https://example.com/extension.crx ",
+    sha256: "A".repeat(64),
+    storeId: "attacker-store-id",
+    provenance: { verification: { level: "cws-publisher-verified" } },
+  }), {
+    sourceKind: "remote-crx",
+    sourceUrl: "https://example.com/extension.crx",
+    sha256: "a".repeat(64),
+  });
+  for (const invalid of [
+    {},
+    { sourceKind: "local-crx", sourceUrl: "https://example.com/a.crx", sha256: "a".repeat(64) },
+    { sourceKind: "remote-crx", sourceUrl: "", sha256: "a".repeat(64) },
+    { sourceKind: "remote-crx", sourceUrl: "https://example.com/a.crx", sha256: "bad" },
+  ]) {
+    assert.throws(() => readLegacyRemoteExtensionCreateBody(invalid), (error: unknown) => {
+      assert.equal((error as { status?: number }).status, 400);
+      return true;
+    });
+  }
 });
 
 test("sanitized PUT bodies cannot rewrite the pinned identity or the copy snapshot", async () => {
@@ -124,9 +154,9 @@ test("sanitized PUT bodies cannot rewrite the pinned identity or the copy snapsh
 
   const updated = await repository.updateExtension(
     extension.id,
-    readExtensionWriteBody(
+    readExtensionPreferencePatch(
       {
-        name: "Renamed Extension",
+        status: "disabled",
         manifestKey: "attacker-key",
         manifestSha256: "b".repeat(64),
         directoryMode: "reference",
@@ -134,11 +164,11 @@ test("sanitized PUT bodies cannot rewrite the pinned identity or the copy snapsh
         localPath: path.join(directory, "hijacked"),
         sourceKind: "remote-zip",
       },
-      { allowSourceKind: false },
     ),
   );
 
-  assert.equal(updated.name, "Renamed Extension");
+  assert.equal(updated.name, "Pinned Extension");
+  assert.equal(updated.status, "disabled");
   assert.equal(updated.manifestKey, "pinned-key");
   // A client-writable content fingerprint would let a caller aim the import dedupe layers at an
   // unrelated record, so it is server-owned like the pinned key.

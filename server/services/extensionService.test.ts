@@ -33,6 +33,53 @@ test("local directory import reads manifest and permission risks", async () => {
   repository.close();
 });
 
+test("new bindings validate local package state while preserving existing binding revisions", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  let fetchCalls = 0;
+  const service = new ExtensionService({
+    repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new Error("bind validation must not fetch");
+    },
+  });
+  const firstEnvironment = await repository.createProfile({ name: "First Bind Env" });
+  const secondEnvironment = await repository.createProfile({ name: "Second Bind Env" });
+  const pending = await repository.createExtension({
+    name: "Pending Remote",
+    sourceKind: "remote-zip",
+    sourceUrl: "https://example.test/extension.zip",
+    installState: "download-pending",
+  });
+  await assert.rejects(service.bindToEnvironments(pending.id, [firstEnvironment.id]), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, "EXTENSION_BIND_PACKAGE_REQUIRED");
+    return true;
+  });
+  assert.deepEqual(await repository.listEnvironmentExtensionBindings(firstEnvironment.id), []);
+  assert.equal(fetchCalls, 0);
+
+  const extensionDir = await writeExtensionDirectory(directory, "bindable-extension");
+  const installed = await service.importDirectory(extensionDir, "reference");
+  await service.bindToEnvironments(installed.id, [firstEnvironment.id]);
+  const firstRevision = (await repository.listEnvironmentExtensionBindings(firstEnvironment.id))[0]?.lifecycleRevision;
+  assert.ok(firstRevision);
+  await service.bindToEnvironments(installed.id, [firstEnvironment.id]);
+  assert.equal((await repository.listEnvironmentExtensionBindings(firstEnvironment.id))[0]?.lifecycleRevision, firstRevision);
+
+  await fs.writeFile(path.join(extensionDir, "manifest.json"), "{invalid", "utf8");
+  await assert.rejects(service.bindToEnvironments(installed.id, [secondEnvironment.id]), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, "EXTENSION_BIND_PACKAGE_REQUIRED");
+    return true;
+  });
+  assert.deepEqual(await repository.listEnvironmentExtensionBindings(secondEnvironment.id), []);
+  assert.equal((await repository.listEnvironmentExtensionBindings(firstEnvironment.id))[0]?.lifecycleRevision, firstRevision);
+  assert.equal(fetchCalls, 0);
+
+  repository.close();
+});
+
 test("local directory import rejects directories without a manifest", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });

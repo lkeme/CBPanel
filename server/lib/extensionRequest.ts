@@ -1,23 +1,5 @@
 import type { ExtensionDirectoryMode, ExtensionEntity } from "../../src/shared/entities";
 
-// Fields the server derives from the manifest, the install pipeline, or the identity lifecycle.
-// A client PUT that writes them can corrupt the browser-side extension ID or destroy the
-// re-sync source, so they are dropped before the body reaches the repository.
-const SERVER_OWNED_EXTENSION_FIELDS = [
-  "manifestKey",
-  "manifestSha256",
-  "directoryMode",
-  "localPath",
-  "installState",
-  "permissions",
-  "hostPermissions",
-  "permissionRisks",
-  "manifestVersion",
-  "lastInstalledAt",
-  "lastCheckedAt",
-  "lastError",
-] as const;
-
 /** express.raw yields `{}` when the content type does not match and an empty Buffer for empty files. */
 export function readUploadedArchive(body: unknown): Buffer {
   if (!Buffer.isBuffer(body) || body.length === 0) {
@@ -91,11 +73,44 @@ export function readImportConflictHeaders(headers: Record<string, unknown> | und
   };
 }
 
-export function readExtensionWriteBody(body: unknown, options: { allowSourceKind: boolean }): Partial<ExtensionEntity> {
-  const record = isRecord(body) ? { ...body } : {};
-  for (const field of SERVER_OWNED_EXTENSION_FIELDS) delete record[field];
-  if (!options.allowSourceKind) delete record.sourceKind;
-  return record as Partial<ExtensionEntity>;
+export type ExtensionPreferencePatch = Pick<ExtensionEntity, "status" | "updatePolicy">;
+
+/** Ordinary extension writes are preferences only; all identity/package/provenance fields are server-owned. */
+export function readExtensionPreferencePatch(body: unknown): Partial<ExtensionPreferencePatch> {
+  const record = isRecord(body) ? body : {};
+  const patch: Partial<ExtensionPreferencePatch> = {};
+  if (record.status !== undefined) {
+    if (record.status !== "enabled" && record.status !== "disabled") {
+      throw requestError("Extension status must be enabled or disabled", "EXTENSION_STATUS_INVALID");
+    }
+    patch.status = record.status;
+  }
+  if (record.updatePolicy !== undefined) {
+    if (record.updatePolicy !== "pinned" && record.updatePolicy !== "notify" && record.updatePolicy !== "auto") {
+      throw requestError("Extension update policy must be pinned, notify, or auto", "EXTENSION_UPDATE_POLICY_INVALID");
+    }
+    patch.updatePolicy = record.updatePolicy;
+  }
+  return patch;
+}
+
+/** Temporary legacy POST boundary; Child 5 removes it with the old arbitrary remote-package feature. */
+export function readLegacyRemoteExtensionCreateBody(body: unknown): Partial<ExtensionEntity> {
+  const record = isRecord(body) ? body : {};
+  if (record.sourceKind !== "remote-zip" && record.sourceKind !== "remote-crx") {
+    throw requestError("Remote extension source kind must be remote-zip or remote-crx", "EXTENSION_REMOTE_KIND_INVALID");
+  }
+  if (typeof record.sourceUrl !== "string" || !record.sourceUrl.trim()) {
+    throw requestError("Remote extension URL cannot be empty", "EXTENSION_REMOTE_URL_INVALID");
+  }
+  if (typeof record.sha256 !== "string" || !/^[a-f0-9]{64}$/i.test(record.sha256.trim())) {
+    throw requestError("Remote extension sha256 must be a 64-character hex digest", "EXTENSION_REMOTE_SHA256_INVALID");
+  }
+  return {
+    sourceKind: record.sourceKind,
+    sourceUrl: record.sourceUrl.trim(),
+    sha256: record.sha256.trim().toLowerCase(),
+  };
 }
 
 export function readBindEnvironmentIds(value: unknown): string[] {
@@ -116,4 +131,8 @@ function readEnvironmentIds(value: unknown): string[] | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function requestError(message: string, code: string): Error {
+  return Object.assign(new Error(message), { status: 400, code });
 }

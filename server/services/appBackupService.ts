@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { normalizeExtensionBindingMetadata, type ExtensionEntity } from "../../src/shared/entities";
+import { extensionForLegacyTransfer } from "../../src/shared/extensionAcquisition";
 import {
   APP_BACKUP_KIND,
   APP_BACKUP_SCHEMA_VERSION,
@@ -177,6 +178,10 @@ export class AppBackupService {
     const entries: ArchiveEntry[] = [];
     const browserDataEntries = await this.browserDataEntries(data, warnings);
     const extensionEntries = await this.extensionEntries(data.extensions, warnings);
+    const legacyData: AppBackupData = {
+      ...data,
+      extensions: data.extensions.map((extension) => extensionForLegacyTransfer(extension)),
+    };
     const manifest: AppBackupManifest = {
       kind: APP_BACKUP_KIND,
       schemaVersion: APP_BACKUP_SCHEMA_VERSION,
@@ -184,11 +189,11 @@ export class AppBackupService {
       containsSecrets: true,
       containsBrowserData: browserDataEntries.count > 0,
       containsExtensions: extensionEntries.count > 0,
-      counts: backupCounts(data, browserDataEntries.count, extensionEntries.count),
+      counts: backupCounts(legacyData, browserDataEntries.count, extensionEntries.count),
     };
 
     entries.push(jsonArchiveEntry(MANIFEST_ENTRY, manifest));
-    entries.push(jsonArchiveEntry(DATA_ENTRY, data));
+    entries.push(jsonArchiveEntry(DATA_ENTRY, legacyData));
     entries.push(...browserDataEntries.entries);
     entries.push(...extensionEntries.entries);
     this.setProgress(operationId, "collecting", entries.length, entries.length, "Collected full backup entries.");
@@ -454,7 +459,10 @@ function parseBackupData(input: unknown): AppBackupData {
     groups: input.groups as AppBackupData["groups"],
     tags: input.tags as AppBackupData["tags"],
     proxies: input.proxies as AppBackupData["proxies"],
-    extensions: input.extensions as AppBackupData["extensions"],
+    extensions: input.extensions.map((extension) => {
+      if (!isRecord(extension)) throw Object.assign(new Error("Backup extensions must be objects."), { status: 400 });
+      return extensionForLegacyTransfer(extension as unknown as ExtensionEntity);
+    }),
     extensionSources: input.extensionSources as AppBackupData["extensionSources"],
     environmentExtensionBindings: normalizeExtensionBindingMetadata(input.environmentExtensionBindings),
   };

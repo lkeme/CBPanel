@@ -46,6 +46,12 @@ test("app backup export and restore replaces app data, browser data, and extensi
     localPath: extensionDir,
     sha256: "b".repeat(64),
   });
+  const storeExtension = await repository.createExtension({
+    id: "backup-store-extension",
+    name: "Verified Store Snapshot",
+    installState: "local-missing",
+    ...verifiedAuthority(directory, "backup-store-extension"),
+  });
   await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
   const lifecycleRevision = (await repository.listEnvironmentExtensionBindings(profile.id))[0]?.lifecycleRevision;
   assert.ok(lifecycleRevision);
@@ -59,7 +65,25 @@ test("app backup export and restore replaces app data, browser data, and extensi
   assert.equal(exported.counts.environments, 1);
   assert.equal(exported.counts.browserData, 1);
   assert.equal(exported.counts.runtimeExtensions, 1);
-  assert.equal(Object.keys(unzipSync(await fs.readFile(backupPath))).some((entry) => entry.startsWith("extension-runtimes/")), false);
+  const exportedEntries = unzipSync(await fs.readFile(backupPath));
+  assert.equal(Object.keys(exportedEntries).some((entry) => entry.startsWith("extension-runtimes/")), false);
+  const exportedData = JSON.parse(Buffer.from(exportedEntries["data.json"]).toString("utf8"));
+  const exportedStoreExtension = exportedData.extensions.find((item: { id?: string }) => item.id === storeExtension.id);
+  assert.ok(exportedStoreExtension);
+  for (const field of ["storeIdentity", "provenance", "artifactArchivePath", "updateProviderId", "updateState"]) {
+    assert.equal(field in exportedStoreExtension, false, field);
+  }
+  // Schema v1 has no acquisition authority. Even a hand-edited archive cannot smuggle future trust
+  // fields through the legacy reader; it keeps only the legacy extension projection.
+  Object.assign(exportedData.extensions[0], {
+    storeIdentity: { namespace: "attacker", storeId: "forged", listingUrl: "https://evil.test" },
+    provenance: { schemaVersion: 99, verification: { level: "cws-publisher-verified" } },
+    artifactArchivePath: "C:/exporting-machine/forged.crx",
+    updateProviderId: "attacker",
+    updateState: { status: "available", availableVersion: "999" },
+  });
+  exportedEntries["data.json"] = Buffer.from(JSON.stringify(exportedData));
+  await fs.writeFile(backupPath, zipSync(exportedEntries));
 
   await repository.createProfile({ name: "Will Be Removed" });
   await fs.rm(path.join(directory, "browser-data", profile.id), { recursive: true, force: true });
@@ -86,6 +110,11 @@ test("app backup export and restore replaces app data, browser data, and extensi
   assert.equal(restoredExtension?.sourceUrl, path.join(directory, "extensions", extension.id));
   assert.equal(restoredExtension?.localPath, path.join(directory, "extensions", extension.id));
   assert.equal(restoredExtension?.directoryMode, "copy");
+  assert.equal(restoredExtension?.storeIdentity, undefined);
+  assert.equal(restoredExtension?.provenance, undefined);
+  const restoredStoreExtension = (await repository.listExtensions()).find((item) => item.id === storeExtension.id);
+  assert.equal(restoredStoreExtension?.storeIdentity, undefined);
+  assert.equal(restoredStoreExtension?.provenance, undefined);
   assert.deepEqual(restoredEnvironment?.runtimeProfile.runtime.extensionPaths, [path.join(directory, "extensions", extension.id)]);
   assert.deepEqual(restoredProfile?.runtime.extensionPaths, [path.join(directory, "extensions", extension.id)]);
   assert.equal(
@@ -287,6 +316,46 @@ async function writeExtensionDirectory(root: string, name: string): Promise<stri
     "utf8",
   );
   return directory;
+}
+
+function verifiedAuthority(root: string, entityId: string) {
+  const storeId = "dhdgffkkebhmkfjojejmpbldmpobfkfo";
+  const artifactArchivePath = path.join(root, "extension-artifacts", entityId, "current.crx");
+  return {
+    sourceKind: "local-crx" as const,
+    sourceUrl: artifactArchivePath,
+    sha256: "a".repeat(64),
+    manifestSha256: "c".repeat(64),
+    storeIdentity: {
+      namespace: "chrome-web-store" as const,
+      storeId,
+      listingUrl: `https://chromewebstore.google.com/detail/${storeId}`,
+    },
+    provenance: {
+      schemaVersion: 1 as const,
+      artifact: {
+        providerId: "chrome-web-store" as const,
+        finalByteHost: "clients2.googleusercontent.com",
+        fetchedAt: "2026-08-26T00:00:01.000Z",
+        format: "crx3" as const,
+        size: 123,
+        sha256: "a".repeat(64),
+        retained: true,
+      },
+      verification: {
+        level: "cws-publisher-verified" as const,
+        verifiedAt: "2026-08-26T00:00:02.000Z",
+        proofDerivedStoreId: storeId,
+        developerKeySha256: "b".repeat(64),
+        publisherTrustRootId: "chromium-cws",
+        publisherTrustRootVersion: 1,
+        manifestSha256: "c".repeat(64),
+      },
+    },
+    artifactArchivePath,
+    updateProviderId: "chrome-web-store" as const,
+    updateState: { status: "idle" as const, checkedAt: "2026-08-26T00:00:03.000Z" },
+  };
 }
 
 function makeService(directory: string, repository: SqlitePanelRepository, activeIds = new Set<string>()): AppBackupService {

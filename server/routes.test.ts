@@ -197,6 +197,37 @@ test("emptying the trash answers exactly { deleted, dataRemoved, warnings }", as
   assert.deepEqual(await trashedIds(), []);
 });
 
+test("new extension bindings require a currently loadable local package", async () => {
+  const environment = await createEnvironment("Binding Validation Env");
+  const pending = jsonBody<{ id: string }>(await panel.request("POST", "/api/extensions", {
+    sourceKind: "remote-zip",
+    sourceUrl: "http://127.0.0.1:1/must-not-be-fetched.zip",
+    sha256: "a".repeat(64),
+  }));
+  const rejected = await panel.request("POST", `/api/extensions/${pending.id}/bind-environments`, {
+    environmentIds: [environment.id],
+  });
+  assert.equal(rejected.status, 409);
+  assert.equal((rejected.body as { code?: string }).code, "EXTENSION_BIND_PACKAGE_REQUIRED");
+
+  const sourceDirectory = path.join(panel.dataDir, "bindable-extension-source");
+  await fs.mkdir(sourceDirectory, { recursive: true });
+  await fs.writeFile(path.join(sourceDirectory, "manifest.json"), JSON.stringify({
+    manifest_version: 3,
+    name: "Bindable Extension",
+    version: "1.0.0",
+  }), "utf8");
+  const imported = jsonBody<{ id: string }>(await panel.request("POST", "/api/extensions/import-directory", {
+    path: sourceDirectory,
+    mode: "copy",
+  }));
+  const bound = await panel.request("POST", `/api/extensions/${imported.id}/bind-environments`, {
+    environmentIds: [environment.id],
+  });
+  assert.equal(bound.status, 200);
+  assert.ok(jsonBody<Array<{ extensionIds: string[] }>>(bound)[0]?.extensionIds.includes(imported.id));
+});
+
 test("a prune preserves a runtime-held id after clearing the last database row that names it", async () => {
   const held = await startPanelHarness();
   let stalled: StalledDownload | undefined;
@@ -212,9 +243,7 @@ test("a prune preserves a runtime-held id after clearing the last database row t
       sourceUrl: stalled.url,
       sha256: "c".repeat(64),
     }));
-    assert.equal((await held.request("POST", `/api/extensions/${extension.id}/bind-environments`, {
-      environmentIds: [environment.id],
-    })).status, 200);
+    insertLegacyExtensionBinding(held.dataDir, environment.id, extension.id);
     await fs.mkdir(path.join(held.dataDir, "browser-data", environment.id), { recursive: true });
     await fs.writeFile(path.join(held.dataDir, "browser-data", environment.id, "Cookies"), "held", "utf8");
     await fs.mkdir(path.join(held.dataDir, "extension-runtimes", environment.id, extension.id), { recursive: true });
@@ -322,9 +351,7 @@ test("a permanent delete refuses with 409 while a session still holds the enviro
       sourceUrl: stalled.url,
       sha256: "b".repeat(64),
     }));
-    assert.equal((await held.request("POST", `/api/extensions/${extension.id}/bind-environments`, {
-      environmentIds: [environment.id],
-    })).status, 200);
+    insertLegacyExtensionBinding(held.dataDir, environment.id, extension.id);
 
     // Nothing holds the runtime yet, so the same request answers 404 — which is what makes the 409 below
     // attributable to the guard and not to the row lookup behind it.
@@ -404,6 +431,19 @@ async function waitForSessionStatus(harness: PanelHarness, profileId: string, st
     await delay(20);
   }
   throw new Error(`Session ${profileId} never reached "${status}" (last seen: ${seen ?? "no session"}).`);
+}
+
+/** Simulates a binding created before service-level package validation; migration must preserve it. */
+function insertLegacyExtensionBinding(dataDir: string, environmentId: string, extensionId: string): void {
+  const database = new DatabaseSync(path.join(dataDir, "cbpanel.sqlite"));
+  try {
+    database.prepare(`
+      INSERT OR IGNORE INTO environment_extensions (environment_id, extension_id, lifecycle_revision)
+      VALUES (?, ?, ?)
+    `).run(environmentId, extensionId, `legacy-test:${environmentId}:${extensionId}`);
+  } finally {
+    database.close();
+  }
 }
 
 type StalledDownload = {

@@ -37,6 +37,10 @@ import {
   normalizeSettings,
 } from "../../src/shared/settings";
 import { APP_BACKUP_SCHEMA_VERSION, type AppBackupData } from "../../src/shared/appBackup";
+import {
+  chromeWebStoreListingUrl,
+  normalizeExtensionAuthorityFields,
+} from "../../src/shared/extensionAcquisition";
 import { seedProfiles } from "./seedProfiles";
 import type {
   EnvironmentExtensionBinding,
@@ -126,6 +130,11 @@ type ExtensionRow = {
   source_id: string | null;
   store_id: string | null;
   store_url: string | null;
+  store_namespace: string | null;
+  provenance_json: string | null;
+  artifact_archive_path: string | null;
+  update_provider_id: string | null;
+  update_state_json: string | null;
   version: string;
   manifest_version: number | null;
   permissions_json: string;
@@ -1114,6 +1123,11 @@ export class SqlitePanelRepository implements PanelRepository {
         source_id TEXT,
         store_id TEXT,
         store_url TEXT,
+        store_namespace TEXT,
+        provenance_json TEXT,
+        artifact_archive_path TEXT,
+        update_provider_id TEXT,
+        update_state_json TEXT,
         version TEXT NOT NULL,
         manifest_version INTEGER,
         permissions_json TEXT NOT NULL,
@@ -1204,6 +1218,11 @@ export class SqlitePanelRepository implements PanelRepository {
     this.ensureColumn("extensions", "manifest_key", "TEXT");
     this.ensureColumn("extensions", "directory_mode", "TEXT");
     this.ensureColumn("extensions", "manifest_sha256", "TEXT");
+    this.ensureColumn("extensions", "store_namespace", "TEXT");
+    this.ensureColumn("extensions", "provenance_json", "TEXT");
+    this.ensureColumn("extensions", "artifact_archive_path", "TEXT");
+    this.ensureColumn("extensions", "update_provider_id", "TEXT");
+    this.ensureColumn("extensions", "update_state_json", "TEXT");
     this.ensureColumn("environment_extensions", "lifecycle_revision", "TEXT");
   }
 
@@ -1828,10 +1847,11 @@ export class SqlitePanelRepository implements PanelRepository {
       .prepare(`
         INSERT INTO extensions (
           id, name, description, source_kind, source_url, source_id, store_id, store_url,
+          store_namespace, provenance_json, artifact_archive_path, update_provider_id, update_state_json,
           version, manifest_version, permissions_json, host_permissions_json, permission_risks_json,
           install_state, update_policy, sha256, manifest_sha256, local_path, manifest_key, directory_mode,
           last_installed_at, last_checked_at, last_error, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           description = excluded.description,
@@ -1840,6 +1860,11 @@ export class SqlitePanelRepository implements PanelRepository {
           source_id = excluded.source_id,
           store_id = excluded.store_id,
           store_url = excluded.store_url,
+          store_namespace = excluded.store_namespace,
+          provenance_json = excluded.provenance_json,
+          artifact_archive_path = excluded.artifact_archive_path,
+          update_provider_id = excluded.update_provider_id,
+          update_state_json = excluded.update_state_json,
           version = excluded.version,
           manifest_version = excluded.manifest_version,
           permissions_json = excluded.permissions_json,
@@ -1867,6 +1892,11 @@ export class SqlitePanelRepository implements PanelRepository {
         extension.sourceId ?? null,
         extension.storeId ?? null,
         extension.storeUrl ?? null,
+        extension.storeIdentity?.namespace ?? null,
+        extension.provenance ? JSON.stringify(extension.provenance) : null,
+        extension.artifactArchivePath ?? null,
+        extension.updateProviderId ?? null,
+        extension.updateState ? JSON.stringify(extension.updateState) : null,
         extension.version,
         extension.manifestVersion ?? null,
         JSON.stringify(extension.permissions),
@@ -1893,10 +1923,11 @@ export class SqlitePanelRepository implements PanelRepository {
       .prepare(`
         INSERT INTO extensions (
           id, name, description, source_kind, source_url, source_id, store_id, store_url,
+          store_namespace, provenance_json, artifact_archive_path, update_provider_id, update_state_json,
           version, manifest_version, permissions_json, host_permissions_json, permission_risks_json,
           install_state, update_policy, sha256, manifest_sha256, local_path, manifest_key, directory_mode,
           last_installed_at, last_checked_at, last_error, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         extension.id,
@@ -1907,6 +1938,11 @@ export class SqlitePanelRepository implements PanelRepository {
         extension.sourceId ?? null,
         extension.storeId ?? null,
         extension.storeUrl ?? null,
+        extension.storeIdentity?.namespace ?? null,
+        extension.provenance ? JSON.stringify(extension.provenance) : null,
+        extension.artifactArchivePath ?? null,
+        extension.updateProviderId ?? null,
+        extension.updateState ? JSON.stringify(extension.updateState) : null,
         extension.version,
         extension.manifestVersion ?? null,
         JSON.stringify(extension.permissions),
@@ -2440,6 +2476,8 @@ function normalizeExtensionEntity(input: Partial<ExtensionEntity>): ExtensionEnt
   const name = typeof input.name === "string" && input.name.trim() ? input.name.trim() : "Extension";
   const sourceKind = isExtensionSourceKind(input.sourceKind) ? input.sourceKind : "local-directory";
   const version = typeof input.version === "string" && input.version.trim() ? input.version.trim() : "0.0.0";
+  const authority = normalizeExtensionAuthorityFields(input);
+  const storeIdentity = authority.storeIdentity;
   return {
     id,
     name,
@@ -2447,8 +2485,15 @@ function normalizeExtensionEntity(input: Partial<ExtensionEntity>): ExtensionEnt
     sourceKind,
     sourceUrl: typeof input.sourceUrl === "string" ? input.sourceUrl.trim() : "",
     sourceId: typeof input.sourceId === "string" && input.sourceId.trim() ? input.sourceId.trim() : undefined,
-    storeId: typeof input.storeId === "string" && input.storeId.trim() ? input.storeId.trim() : undefined,
-    storeUrl: typeof input.storeUrl === "string" && input.storeUrl.trim() ? input.storeUrl.trim() : undefined,
+    storeId: storeIdentity?.storeId
+      ?? (typeof input.storeId === "string" && input.storeId.trim() ? input.storeId.trim() : undefined),
+    storeUrl: storeIdentity?.listingUrl
+      ?? (typeof input.storeUrl === "string" && input.storeUrl.trim() ? input.storeUrl.trim() : undefined),
+    storeIdentity,
+    provenance: authority.provenance,
+    artifactArchivePath: authority.artifactArchivePath,
+    updateProviderId: authority.updateProviderId,
+    updateState: authority.updateState,
     version,
     manifestVersion: Number.isFinite(input.manifestVersion) ? Number(input.manifestVersion) : undefined,
     permissions: uniqueStrings(input.permissions ?? []),
@@ -2617,6 +2662,26 @@ function proxyFromRow(row: ProxyRow, options: { includeSecrets: boolean }): Prox
 }
 
 function extensionFromRow(row: ExtensionRow): ExtensionEntity {
+  const authority = normalizeExtensionAuthorityFields({
+    sourceKind: row.source_kind,
+    sourceUrl: row.source_url,
+    sourceId: row.source_id ?? undefined,
+    sha256: row.sha256 ?? undefined,
+    manifestSha256: row.manifest_sha256 ?? undefined,
+    storeId: row.store_id ?? undefined,
+    storeUrl: row.store_url ?? undefined,
+    storeIdentity: row.store_namespace === null
+      ? undefined
+      : {
+          namespace: row.store_namespace,
+          storeId: row.store_id,
+          listingUrl: row.store_url ?? (row.store_id ? chromeWebStoreListingUrl(row.store_id) : undefined),
+        },
+    provenance: row.provenance_json ? parseJson<unknown>(row.provenance_json) : undefined,
+    artifactArchivePath: row.artifact_archive_path ?? undefined,
+    updateProviderId: row.update_provider_id ?? undefined,
+    updateState: row.update_state_json ? parseJson<unknown>(row.update_state_json) : undefined,
+  });
   return {
     id: row.id,
     name: row.name,
@@ -2626,6 +2691,11 @@ function extensionFromRow(row: ExtensionRow): ExtensionEntity {
     sourceId: row.source_id ?? undefined,
     storeId: row.store_id ?? undefined,
     storeUrl: row.store_url ?? undefined,
+    storeIdentity: authority.storeIdentity,
+    provenance: authority.provenance,
+    artifactArchivePath: authority.artifactArchivePath,
+    updateProviderId: authority.updateProviderId,
+    updateState: authority.updateState,
     version: row.version,
     manifestVersion: row.manifest_version ?? undefined,
     permissions: parseJson<string[]>(row.permissions_json, []),

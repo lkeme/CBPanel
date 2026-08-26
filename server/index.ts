@@ -18,9 +18,10 @@ import {
   payloadTooLargeMessage,
   readBindEnvironmentIds,
   readDirectoryMode,
-  readExtensionWriteBody,
+  readExtensionPreferencePatch,
   readImportConflictHeaders,
   readImportConflictOptions,
+  readLegacyRemoteExtensionCreateBody,
   readUnbindEnvironmentIds,
   readUploadedArchive,
 } from "./lib/extensionRequest";
@@ -1067,12 +1068,8 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/extensions", async (request, response) => {
     try {
-      const body = readExtensionWriteBody(request.body, { allowSourceKind: true });
-      if (body.sourceKind === "remote-zip" || body.sourceKind === "remote-crx") {
-        response.status(201).json(await extensionService.createRemote(body));
-        return;
-      }
-      response.status(201).json(await repository.createExtension(body));
+      const body = readLegacyRemoteExtensionCreateBody(request.body);
+      response.status(201).json(await extensionService.createRemote(body));
     } catch (error) {
       sendError(response, error);
     }
@@ -1080,7 +1077,7 @@ async function createApp(): Promise<express.Express> {
 
   app.put("/api/extensions/:id", async (request, response) => {
     try {
-      const patch = readExtensionWriteBody(request.body, { allowSourceKind: false });
+      const patch = readExtensionPreferencePatch(request.body);
       response.json(await repository.updateExtension(request.params.id, patch));
     } catch (error) {
       sendError(response, error);
@@ -1228,7 +1225,7 @@ async function createApp(): Promise<express.Express> {
   app.post("/api/extensions/:id/bind-environments", async (request, response) => {
     try {
       const environmentIds = readBindEnvironmentIds(request.body?.environmentIds);
-      response.json(await repository.bindExtensionToEnvironments(request.params.id, environmentIds));
+      response.json(await extensionService.bindToEnvironments(request.params.id, environmentIds));
     } catch (error) {
       sendError(response, error);
     }

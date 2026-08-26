@@ -1874,6 +1874,9 @@ function settingsPatchFromNext(patch: AppSettingsPatch, nextSettings: AppSetting
     ...(patch.storage !== undefined ? { storage: nextSettings.storage } : {}),
     ...(patch.binary !== undefined ? { binary: nextSettings.binary } : {}),
     ...(patch.networkTrace !== undefined ? { networkTrace: nextSettings.networkTrace } : {}),
+    ...(patch.extensionAcquisition !== undefined
+      ? { extensionAcquisition: nextSettings.extensionAcquisition }
+      : {}),
   };
 }
 

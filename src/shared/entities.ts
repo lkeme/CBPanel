@@ -1,6 +1,12 @@
 import type { CloakBrowserDiagnostics } from "./browserCore";
 import type { LaunchGeoUnresolvedReason } from "./launchGeoip";
 import type { BrowserProfile, ProfileMode, ProxyScheme } from "./profile";
+import type {
+  ExtensionProvenanceV1,
+  ExtensionStoreIdentity,
+  ExtensionUpdateProviderId,
+  ExtensionUpdateState,
+} from "./extensionAcquisition";
 
 export type EntityStatus = "enabled" | "disabled";
 export type ExtensionSourceKind =
@@ -141,6 +147,16 @@ export interface ExtensionEntity {
   sourceId?: string;
   storeId?: string;
   storeUrl?: string;
+  /** Canonical store identity. Legacy storeId/storeUrl remain compatibility projections. */
+  storeIdentity?: ExtensionStoreIdentity;
+  /** Server-derived catalog, transport, verification, and transfer facts. */
+  provenance?: ExtensionProvenanceV1;
+  /** App-managed retained package used for reinstall/backup; never client-owned. */
+  artifactArchivePath?: string;
+  /** Remote update authority, independent from catalog and initial transport. */
+  updateProviderId?: ExtensionUpdateProviderId;
+  /** Last remote update outcome; local install health remains in installState. */
+  updateState?: ExtensionUpdateState;
   version: string;
   manifestVersion?: number;
   permissions: string[];

@@ -387,6 +387,20 @@ export class ExtensionService {
     await this.runtimeService.removeExtension(extensionId, removable);
   }
 
+  /** New bindings require a package that CBPanel can load now; historical bindings stay untouched. */
+  async bindToEnvironments(id: string, environmentIds: string[]): Promise<BrowserEnvironment[]> {
+    const extension = await this.getExtensionOrThrow(id);
+    if (!isLoadableInstallState(extension.installState) || !extension.localPath) {
+      throw bindPackageRequiredError();
+    }
+    assertPathHasNoComma(extension.localPath);
+    const checked = await this.check(id);
+    if (!isLoadableInstallState(checked.installState) || !checked.localPath) {
+      throw bindPackageRequiredError(checked.lastError);
+    }
+    return this.options.repository.bindExtensionToEnvironments(id, environmentIds);
+  }
+
   async createRemote(input: Partial<ExtensionEntity>): Promise<ExtensionEntity> {
     const sourceKind = input.sourceKind === "remote-crx" ? "remote-crx" : "remote-zip";
     if (!input.sourceUrl?.trim()) {
@@ -1761,6 +1775,13 @@ function assertPathHasNoComma(sourcePath: string): void {
 
 function isLoadableInstallState(state: ExtensionEntity["installState"]): boolean {
   return state === "installed" || state === "update-available";
+}
+
+function bindPackageRequiredError(detail?: string): Error {
+  return Object.assign(
+    new Error(detail ? `Extension cannot be bound until its local package is valid: ${detail}` : "Extension cannot be bound until it has a valid installed package"),
+    { status: 409, code: "EXTENSION_BIND_PACKAGE_REQUIRED" },
+  );
 }
 
 /** Chromium derives one ID per key/path, so a shared identity means one of the two never loads. */

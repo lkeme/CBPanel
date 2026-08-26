@@ -7,6 +7,8 @@ import test from "node:test";
 import { defaultProfile } from "../../src/shared/profile";
 import { SqlitePanelRepository } from "./sqliteStore";
 
+const STORE_ID = "dhdgffkkebhmkfjojejmpbldmpobfkfo";
+
 test("empty SQLite store seeds default profiles and settings", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory });
@@ -719,6 +721,29 @@ test("extension bindings keep stable lifecycle revisions until an actual unbind 
   repository.close();
 });
 
+test("extension acquisition settings persist across SQLite reopen", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  await repository.saveSettings({
+    extensionAcquisition: {
+      crxsosoSearchEnabled: false,
+      googleArtifactEnabled: true,
+      crxsosoArtifactEnabled: false,
+      crxsosoDisclosureVersionAccepted: 1,
+    },
+  });
+  repository.close();
+
+  const reopened = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  assert.deepEqual((await reopened.getSettings()).extensionAcquisition, {
+    crxsosoSearchEnabled: false,
+    googleArtifactEnabled: true,
+    crxsosoArtifactEnabled: false,
+    crxsosoDisclosureVersionAccepted: 1,
+  });
+  reopened.close();
+});
+
 test("explicit extension unbind validates every environment before deleting any binding", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
@@ -955,6 +980,161 @@ test("a data directory predating the manifest fingerprint column opens and gains
   const verify = new DatabaseSync(databasePath);
   assert.equal(extensionColumns(verify).includes("manifest_sha256"), true);
   verify.close();
+});
+
+test("extension acquisition authority round-trips without changing legacy store projections", async () => {
+  const directory = await makeTempDir();
+  const artifactArchivePath = path.join(directory, "extension-artifacts", "extension-store", "current.crx");
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const created = await repository.createExtension({
+    id: "extension-store",
+    name: "Verified Store Extension",
+    sourceKind: "local-crx",
+    sourceUrl: artifactArchivePath,
+    sha256: "a".repeat(64),
+    manifestSha256: "c".repeat(64),
+    storeIdentity: {
+      namespace: "chrome-web-store",
+      storeId: STORE_ID,
+      listingUrl: `https://chromewebstore.google.com/detail/${STORE_ID}`,
+    },
+    provenance: {
+      schemaVersion: 1,
+      catalog: { providerId: "crxsoso", observedAt: "2026-08-26T00:00:00.000Z" },
+      artifact: {
+        providerId: "chrome-web-store",
+        finalByteHost: "clients2.googleusercontent.com",
+        fetchedAt: "2026-08-26T00:00:01.000Z",
+        format: "crx3",
+        size: 123,
+        sha256: "a".repeat(64),
+        retained: true,
+      },
+      verification: {
+        level: "cws-publisher-verified",
+        verifiedAt: "2026-08-26T00:00:02.000Z",
+        proofDerivedStoreId: STORE_ID,
+        developerKeySha256: "b".repeat(64),
+        publisherTrustRootId: "chromium-cws",
+        publisherTrustRootVersion: 1,
+        manifestSha256: "c".repeat(64),
+      },
+    },
+    artifactArchivePath,
+    updateProviderId: "chrome-web-store",
+    updateState: {
+      status: "available",
+      checkedAt: "2026-08-26T01:00:00.000Z",
+      availableVersion: "5.5.0",
+    },
+    installState: "installed",
+  });
+  assert.equal(created.storeId, STORE_ID);
+  assert.equal(created.storeUrl, `https://chromewebstore.google.com/detail/${STORE_ID}`);
+  repository.close();
+
+  const reopened = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const stored = await reopened.getExtension(created.id);
+  assert.deepEqual(stored?.storeIdentity, created.storeIdentity);
+  assert.deepEqual(stored?.provenance, created.provenance);
+  assert.equal(stored?.artifactArchivePath, artifactArchivePath);
+  assert.equal(stored?.updateProviderId, "chrome-web-store");
+  assert.deepEqual(stored?.updateState, created.updateState);
+
+  const internalSnapshot = await reopened.exportFullBackupData();
+  await reopened.restoreFullBackupData(internalSnapshot);
+  const exactRestored = await reopened.getExtension(created.id);
+  assert.deepEqual(exactRestored?.storeIdentity, created.storeIdentity);
+  assert.deepEqual(exactRestored?.provenance, created.provenance);
+  assert.equal(exactRestored?.artifactArchivePath, artifactArchivePath);
+  assert.equal(exactRestored?.updateProviderId, "chrome-web-store");
+
+  const legacy = await reopened.createExtension({
+    name: "Legacy Metadata",
+    sourceKind: "chrome-web-store",
+    storeId: "abcdefghijklmnop",
+    storeUrl: "https://legacy.example.test/detail/abcdefghijklmnop",
+  });
+  assert.equal(legacy.storeIdentity, undefined);
+  assert.equal(legacy.storeId, "abcdefghijklmnop");
+  reopened.close();
+});
+
+test("older extension tables gain nullable acquisition columns without invented trust", async () => {
+  const directory = await makeTempDir();
+  const databasePath = path.join(directory, "cbpanel.sqlite");
+  const fresh = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const legacy = await fresh.createExtension({
+    name: "Legacy Extension",
+    sourceKind: "chrome-web-store",
+    storeId: "abcdefghijklmnop",
+    storeUrl: "https://legacy.example.test/detail/abcdefghijklmnop",
+  });
+  fresh.close();
+
+  const raw = new DatabaseSync(databasePath);
+  for (const column of [
+    "store_namespace",
+    "provenance_json",
+    "artifact_archive_path",
+    "update_provider_id",
+    "update_state_json",
+  ]) {
+    raw.exec(`ALTER TABLE extensions DROP COLUMN ${column}`);
+  }
+  raw.close();
+
+  const upgraded = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const restored = await upgraded.getExtension(legacy.id);
+  assert.equal(restored?.storeId, "abcdefghijklmnop");
+  assert.equal(restored?.storeIdentity, undefined);
+  assert.equal(restored?.provenance, undefined);
+  assert.equal(restored?.artifactArchivePath, undefined);
+  assert.equal(restored?.updateProviderId, undefined);
+  assert.equal(restored?.updateState, undefined);
+  upgraded.close();
+
+  const verify = new DatabaseSync(databasePath);
+  const columns = extensionColumns(verify);
+  for (const column of [
+    "store_namespace",
+    "provenance_json",
+    "artifact_archive_path",
+    "update_provider_id",
+    "update_state_json",
+  ]) {
+    assert.equal(columns.includes(column), true, column);
+  }
+  verify.close();
+});
+
+test("malformed or unknown persisted acquisition authority fails closed", async () => {
+  const directory = await makeTempDir();
+  const databasePath = path.join(directory, "cbpanel.sqlite");
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const created = await repository.createExtension({ name: "Damaged", sourceKind: "local-directory" });
+  repository.close();
+
+  const raw = new DatabaseSync(databasePath);
+  raw.prepare("UPDATE extensions SET provenance_json = ? WHERE id = ?").run("{bad json", created.id);
+  raw.close();
+  const malformed = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  await assert.rejects(malformed.getExtension(created.id), /Stored JSON is invalid/);
+  malformed.close();
+
+  const unknown = new DatabaseSync(databasePath);
+  unknown.prepare("UPDATE extensions SET provenance_json = ? WHERE id = ?").run(JSON.stringify({
+    schemaVersion: 1,
+    artifact: { providerId: "unknown", format: "crx3", retained: false },
+    verification: { level: "legacy-unknown" },
+  }), created.id);
+  unknown.close();
+  const rejected = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  await assert.rejects(rejected.getExtension(created.id), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, "EXTENSION_ACQUISITION_CONTRACT_INVALID");
+    return true;
+  });
+  rejected.close();
 });
 
 function extensionColumns(db: DatabaseSync): string[] {

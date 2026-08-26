@@ -1,4 +1,5 @@
 import type { BrowserCoreUpdateCheck } from "./browserCore";
+import { EXTENSION_ACQUISITION_DISCLOSURE_VERSION } from "./extensionAcquisition";
 
 export type ShellMode = "web" | "desktop";
 export type PlatformChrome = "native" | "custom";
@@ -33,6 +34,7 @@ export interface AppSettings {
   storage: StorageSettings;
   binary: BinarySettings;
   networkTrace: NetworkTraceSettings;
+  extensionAcquisition: ExtensionAcquisitionSettings;
 }
 
 export type AppSettingsPatch = {
@@ -81,6 +83,13 @@ export interface DesktopSettings {
 export interface StorageSettings {
   primary: "sqlite";
   autoMigrateLegacyJson: boolean;
+}
+
+export interface ExtensionAcquisitionSettings {
+  crxsosoSearchEnabled: boolean;
+  googleArtifactEnabled: boolean;
+  crxsosoArtifactEnabled: boolean;
+  crxsosoDisclosureVersionAccepted: number;
 }
 
 export interface BrowserCoreEnvVarSetting {
@@ -743,6 +752,12 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     githubMirrorProviderId: DEFAULT_GITHUB_MIRROR_PROVIDER_ID,
     customGithubMirrorPrefix: "",
   },
+  extensionAcquisition: {
+    crxsosoSearchEnabled: true,
+    googleArtifactEnabled: true,
+    crxsosoArtifactEnabled: true,
+    crxsosoDisclosureVersionAccepted: 0,
+  },
 };
 
 export function normalizeSettings(input: AppSettingsPatch = {}): AppSettings {
@@ -753,6 +768,7 @@ export function normalizeSettings(input: AppSettingsPatch = {}): AppSettings {
   const storage: Partial<StorageSettings> = input.storage ?? {};
   const binary: Partial<BinarySettings> = input.binary ?? {};
   const networkTrace: Partial<NetworkTraceSettings> = input.networkTrace ?? {};
+  const extensionAcquisition: Partial<ExtensionAcquisitionSettings> = input.extensionAcquisition ?? {};
   const closeBehavior = normalizeDesktopCloseBehavior(
     desktop.closeBehavior,
     desktop.closeToTray,
@@ -826,6 +842,23 @@ export function normalizeSettings(input: AppSettingsPatch = {}): AppSettings {
       customEnvVars,
     },
     networkTrace: normalizeNetworkTraceSettings(networkTrace),
+    extensionAcquisition: {
+      crxsosoSearchEnabled: booleanValue(
+        extensionAcquisition.crxsosoSearchEnabled,
+        base.extensionAcquisition.crxsosoSearchEnabled,
+      ),
+      googleArtifactEnabled: booleanValue(
+        extensionAcquisition.googleArtifactEnabled,
+        base.extensionAcquisition.googleArtifactEnabled,
+      ),
+      crxsosoArtifactEnabled: booleanValue(
+        extensionAcquisition.crxsosoArtifactEnabled,
+        base.extensionAcquisition.crxsosoArtifactEnabled,
+      ),
+      crxsosoDisclosureVersionAccepted: normalizeDisclosureVersion(
+        extensionAcquisition.crxsosoDisclosureVersionAccepted,
+      ),
+    },
   };
 }
 
@@ -848,7 +881,14 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
     storage: { ...current.storage, ...(patch.storage ?? {}) },
     binary: { ...current.binary, ...(patch.binary ?? {}) },
     networkTrace: { ...current.networkTrace, ...(patch.networkTrace ?? {}) },
+    extensionAcquisition: { ...current.extensionAcquisition, ...(patch.extensionAcquisition ?? {}) },
   });
+}
+
+function normalizeDisclosureVersion(value: unknown): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) return 0;
+  const version = Number(value);
+  return version <= EXTENSION_ACQUISITION_DISCLOSURE_VERSION ? version : 0;
 }
 
 export function resolveLanguageMode(mode: LanguageMode, browserLanguage = "en-US"): Exclude<LanguageMode, "system"> {

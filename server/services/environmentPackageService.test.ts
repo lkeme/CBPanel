@@ -27,15 +27,14 @@ test("environment package export includes dependency closure and materializes pr
   await repository.updateEnvironment(profile.id, { proxyId: proxy.id });
   const extensionDir = await writeExtensionDirectory(directory, "source-extension");
   const extension = await repository.createExtension({
+    id: "portable-store-extension",
     name: "Portable Extension",
-    sourceKind: "local-directory",
-    sourceUrl: extensionDir,
     version: "1.2.3",
     manifestVersion: 3,
     permissions: ["storage"],
     installState: "installed",
     localPath: extensionDir,
-    sha256: "a".repeat(64),
+    ...verifiedAuthority(directory, "portable-store-extension"),
   });
   await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
   await fs.mkdir(path.join(directory, "browser-data", profile.id), { recursive: true });
@@ -61,6 +60,9 @@ test("environment package export includes dependency closure and materializes pr
   assert.equal(data.environments[0].runtimeProfile.proxy.password, "secret");
   assert.equal(data.environments[0].runtimeProfile.proxy.raw, "http://user:secret@proxy.example.test:8080");
   assert.deepEqual(data.environments[0].runtimeProfile.runtime.extensionPaths, []);
+  for (const field of ["storeIdentity", "provenance", "artifactArchivePath", "updateProviderId", "updateState"]) {
+    assert.equal(field in data.extensions[0], false, field);
+  }
 
   repository.close();
 });
@@ -118,6 +120,17 @@ test("environment package import creates new environments and restores browser d
   await fs.writeFile(path.join(sourceDir, "browser-data", sourceProfile.id, "Preferences"), "prefs", "utf8");
   const packagePath = path.join(sourceDir, "portable.cbpe");
   await sourceService.exportToPackage({ outputPath: packagePath });
+  const legacyEntries = unzipSync(await fs.readFile(packagePath));
+  const legacyData = JSON.parse(Buffer.from(legacyEntries["data.json"]).toString("utf8"));
+  Object.assign(legacyData.extensions[0], {
+    storeIdentity: { namespace: "attacker", storeId: "forged", listingUrl: "https://evil.test" },
+    provenance: { schemaVersion: 99, verification: { level: "cws-publisher-verified" } },
+    artifactArchivePath: "C:/exporting-machine/forged.crx",
+    updateProviderId: "attacker",
+    updateState: { status: "available", availableVersion: "999" },
+  });
+  legacyEntries["data.json"] = Buffer.from(JSON.stringify(legacyData));
+  await fs.writeFile(packagePath, zipSync(legacyEntries));
   sourceRepository.close();
 
   const targetDir = await makeTempDir();
@@ -145,6 +158,12 @@ test("environment package import creates new environments and restores browser d
   assert.equal(groups.filter((group) => group.name === "Accounts").length, 1);
   assert.equal(proxies.length, 0);
   assert.deepEqual(importedProfile?.runtime.extensionPaths, [path.join(targetDir, "extensions", newExtensionId)]);
+  const importedExtension = await targetRepository.getExtension(newExtensionId);
+  assert.equal(importedExtension?.storeIdentity, undefined);
+  assert.equal(importedExtension?.provenance, undefined);
+  assert.equal(importedExtension?.artifactArchivePath, undefined);
+  assert.equal(importedExtension?.updateProviderId, undefined);
+  assert.equal(importedExtension?.updateState, undefined);
   assert.equal(
     (await targetRepository.listEnvironmentExtensionBindings(newEnvironmentId))[0]?.lifecycleRevision,
     sourceLifecycleRevision,
@@ -428,6 +447,46 @@ async function writeExtensionDirectory(
     "utf8",
   );
   return directory;
+}
+
+function verifiedAuthority(root: string, entityId: string) {
+  const storeId = "dhdgffkkebhmkfjojejmpbldmpobfkfo";
+  const artifactArchivePath = path.join(root, "extension-artifacts", entityId, "current.crx");
+  return {
+    sourceKind: "local-crx" as const,
+    sourceUrl: artifactArchivePath,
+    sha256: "a".repeat(64),
+    manifestSha256: "c".repeat(64),
+    storeIdentity: {
+      namespace: "chrome-web-store" as const,
+      storeId,
+      listingUrl: `https://chromewebstore.google.com/detail/${storeId}`,
+    },
+    provenance: {
+      schemaVersion: 1 as const,
+      artifact: {
+        providerId: "chrome-web-store" as const,
+        finalByteHost: "clients2.googleusercontent.com",
+        fetchedAt: "2026-08-26T00:00:01.000Z",
+        format: "crx3" as const,
+        size: 123,
+        sha256: "a".repeat(64),
+        retained: true,
+      },
+      verification: {
+        level: "cws-publisher-verified" as const,
+        verifiedAt: "2026-08-26T00:00:02.000Z",
+        proofDerivedStoreId: storeId,
+        developerKeySha256: "b".repeat(64),
+        publisherTrustRootId: "chromium-cws",
+        publisherTrustRootVersion: 1,
+        manifestSha256: "c".repeat(64),
+      },
+    },
+    artifactArchivePath,
+    updateProviderId: "chrome-web-store" as const,
+    updateState: { status: "idle" as const, checkedAt: "2026-08-26T00:00:03.000Z" },
+  };
 }
 
 function makeService(directory: string, repository: SqlitePanelRepository, activeIds = new Set<string>()): EnvironmentPackageService {

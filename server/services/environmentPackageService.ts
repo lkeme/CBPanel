@@ -9,6 +9,7 @@ import {
   type ExtensionEntity,
   type GroupEntity,
 } from "../../src/shared/entities";
+import { extensionForLegacyTransfer } from "../../src/shared/extensionAcquisition";
 import {
   ENVIRONMENT_PACKAGE_KIND,
   ENVIRONMENT_PACKAGE_SCHEMA_VERSION,
@@ -284,7 +285,7 @@ export class EnvironmentPackageService {
       schemaVersion: ENVIRONMENT_PACKAGE_SCHEMA_VERSION,
       environments: exportedEnvironments,
       groups,
-      extensions,
+      extensions: extensions.map((extension) => extensionForLegacyTransfer(extension)),
       environmentExtensionBindings,
     };
     entries.push(jsonArchiveEntry(MANIFEST_ENTRY, manifest));
@@ -572,7 +573,10 @@ function parsePackageData(input: unknown): EnvironmentPackageData {
     schemaVersion: ENVIRONMENT_PACKAGE_SCHEMA_VERSION,
     environments: input.environments as BrowserEnvironment[],
     groups: input.groups as GroupEntity[],
-    extensions: input.extensions as ExtensionEntity[],
+    extensions: input.extensions.map((extension) => {
+      if (!isRecord(extension)) throw Object.assign(new Error("Package extensions must be objects."), { status: 400 });
+      return extensionForLegacyTransfer(extension as unknown as ExtensionEntity);
+    }),
     environmentExtensionBindings: normalizeExtensionBindingMetadata(input.environmentExtensionBindings),
   };
 }
