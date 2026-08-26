@@ -8,13 +8,16 @@ import { zipSync, unzipSync } from "fflate";
 import { ENVIRONMENT_PACKAGE_KIND } from "../../src/shared/environmentPackage";
 import { defaultProfile } from "../../src/shared/profile";
 import { SqlitePanelRepository } from "../storage/sqliteStore";
+import { createSyntheticStoreCrx3 } from "../testing/crx3Fixture";
+import { createCrx3VerifierForTesting } from "./crx3Verifier";
+import { fingerprintManifest } from "./extensionPackagePreflight";
+import { fingerprintStagedExtensionTree } from "./boundedZipAnalyzer";
 import { ExtensionService } from "./extensionService";
 import { EnvironmentPackageService } from "./environmentPackageService";
 
 test("environment package export includes dependency closure and materializes proxy references", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const service = makeService(directory, repository);
   const profile = await repository.createProfile({ name: "Exported Env", group: "Export Group", tags: ["portable"] });
   const proxy = await repository.createProxy({
     name: "Managed Proxy",
@@ -25,7 +28,31 @@ test("environment package export includes dependency closure and materializes pr
     password: "secret",
   });
   await repository.updateEnvironment(profile.id, { proxyId: proxy.id });
-  const extensionDir = await writeExtensionDirectory(directory, "source-extension");
+  const fixture = createSyntheticStoreCrx3({
+    name: "Portable Extension",
+    version: "1.2.3",
+    permissions: ["storage"],
+    hostPermissions: [],
+  });
+  const verifier = createCrx3VerifierForTesting(fixture.publisherSpkiSha256);
+  const service = makeService(directory, repository, new Set(), verifier.verifyFile);
+  const fixtureManifest = {
+    manifest_version: 3,
+    name: "Portable Extension",
+    version: "1.2.3",
+    permissions: ["storage"],
+    host_permissions: [],
+    background: { service_worker: "worker.js" },
+  };
+  const extensionDir = await writeExtensionDirectory(directory, "source-extension", {
+    ...fixtureManifest,
+    key: fixture.developerSpkiBase64,
+  });
+  await fs.writeFile(path.join(extensionDir, "worker.js"), "chrome.runtime.onInstalled.addListener(() => undefined);", "utf8");
+  const treeSha256 = (await fingerprintStagedExtensionTree(extensionDir)).sha256;
+  const artifactPath = path.join(directory, "extension-artifacts", "portable-store-extension", "current.crx");
+  await fs.mkdir(path.dirname(artifactPath), { recursive: true });
+  await fs.writeFile(artifactPath, fixture.bytes);
   const extension = await repository.createExtension({
     id: "portable-store-extension",
     name: "Portable Extension",
@@ -34,7 +61,7 @@ test("environment package export includes dependency closure and materializes pr
     permissions: ["storage"],
     installState: "installed",
     localPath: extensionDir,
-    ...verifiedAuthority(directory, "portable-store-extension"),
+    ...verifiedAuthority(directory, "portable-store-extension", fixture, fingerprintManifest(fixtureManifest), treeSha256),
   });
   await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
   await fs.mkdir(path.join(directory, "browser-data", profile.id), { recursive: true });
@@ -60,9 +87,27 @@ test("environment package export includes dependency closure and materializes pr
   assert.equal(data.environments[0].runtimeProfile.proxy.password, "secret");
   assert.equal(data.environments[0].runtimeProfile.proxy.raw, "http://user:secret@proxy.example.test:8080");
   assert.deepEqual(data.environments[0].runtimeProfile.runtime.extensionPaths, []);
-  for (const field of ["storeIdentity", "provenance", "artifactArchivePath", "updateProviderId", "updateState"]) {
-    assert.equal(field in data.extensions[0], false, field);
-  }
+  assert.equal(data.schemaVersion, 2);
+  assert.equal(data.extensions[0].storeIdentity.storeId, fixture.storeId);
+  assert.equal(data.extensions[0].artifactArchivePath, `extension-artifacts/${extension.id}/current.crx`);
+  assert.equal(data.extensions[0].sourceUrl, `extension-artifacts/${extension.id}/current.crx`);
+  assert.equal(data.extensions[0].localPath, undefined);
+  assert.equal(data.retainedExtensionArtifacts[0].extensionId, extension.id);
+  assert.ok(entries[`extension-artifacts/${extension.id}/current.crx`]);
+  assert.equal(JSON.stringify(data.extensions[0]).includes(directory), false);
+
+  const importedDirectory = await makeTempDir();
+  const importedRepository = new SqlitePanelRepository({ dataDir: importedDirectory, seed: () => [] });
+  const importedService = makeService(importedDirectory, importedRepository, new Set(), verifier.verifyFile);
+  const imported = await importedService.importFromPackage({ inputPath: outputPath });
+  const importedExtensionId = imported.idMap?.extensions[extension.id];
+  assert.ok(importedExtensionId);
+  const importedExtension = await importedRepository.getExtension(importedExtensionId);
+  assert.equal(importedExtension?.artifactArchivePath, path.join(importedDirectory, "extension-artifacts", importedExtensionId, "current.crx"));
+  assert.equal(importedExtension?.sourceUrl, importedExtension?.artifactArchivePath);
+  assert.equal(importedExtension?.provenance?.verification.developerKeySha256, fixture.developerSpkiSha256);
+  assert.equal(JSON.stringify(importedExtension).includes(directory), false);
+  importedRepository.close();
 
   repository.close();
 });
@@ -121,7 +166,12 @@ test("environment package import creates new environments and restores browser d
   const packagePath = path.join(sourceDir, "portable.cbpe");
   await sourceService.exportToPackage({ outputPath: packagePath });
   const legacyEntries = unzipSync(await fs.readFile(packagePath));
+  const legacyManifest = JSON.parse(Buffer.from(legacyEntries["manifest.json"]).toString("utf8"));
   const legacyData = JSON.parse(Buffer.from(legacyEntries["data.json"]).toString("utf8"));
+  legacyManifest.schemaVersion = 1;
+  delete legacyManifest.counts.retainedExtensionArtifacts;
+  legacyData.schemaVersion = 1;
+  delete legacyData.retainedExtensionArtifacts;
   Object.assign(legacyData.extensions[0], {
     storeIdentity: { namespace: "attacker", storeId: "forged", listingUrl: "https://evil.test" },
     provenance: { schemaVersion: 99, verification: { level: "cws-publisher-verified" } },
@@ -130,6 +180,7 @@ test("environment package import creates new environments and restores browser d
     updateState: { status: "available", availableVersion: "999" },
   });
   legacyEntries["data.json"] = Buffer.from(JSON.stringify(legacyData));
+  legacyEntries["manifest.json"] = Buffer.from(JSON.stringify(legacyManifest));
   await fs.writeFile(packagePath, zipSync(legacyEntries));
   sourceRepository.close();
 
@@ -449,14 +500,21 @@ async function writeExtensionDirectory(
   return directory;
 }
 
-function verifiedAuthority(root: string, entityId: string) {
-  const storeId = "dhdgffkkebhmkfjojejmpbldmpobfkfo";
+function verifiedAuthority(
+  root: string,
+  entityId: string,
+  fixture: ReturnType<typeof createSyntheticStoreCrx3>,
+  manifestSha256: string,
+  treeSha256: string,
+) {
+  const storeId = fixture.storeId;
   const artifactArchivePath = path.join(root, "extension-artifacts", entityId, "current.crx");
   return {
     sourceKind: "local-crx" as const,
     sourceUrl: artifactArchivePath,
-    sha256: "a".repeat(64),
-    manifestSha256: "c".repeat(64),
+    sha256: sha256Hex(fixture.bytes),
+    manifestSha256,
+    manifestKey: fixture.developerSpkiBase64,
     storeIdentity: {
       namespace: "chrome-web-store" as const,
       storeId,
@@ -469,18 +527,20 @@ function verifiedAuthority(root: string, entityId: string) {
         finalByteHost: "clients2.googleusercontent.com",
         fetchedAt: "2026-08-26T00:00:01.000Z",
         format: "crx3" as const,
-        size: 123,
-        sha256: "a".repeat(64),
+        size: fixture.bytes.byteLength,
+        sha256: sha256Hex(fixture.bytes),
         retained: true,
       },
       verification: {
         level: "cws-publisher-verified" as const,
         verifiedAt: "2026-08-26T00:00:02.000Z",
         proofDerivedStoreId: storeId,
-        developerKeySha256: "b".repeat(64),
-        publisherTrustRootId: "chromium-cws",
-        publisherTrustRootVersion: 1,
-        manifestSha256: "c".repeat(64),
+        developerKeySha256: fixture.developerSpkiSha256,
+        publisherKeySha256: fixture.publisherSpkiSha256,
+        publisherTrustRootId: "cbpanel-test-only-cws",
+        publisherTrustRootVersion: 0,
+        manifestSha256,
+        treeSha256,
       },
     },
     artifactArchivePath,
@@ -489,11 +549,18 @@ function verifiedAuthority(root: string, entityId: string) {
   };
 }
 
-function makeService(directory: string, repository: SqlitePanelRepository, activeIds = new Set<string>()): EnvironmentPackageService {
+function makeService(
+  directory: string,
+  repository: SqlitePanelRepository,
+  activeIds = new Set<string>(),
+  verifyStoreCrxFileForTesting?: ReturnType<typeof createCrx3VerifierForTesting>["verifyFile"],
+): EnvironmentPackageService {
   return new EnvironmentPackageService({
     repository,
     browserDataDir: path.join(directory, "browser-data"),
     extensionCacheDir: path.join(directory, "extensions"),
+    extensionArtifactDir: path.join(directory, "extension-artifacts"),
+    verifyStoreCrxFileForTesting,
     activeEnvironmentIds: () => activeIds,
   });
 }

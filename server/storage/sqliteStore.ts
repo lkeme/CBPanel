@@ -36,7 +36,11 @@ import {
   mergeSettings,
   normalizeSettings,
 } from "../../src/shared/settings";
-import { APP_BACKUP_SCHEMA_VERSION, type AppBackupData } from "../../src/shared/appBackup";
+import {
+  APP_BACKUP_SCHEMA_VERSION,
+  decodeAppBackupData,
+  type AppBackupData,
+} from "../../src/shared/appBackup";
 import {
   chromeWebStoreListingUrl,
   normalizeExtensionAuthorityFields,
@@ -46,6 +50,7 @@ import type {
   EnvironmentExtensionBinding,
   EnvironmentPackageImportInput,
   EnvironmentPackageImportResult,
+  ExtensionAcquisitionDatabaseCommitInput,
   PanelRepository,
 } from "./types";
 
@@ -139,6 +144,8 @@ type ExtensionRow = {
   manifest_version: number | null;
   permissions_json: string;
   host_permissions_json: string;
+  optional_permissions_json: string;
+  optional_host_permissions_json: string;
   permission_risks_json: string;
   install_state: ExtensionInstallState;
   update_policy: ExtensionUpdatePolicy;
@@ -192,6 +199,7 @@ type MetadataRow = {
 };
 
 export class SqlitePanelRepository implements PanelRepository {
+  private readonly dataDir: string;
   private readonly databasePath: string;
   private readonly legacyJsonPath: string;
   private readonly portable: boolean;
@@ -201,6 +209,7 @@ export class SqlitePanelRepository implements PanelRepository {
   private migrationError?: string;
 
   constructor(options: SqliteStoreOptions) {
+    this.dataDir = path.resolve(options.dataDir);
     this.databasePath = options.databasePath ?? path.join(options.dataDir, "cbpanel.sqlite");
     this.legacyJsonPath = options.legacyJsonPath ?? path.join(options.dataDir, "profiles.json");
     this.portable = options.portable ?? Boolean(process.env.CBPANEL_PORTABLE);
@@ -443,6 +452,8 @@ export class SqlitePanelRepository implements PanelRepository {
           extension,
           input.extensionIdMap?.[extension.id],
           input.extensionLocalPaths?.[extension.id],
+          input.extensionArtifactPaths?.[extension.id],
+          input.extensionManifestKeys?.[extension.id],
         );
         extensionIdMap[extension.id] = localExtension.id;
       }
@@ -816,6 +827,76 @@ export class SqlitePanelRepository implements PanelRepository {
     return updated;
   }
 
+  async commitExtensionAcquisition(input: ExtensionAcquisitionDatabaseCommitInput): Promise<ExtensionEntity> {
+    await this.initialize();
+    const extension = normalizeExtensionEntity(input.extension);
+    const environmentBindings = normalizeExtensionBindingMetadata(input.environmentBindings) ?? [];
+    if (environmentBindings.some((binding) => binding.extensionId !== extension.id || !binding.lifecycleRevision)) {
+      throw new TypeError("Extension acquisition bindings must name the target and carry a lifecycle revision.");
+    }
+    const environmentIds = uniqueStrings(environmentBindings.map((binding) => binding.environmentId));
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (input.expectedEnvironmentBindings !== undefined) {
+        const expected = normalizeExtensionBindingMetadata(input.expectedEnvironmentBindings) ?? [];
+        const current = db.prepare(`
+          SELECT environment_id, extension_id, lifecycle_revision
+          FROM environment_extensions
+          WHERE extension_id = ?
+          ORDER BY environment_id ASC
+        `).all(extension.id).map((row) => {
+          const value = row as EnvironmentExtensionBindingRow;
+          return {
+            environmentId: value.environment_id,
+            extensionId: value.extension_id,
+            lifecycleRevision: value.lifecycle_revision ?? undefined,
+          };
+        });
+        if (JSON.stringify(current) !== JSON.stringify(expected)) {
+          throw Object.assign(new Error("Extension acquisition bindings changed before commit."), {
+            status: 409,
+            code: "ACQUISITION_CONFLICT_TARGET_INVALID",
+          });
+        }
+      }
+      const currentRow = db.prepare("SELECT * FROM extensions WHERE id = ?").get(extension.id) as ExtensionRow | undefined;
+      if (input.expectedExistingUpdatedAt === undefined) {
+        if (currentRow) throw Object.assign(new Error("Extension acquisition target already exists."), {
+          status: 409,
+          code: "ACQUISITION_CONFLICT_TARGET_INVALID",
+        });
+      } else {
+        const current = currentRow ? extensionFromRow(currentRow) : undefined;
+        if (!current || current.updatedAt !== input.expectedExistingUpdatedAt) {
+          throw Object.assign(new Error("Extension acquisition target changed before commit."), {
+            status: 409,
+            code: "ACQUISITION_CONFLICT_TARGET_INVALID",
+          });
+        }
+        if (extension.createdAt !== current.createdAt) {
+          throw new TypeError("Extension acquisition cannot change the target creation time.");
+        }
+      }
+      for (const environmentId of environmentIds) this.getActiveEnvironmentOrThrow(environmentId);
+      this.insertExtension(extension);
+      for (const binding of environmentBindings) {
+        db.prepare(`
+          INSERT OR IGNORE INTO environment_extensions (environment_id, extension_id, lifecycle_revision)
+          VALUES (?, ?, ?)
+        `).run(binding.environmentId, extension.id, binding.lifecycleRevision as string);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    this.refreshProfilesFromEnvironments([
+      ...rowsToIds(db, "environment_extensions", "extension_id", extension.id, "environment_id"),
+    ]);
+    return extension;
+  }
+
   async deleteExtension(id: string): Promise<void> {
     await this.initialize();
     this.getExtensionOrThrow(id);
@@ -844,6 +925,26 @@ export class SqlitePanelRepository implements PanelRepository {
         ORDER BY extension_id ASC
       `)
       .all(environmentId)
+      .map((row) => {
+        const binding = row as EnvironmentExtensionBindingRow;
+        return {
+          environmentId: binding.environment_id,
+          extensionId: binding.extension_id,
+          lifecycleRevision: binding.lifecycle_revision ?? undefined,
+        };
+      });
+  }
+
+  async listExtensionEnvironmentBindings(extensionId: string): Promise<EnvironmentExtensionBinding[]> {
+    await this.initialize();
+    return this.database()
+      .prepare(`
+        SELECT environment_id, extension_id, lifecycle_revision
+        FROM environment_extensions
+        WHERE extension_id = ?
+        ORDER BY environment_id ASC
+      `)
+      .all(extensionId)
       .map((row) => {
         const binding = row as EnvironmentExtensionBindingRow;
         return {
@@ -993,6 +1094,7 @@ export class SqlitePanelRepository implements PanelRepository {
 
   async exportFullBackupData(): Promise<AppBackupData> {
     await this.initialize();
+    const extensions = await this.listExtensions();
     return {
       schemaVersion: APP_BACKUP_SCHEMA_VERSION,
       settings: await this.getSettings(),
@@ -1001,15 +1103,21 @@ export class SqlitePanelRepository implements PanelRepository {
       groups: await this.listGroups(),
       tags: await this.listTags(),
       proxies: await this.listProxies({ includeSecrets: true }),
-      extensions: await this.listExtensions(),
-      extensionSources: await this.listExtensionSources(),
+      extensions,
+      retainedExtensionArtifacts: extensions
+        .filter((extension) => extension.provenance?.artifact.retained && extension.artifactArchivePath)
+        .map((extension) => ({
+          extensionId: extension.id,
+          archivePath: `extension-artifacts/${extension.id}/current.crx`,
+          sha256: extension.provenance!.artifact.sha256!,
+        })),
       environmentExtensionBindings: this.readAllEnvironmentExtensionBindings(),
     };
   }
 
   async restoreFullBackupData(data: AppBackupData): Promise<void> {
     await this.initialize();
-    const normalized = normalizeFullBackupData(data);
+    const normalized = normalizeFullBackupData(data, this.dataDir);
     const db = this.database();
     db.exec("BEGIN IMMEDIATE");
     try {
@@ -1017,7 +1125,6 @@ export class SqlitePanelRepository implements PanelRepository {
       for (const group of normalized.groups) this.insertGroupExact(group);
       for (const tag of normalized.tags) this.insertTagExact(tag);
       for (const proxy of normalized.proxies) this.insertProxyExact(proxy);
-      for (const source of normalized.extensionSources) this.insertExtensionSourceExact(source);
       for (const extension of normalized.extensions) this.insertExtensionExact(extension);
       for (const profile of normalized.profiles) this.upsertProfileRow(profile);
       for (const environment of normalized.environments) this.insertEnvironmentExact(environment);
@@ -1132,6 +1239,8 @@ export class SqlitePanelRepository implements PanelRepository {
         manifest_version INTEGER,
         permissions_json TEXT NOT NULL,
         host_permissions_json TEXT NOT NULL,
+        optional_permissions_json TEXT NOT NULL DEFAULT '[]',
+        optional_host_permissions_json TEXT NOT NULL DEFAULT '[]',
         permission_risks_json TEXT NOT NULL,
         install_state TEXT NOT NULL,
         update_policy TEXT NOT NULL,
@@ -1223,6 +1332,8 @@ export class SqlitePanelRepository implements PanelRepository {
     this.ensureColumn("extensions", "artifact_archive_path", "TEXT");
     this.ensureColumn("extensions", "update_provider_id", "TEXT");
     this.ensureColumn("extensions", "update_state_json", "TEXT");
+    this.ensureColumn("extensions", "optional_permissions_json", "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn("extensions", "optional_host_permissions_json", "TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn("environment_extensions", "lifecycle_revision", "TEXT");
   }
 
@@ -1472,26 +1583,52 @@ export class SqlitePanelRepository implements PanelRepository {
     return importedGroup;
   }
 
-  private ensurePackageExtension(extension: ExtensionEntity, requestedId: string | undefined, localPath: string | undefined): ExtensionEntity {
+  private ensurePackageExtension(
+    extension: ExtensionEntity,
+    requestedId: string | undefined,
+    localPath: string | undefined,
+    artifactArchivePath?: string,
+    packageManifestKey?: string,
+  ): ExtensionEntity {
     const cleanRequestedId = requestedId?.trim();
     if (cleanRequestedId) {
       const existing = this.database()
         .prepare("SELECT * FROM extensions WHERE id = ? LIMIT 1")
         .get(cleanRequestedId) as ExtensionRow | undefined;
-      if (existing) return extensionFromRow(existing);
+      if (existing) {
+        const current = extensionFromRow(existing);
+        if (
+          packageManifestKey
+          && !current.manifestKey
+          && current.installState === "installed"
+        ) {
+          const adopted = normalizeExtensionEntity({ ...current, manifestKey: packageManifestKey });
+          this.insertExtension(adopted);
+          return adopted;
+        }
+        return current;
+      }
     }
 
     const timestamp = nowIso();
     const restoredFiles = Boolean(localPath);
+    const restoredArtifact = Boolean(artifactArchivePath);
     const missingInstalledFiles = !restoredFiles && extension.installState === "installed";
     const importedExtension = normalizeExtensionEntity({
       ...extension,
       id: cleanRequestedId,
-      sourceKind: "local-directory",
-      sourceUrl: localPath ?? extension.sourceUrl,
+      sourceKind: restoredArtifact ? "local-crx" : "managed-snapshot",
+      sourceUrl: artifactArchivePath ?? "",
       sourceId: undefined,
       localPath,
-      directoryMode: restoredFiles ? "copy" : extension.directoryMode,
+      artifactArchivePath,
+      provenance: extension.provenance
+        ? {
+            ...extension.provenance,
+            transfer: { kind: "environment-package-import", at: timestamp },
+          }
+        : undefined,
+      directoryMode: undefined,
       installState: missingInstalledFiles ? "local-missing" : restoredFiles ? "installed" : extension.installState,
       // `lastInstalledAt` doubles as the explicit package revision consumed by lifecycle protection.
       // Re-homing identical package bytes must preserve it, otherwise the imported environment's first
@@ -1520,7 +1657,14 @@ export class SqlitePanelRepository implements PanelRepository {
 
     const groupId = groupIdMap[environment.groupId] ?? this.ensureGroup(environment.runtimeProfile.group, timestamp).id;
     const group = this.getGroupOrThrow(groupId);
-    const extensionIds = uniqueStrings(environment.extensionIds.map((extensionId) => extensionIdMap[extensionId]).filter(Boolean));
+    const unmappedExtensionIds = environment.extensionIds.filter((extensionId) => !extensionIdMap[extensionId]);
+    if (unmappedExtensionIds.length > 0) {
+      throw Object.assign(new Error("Environment package references an unknown extension."), {
+        status: 400,
+        code: "ENVIRONMENT_PACKAGE_SCHEMA_INVALID",
+      });
+    }
+    const extensionIds = uniqueStrings(environment.extensionIds.map((extensionId) => extensionIdMap[extensionId]));
     const extensionPaths = extensionIds
       .map((extensionId) => this.getExtensionOrThrow(extensionId))
       .filter((extension) => extension.status === "enabled" && extension.installState === "installed" && extension.localPath)
@@ -1848,10 +1992,11 @@ export class SqlitePanelRepository implements PanelRepository {
         INSERT INTO extensions (
           id, name, description, source_kind, source_url, source_id, store_id, store_url,
           store_namespace, provenance_json, artifact_archive_path, update_provider_id, update_state_json,
-          version, manifest_version, permissions_json, host_permissions_json, permission_risks_json,
+          version, manifest_version, permissions_json, host_permissions_json, optional_permissions_json,
+          optional_host_permissions_json, permission_risks_json,
           install_state, update_policy, sha256, manifest_sha256, local_path, manifest_key, directory_mode,
           last_installed_at, last_checked_at, last_error, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           description = excluded.description,
@@ -1869,6 +2014,8 @@ export class SqlitePanelRepository implements PanelRepository {
           manifest_version = excluded.manifest_version,
           permissions_json = excluded.permissions_json,
           host_permissions_json = excluded.host_permissions_json,
+          optional_permissions_json = excluded.optional_permissions_json,
+          optional_host_permissions_json = excluded.optional_host_permissions_json,
           permission_risks_json = excluded.permission_risks_json,
           install_state = excluded.install_state,
           update_policy = excluded.update_policy,
@@ -1901,6 +2048,8 @@ export class SqlitePanelRepository implements PanelRepository {
         extension.manifestVersion ?? null,
         JSON.stringify(extension.permissions),
         JSON.stringify(extension.hostPermissions),
+        JSON.stringify(extension.optionalPermissions ?? []),
+        JSON.stringify(extension.optionalHostPermissions ?? []),
         JSON.stringify(extension.permissionRisks),
         extension.installState,
         extension.updatePolicy,
@@ -1924,10 +2073,11 @@ export class SqlitePanelRepository implements PanelRepository {
         INSERT INTO extensions (
           id, name, description, source_kind, source_url, source_id, store_id, store_url,
           store_namespace, provenance_json, artifact_archive_path, update_provider_id, update_state_json,
-          version, manifest_version, permissions_json, host_permissions_json, permission_risks_json,
+          version, manifest_version, permissions_json, host_permissions_json, optional_permissions_json,
+          optional_host_permissions_json, permission_risks_json,
           install_state, update_policy, sha256, manifest_sha256, local_path, manifest_key, directory_mode,
           last_installed_at, last_checked_at, last_error, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         extension.id,
@@ -1947,6 +2097,8 @@ export class SqlitePanelRepository implements PanelRepository {
         extension.manifestVersion ?? null,
         JSON.stringify(extension.permissions),
         JSON.stringify(extension.hostPermissions),
+        JSON.stringify(extension.optionalPermissions ?? []),
+        JSON.stringify(extension.optionalHostPermissions ?? []),
         JSON.stringify(extension.permissionRisks),
         extension.installState,
         extension.updatePolicy,
@@ -1999,7 +2151,7 @@ export class SqlitePanelRepository implements PanelRepository {
       );
   }
 
-  private insertExtensionSourceExact(source: ExtensionSourceEntity): void {
+  insertExtensionSourceExact(source: ExtensionSourceEntity): void {
     this.database()
       .prepare(`
         INSERT INTO extension_sources (
@@ -2390,23 +2542,31 @@ function parseSettings(raw: string): AppSettings {
   return normalizeSettings(JSON.parse(raw) as Partial<AppSettings>);
 }
 
-function normalizeFullBackupData(data: AppBackupData): AppBackupData {
-  if (!data || typeof data !== "object" || data.schemaVersion !== APP_BACKUP_SCHEMA_VERSION) {
+function normalizeFullBackupData(data: AppBackupData, receivingDataDir: string): AppBackupData {
+  const originalExtensions = new Map(data.extensions.map((extension) => [extension.id, extension]));
+  const portable = {
+    ...data,
+    extensions: data.extensions.map((extension) => {
+      if (!extension.provenance?.artifact.retained) return extension;
+      const expectedAbsolute = path.join(receivingDataDir, "extension-artifacts", extension.id, "current.crx");
+      const expectedRelative = `extension-artifacts/${extension.id}/current.crx`;
+      const sourceUrl = extension.sourceUrl === expectedAbsolute ? expectedRelative : extension.sourceUrl;
+      const artifactArchivePath = extension.artifactArchivePath === expectedAbsolute
+        ? expectedRelative
+        : extension.artifactArchivePath;
+      return { ...extension, sourceUrl, artifactArchivePath };
+    }),
+  };
+  const decoded = decodeAppBackupData(portable);
+  if (decoded.schemaVersion !== APP_BACKUP_SCHEMA_VERSION) {
     throw Object.assign(new Error("Unsupported app backup schema version."), { status: 400 });
   }
-  if (!Array.isArray(data.profiles)) throw Object.assign(new Error("App backup profiles must be an array."), { status: 400 });
-  if (!Array.isArray(data.environments)) throw Object.assign(new Error("App backup environments must be an array."), { status: 400 });
-  if (!Array.isArray(data.groups)) throw Object.assign(new Error("App backup groups must be an array."), { status: 400 });
-  if (!Array.isArray(data.tags)) throw Object.assign(new Error("App backup tags must be an array."), { status: 400 });
-  if (!Array.isArray(data.proxies)) throw Object.assign(new Error("App backup proxies must be an array."), { status: 400 });
-  if (!Array.isArray(data.extensions)) throw Object.assign(new Error("App backup extensions must be an array."), { status: 400 });
-  if (!Array.isArray(data.extensionSources)) throw Object.assign(new Error("App backup extensionSources must be an array."), { status: 400 });
 
   return {
     schemaVersion: APP_BACKUP_SCHEMA_VERSION,
-    settings: normalizeSettings(data.settings),
-    profiles: data.profiles.map((profile) => normalizeProfile(profile)),
-    environments: data.environments.map((environment) => ({
+    settings: normalizeSettings(decoded.settings),
+    profiles: decoded.profiles.map((profile) => normalizeProfile(profile)),
+    environments: decoded.environments.map((environment) => ({
       ...environment,
       runtimeProfile: normalizeProfile(environment.runtimeProfile),
       tagIds: uniqueStrings(environment.tagIds ?? []),
@@ -2415,7 +2575,7 @@ function normalizeFullBackupData(data: AppBackupData): AppBackupData {
       deletedAt: typeof environment.deletedAt === "string" && environment.deletedAt.trim() ? environment.deletedAt.trim() : undefined,
       deleteReason: typeof environment.deleteReason === "string" && environment.deleteReason.trim() ? environment.deleteReason.trim() : undefined,
     })),
-    groups: data.groups.map((group) => ({
+    groups: decoded.groups.map((group) => ({
       ...group,
       id: createEntityId(group.id, "group"),
       name: cleanRequiredName(group.name, "Group name cannot be empty"),
@@ -2427,7 +2587,7 @@ function normalizeFullBackupData(data: AppBackupData): AppBackupData {
       createdAt: typeof group.createdAt === "string" && group.createdAt ? group.createdAt : nowIso(),
       updatedAt: typeof group.updatedAt === "string" && group.updatedAt ? group.updatedAt : nowIso(),
     })),
-    tags: data.tags.map((tag) => ({
+    tags: decoded.tags.map((tag) => ({
       ...tag,
       id: createEntityId(tag.id, "tag"),
       name: cleanRequiredName(tag.name, "Tag name cannot be empty"),
@@ -2438,10 +2598,24 @@ function normalizeFullBackupData(data: AppBackupData): AppBackupData {
       createdAt: typeof tag.createdAt === "string" && tag.createdAt ? tag.createdAt : nowIso(),
       updatedAt: typeof tag.updatedAt === "string" && tag.updatedAt ? tag.updatedAt : nowIso(),
     })),
-    proxies: data.proxies.map(normalizeProxyEntity),
-    extensions: data.extensions.map(normalizeExtensionEntity),
-    extensionSources: data.extensionSources.map(normalizeExtensionSourceEntity),
-    environmentExtensionBindings: normalizeExtensionBindingMetadata(data.environmentExtensionBindings),
+    proxies: decoded.proxies.map(normalizeProxyEntity),
+    extensions: decoded.extensions.map((extension) => {
+      const normalized = normalizeExtensionEntity(extension);
+      const original = originalExtensions.get(extension.id);
+      if (
+        original?.provenance?.artifact.retained
+        && original.sourceUrl === path.join(receivingDataDir, "extension-artifacts", extension.id, "current.crx")
+      ) {
+        return normalizeExtensionEntity({
+          ...normalized,
+          sourceUrl: original.sourceUrl,
+          artifactArchivePath: original.artifactArchivePath,
+        });
+      }
+      return normalized;
+    }),
+    retainedExtensionArtifacts: decoded.retainedExtensionArtifacts,
+    environmentExtensionBindings: normalizeExtensionBindingMetadata(decoded.environmentExtensionBindings),
   };
 }
 
@@ -2498,6 +2672,8 @@ function normalizeExtensionEntity(input: Partial<ExtensionEntity>): ExtensionEnt
     manifestVersion: Number.isFinite(input.manifestVersion) ? Number(input.manifestVersion) : undefined,
     permissions: uniqueStrings(input.permissions ?? []),
     hostPermissions: uniqueStrings(input.hostPermissions ?? []),
+    optionalPermissions: uniqueStrings(input.optionalPermissions ?? []),
+    optionalHostPermissions: uniqueStrings(input.optionalHostPermissions ?? []),
     permissionRisks: Array.isArray(input.permissionRisks) ? input.permissionRisks : [],
     installState: isExtensionInstallState(input.installState) ? input.installState : "metadata-only",
     updatePolicy: isExtensionUpdatePolicy(input.updatePolicy) ? input.updatePolicy : "pinned",
@@ -2554,6 +2730,7 @@ function isExtensionSourceKind(value: unknown): value is ExtensionSourceKind {
     value === "local-directory" ||
     value === "local-zip" ||
     value === "local-crx" ||
+    value === "managed-snapshot" ||
     value === "remote-zip" ||
     value === "remote-crx" ||
     value === "chrome-web-store"
@@ -2662,7 +2839,7 @@ function proxyFromRow(row: ProxyRow, options: { includeSecrets: boolean }): Prox
 }
 
 function extensionFromRow(row: ExtensionRow): ExtensionEntity {
-  const authority = normalizeExtensionAuthorityFields({
+  const decodedAuthority = normalizeExtensionAuthorityFields({
     sourceKind: row.source_kind,
     sourceUrl: row.source_url,
     sourceId: row.source_id ?? undefined,
@@ -2681,39 +2858,75 @@ function extensionFromRow(row: ExtensionRow): ExtensionEntity {
     artifactArchivePath: row.artifact_archive_path ?? undefined,
     updateProviderId: row.update_provider_id ?? undefined,
     updateState: row.update_state_json ? parseJson<unknown>(row.update_state_json) : undefined,
-  });
+  }, { allowLegacyIncomplete: true });
+  const authority = downgradeIncompleteStoredVerification(decodedAuthority);
+  const downgraded = authority.provenance?.verification.level === "legacy-unknown";
   return {
     id: row.id,
     name: row.name,
     description: row.description,
-    sourceKind: row.source_kind,
-    sourceUrl: row.source_url,
-    sourceId: row.source_id ?? undefined,
+    sourceKind: downgraded ? "managed-snapshot" : row.source_kind,
+    sourceUrl: downgraded ? "" : row.source_url,
+    sourceId: downgraded ? undefined : row.source_id ?? undefined,
     storeId: row.store_id ?? undefined,
     storeUrl: row.store_url ?? undefined,
     storeIdentity: authority.storeIdentity,
     provenance: authority.provenance,
-    artifactArchivePath: authority.artifactArchivePath,
-    updateProviderId: authority.updateProviderId,
-    updateState: authority.updateState,
+    artifactArchivePath: downgraded ? undefined : authority.artifactArchivePath,
+    updateProviderId: downgraded ? undefined : authority.updateProviderId,
+    updateState: downgraded ? { status: "provider-disabled" } : authority.updateState,
     version: row.version,
     manifestVersion: row.manifest_version ?? undefined,
     permissions: parseJson<string[]>(row.permissions_json, []),
     hostPermissions: parseJson<string[]>(row.host_permissions_json, []),
+    optionalPermissions: parseJson<string[]>(row.optional_permissions_json, []),
+    optionalHostPermissions: parseJson<string[]>(row.optional_host_permissions_json, []),
     permissionRisks: parseJson<ExtensionPermissionRisk[]>(row.permission_risks_json, []),
-    installState: row.install_state,
-    updatePolicy: row.update_policy,
+    installState: downgraded && row.install_state === "installed" ? "local-missing" : row.install_state,
+    updatePolicy: downgraded ? "pinned" : row.update_policy,
     sha256: row.sha256 ?? undefined,
     manifestSha256: row.manifest_sha256 ?? undefined,
     localPath: row.local_path ?? undefined,
     manifestKey: row.manifest_key ?? undefined,
-    directoryMode: normalizeExtensionDirectoryMode(row.source_kind, row.directory_mode),
+    directoryMode: normalizeExtensionDirectoryMode(downgraded ? "managed-snapshot" : row.source_kind, row.directory_mode),
     lastInstalledAt: row.last_installed_at ?? undefined,
     lastCheckedAt: row.last_checked_at ?? undefined,
     lastError: row.last_error ?? undefined,
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function downgradeIncompleteStoredVerification(
+  authority: ReturnType<typeof normalizeExtensionAuthorityFields>,
+): ReturnType<typeof normalizeExtensionAuthorityFields> {
+  const provenance = authority.provenance;
+  if (
+    !provenance
+    || provenance.verification.level !== "cws-publisher-verified"
+    || (provenance.verification.publisherKeySha256 && provenance.verification.treeSha256)
+  ) return authority;
+  return {
+    storeIdentity: undefined,
+    provenance: {
+      schemaVersion: 1,
+      artifact: {
+        providerId: "legacy",
+        legacySourceUrl: provenance.artifact.legacySourceUrl,
+        format: provenance.artifact.format,
+        sha256: provenance.artifact.sha256,
+        retained: false,
+      },
+      verification: {
+        level: "legacy-unknown",
+        manifestSha256: provenance.verification.manifestSha256,
+      },
+      transfer: provenance.transfer,
+    },
+    artifactArchivePath: undefined,
+    updateProviderId: undefined,
+    updateState: { status: "provider-disabled" },
   };
 }
 

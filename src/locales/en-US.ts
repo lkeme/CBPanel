@@ -578,6 +578,7 @@ export const enUS: Dictionary = {
   "extension.kind.localDirectory": "Local directory",
   "extension.kind.localZip": "ZIP package",
   "extension.kind.localCrx": "CRX package",
+  "extension.kind.managedSnapshot": "Managed snapshot",
   "extension.kind.remoteZip": "Remote ZIP",
   "extension.kind.remoteCrx": "Remote CRX",
   "extension.kind.chromeWebStore": "Chrome Web Store",

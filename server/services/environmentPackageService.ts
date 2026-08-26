@@ -1,21 +1,28 @@
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import {
-  normalizeExtensionBindingMetadata,
   PRESERVE_LIFECYCLE_REVISION_PREFIX,
   isPreserveLifecycleRevision,
   type BrowserEnvironment,
   type ExtensionEntity,
   type GroupEntity,
 } from "../../src/shared/entities";
-import { extensionForLegacyTransfer } from "../../src/shared/extensionAcquisition";
+import type { LegacyTransferExtension } from "../../src/shared/extensionAcquisition";
 import {
   ENVIRONMENT_PACKAGE_KIND,
   ENVIRONMENT_PACKAGE_SCHEMA_VERSION,
+  ENVIRONMENT_PACKAGE_SCHEMA_VERSION_V1,
+  ENVIRONMENT_PACKAGE_SCHEMA_VERSION_V2,
+  decodeEnvironmentPackageData,
+  type AnyEnvironmentPackageData,
+  type AnyEnvironmentPackageManifest,
   type EnvironmentPackageCounts,
   type EnvironmentPackageData,
   type EnvironmentPackageManifest,
+  type EnvironmentPackageManifestV1,
+  type EnvironmentPackageManifestV2,
   type EnvironmentPackageOperation,
   type EnvironmentPackageOperationResult,
   type EnvironmentPackageScope,
@@ -32,12 +39,24 @@ import {
   readJsonArchiveFile,
   writeZipArchive,
 } from "./archiveUtils";
+import {
+  DataMutationCoordinator,
+  type DataMutationLease,
+} from "./dataMutationCoordinator";
+import { verifyChromeWebStoreCrx3File } from "./crx3Verifier";
+import { preflightExtensionPackage } from "./extensionPackagePreflight";
+import { validateTransferredExtensionArtifact } from "./extensionArtifactTransferVerifier";
+import { fingerprintStagedExtensionTree } from "./boundedZipAnalyzer";
 
 type EnvironmentPackageServiceOptions = {
   repository: PanelRepository;
   browserDataDir: string;
   extensionCacheDir: string;
+  extensionArtifactDir?: string;
   activeEnvironmentIds: () => Set<string>;
+  mutationCoordinator?: DataMutationCoordinator;
+  verifyStoreCrxFileForTesting?: typeof verifyChromeWebStoreCrx3File;
+  preflightPackageForTesting?: typeof preflightExtensionPackage;
 };
 
 type ExportRequest = {
@@ -56,6 +75,8 @@ type PreparedImport = {
   extensionIdMap: Record<string, string>;
   reusedExtensionIds: string[];
   extensionLocalPaths: Record<string, string>;
+  extensionArtifactPaths: Record<string, string>;
+  extensionManifestKeys: Record<string, string>;
   counts: EnvironmentPackageCounts;
   warnings: string[];
 };
@@ -66,17 +87,33 @@ const DATA_ENTRY = "data.json";
 export class EnvironmentPackageService {
   private readonly operations = new Map<string, EnvironmentPackageOperation>();
 
-  constructor(private readonly options: EnvironmentPackageServiceOptions) {}
+  private readonly mutationCoordinator: DataMutationCoordinator;
+
+  private readonly extensionArtifactDir: string;
+
+  private readonly verifyStoreCrxFile: typeof verifyChromeWebStoreCrx3File;
+
+  private readonly preflightPackage: typeof preflightExtensionPackage;
+
+  constructor(private readonly options: EnvironmentPackageServiceOptions) {
+    this.mutationCoordinator = options.mutationCoordinator ?? new DataMutationCoordinator();
+    this.extensionArtifactDir = options.extensionArtifactDir
+      ?? path.join(path.dirname(path.resolve(options.extensionCacheDir)), "extension-artifacts");
+    this.verifyStoreCrxFile = options.verifyStoreCrxFileForTesting ?? verifyChromeWebStoreCrx3File;
+    this.preflightPackage = options.preflightPackageForTesting ?? preflightExtensionPackage;
+  }
 
   startExport(request: ExportRequest): EnvironmentPackageOperation {
+    const lease = this.mutationCoordinator.enter("environment-package");
     const operation = this.createOperation("export", "queued", "Preparing environment export.");
-    void this.runExport(operation.id, request);
+    void this.runExport(operation.id, request, lease);
     return operation;
   }
 
   startImport(request: ImportRequest): EnvironmentPackageOperation {
+    const lease = this.mutationCoordinator.enter("environment-package");
     const operation = this.createOperation("import", "queued", "Preparing environment import.");
-    void this.runImport(operation.id, request);
+    void this.runImport(operation.id, request, lease);
     return operation;
   }
 
@@ -104,6 +141,15 @@ export class EnvironmentPackageService {
   }
 
   async exportToPackage(request: ExportRequest, operationId?: string): Promise<EnvironmentPackageOperationResult> {
+    const lease = this.mutationCoordinator.enter("environment-package");
+    try {
+      return await this.exportToPackageInternal(request, operationId);
+    } finally {
+      lease.release();
+    }
+  }
+
+  private async exportToPackageInternal(request: ExportRequest, operationId?: string): Promise<EnvironmentPackageOperationResult> {
     const outputPath = ensurePackageExtension(path.resolve(request.outputPath));
     const environments = await this.targetEnvironments(request.environmentIds);
     this.assertNoActiveEnvironment(environments);
@@ -122,10 +168,20 @@ export class EnvironmentPackageService {
   }
 
   async importFromPackage(request: ImportRequest, operationId?: string): Promise<EnvironmentPackageOperationResult> {
+    const lease = this.mutationCoordinator.enter("environment-package");
+    try {
+      return await this.importFromPackageInternal(request, operationId);
+    } finally {
+      lease.release();
+    }
+  }
+
+  private async importFromPackageInternal(request: ImportRequest, operationId?: string): Promise<EnvironmentPackageOperationResult> {
     const inputPath = path.resolve(request.inputPath);
     const prepared = await this.prepareImport(inputPath, operationId);
     const copiedEnvironmentIds: string[] = [];
     const copiedExtensionIds: string[] = [];
+    const copiedArtifactIds: string[] = [];
     try {
       const reusedExtensionIds = new Set(prepared.reusedExtensionIds);
       for (const [oldExtensionId, newExtensionId] of Object.entries(prepared.extensionIdMap)) {
@@ -134,9 +190,39 @@ export class EnvironmentPackageService {
         if (!(await pathExists(sourcePath))) continue;
         const targetPath = path.join(this.options.extensionCacheDir, newExtensionId);
         this.setProgress(operationId, "copying-extensions", copiedExtensionIds.length + 1, Object.keys(prepared.extensionIdMap).length, `Restoring extension ${oldExtensionId}.`);
-        await copyDirectory(sourcePath, targetPath);
+        const targetExisted = await pathExists(targetPath);
+        try {
+          await copyDirectory(sourcePath, targetPath);
+        } catch (error) {
+          if (!targetExisted) await fs.rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
+          throw error;
+        }
         prepared.extensionLocalPaths[oldExtensionId] = targetPath;
         copiedExtensionIds.push(newExtensionId);
+      }
+
+      for (const artifact of prepared.data.retainedExtensionArtifacts) {
+        const newExtensionId = prepared.extensionIdMap[artifact.extensionId];
+        if (!newExtensionId || reusedExtensionIds.has(newExtensionId)) continue;
+        const sourcePath = path.join(prepared.stagingDir, ...artifact.archivePath.split("/"));
+        if (!(await pathExists(sourcePath))) throw packageInvalid(`Retained artifact is missing for ${artifact.extensionId}.`);
+        const targetPath = path.join(this.extensionArtifactDir, newExtensionId, "current.crx");
+        const targetExisted = await pathExists(targetPath);
+        if (targetExisted) {
+          throw Object.assign(new Error("Environment package artifact target already exists."), {
+            status: 409,
+            code: "ENVIRONMENT_PACKAGE_TARGET_EXISTS",
+          });
+        }
+        await fs.mkdir(path.dirname(targetPath), { recursive: true });
+        try {
+          await fs.copyFile(sourcePath, targetPath);
+        } catch (error) {
+          if (!targetExisted) await fs.rm(targetPath, { force: true }).catch(() => undefined);
+          throw error;
+        }
+        prepared.extensionArtifactPaths[artifact.extensionId] = targetPath;
+        copiedArtifactIds.push(newExtensionId);
       }
 
       for (const [oldEnvironmentId, newEnvironmentId] of Object.entries(prepared.environmentIdMap)) {
@@ -144,7 +230,13 @@ export class EnvironmentPackageService {
         if (!(await pathExists(sourcePath))) continue;
         const targetPath = path.join(this.options.browserDataDir, newEnvironmentId);
         this.setProgress(operationId, "copying-browser-data", copiedEnvironmentIds.length + 1, Object.keys(prepared.environmentIdMap).length, `Restoring browser data ${oldEnvironmentId}.`);
-        await copyDirectory(sourcePath, targetPath);
+        const targetExisted = await pathExists(targetPath);
+        try {
+          await copyDirectory(sourcePath, targetPath);
+        } catch (error) {
+          if (!targetExisted) await fs.rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
+          throw error;
+        }
         copiedEnvironmentIds.push(newEnvironmentId);
       }
 
@@ -193,6 +285,8 @@ export class EnvironmentPackageService {
         environmentIdMap: prepared.environmentIdMap,
         extensionIdMap: prepared.extensionIdMap,
         extensionLocalPaths: prepared.extensionLocalPaths,
+        extensionArtifactPaths: prepared.extensionArtifactPaths,
+        extensionManifestKeys: prepared.extensionManifestKeys,
       });
       this.setProgress(operationId, "finalizing", prepared.data.environments.length, prepared.data.environments.length, "Environment import completed.");
       return {
@@ -205,6 +299,7 @@ export class EnvironmentPackageService {
       await Promise.all([
         ...copiedEnvironmentIds.map((id) => fs.rm(path.join(this.options.browserDataDir, id), { recursive: true, force: true })),
         ...copiedExtensionIds.map((id) => fs.rm(path.join(this.options.extensionCacheDir, id), { recursive: true, force: true })),
+        ...copiedArtifactIds.map((id) => fs.rm(path.join(this.extensionArtifactDir, id), { recursive: true, force: true })),
       ]);
       throw error;
     } finally {
@@ -212,23 +307,27 @@ export class EnvironmentPackageService {
     }
   }
 
-  private async runExport(operationId: string, request: ExportRequest): Promise<void> {
+  private async runExport(operationId: string, request: ExportRequest, lease: DataMutationLease): Promise<void> {
     this.markRunning(operationId, "exporting", "Exporting environment package.");
     try {
-      const result = await this.exportToPackage(request, operationId);
+      const result = await this.exportToPackageInternal(request, operationId);
       this.finishOperation(operationId, "succeeded", "Environment package exported.", result);
     } catch (error) {
       this.finishOperation(operationId, "failed", "Environment package export failed.", undefined, (error as Error).message);
+    } finally {
+      lease.release();
     }
   }
 
-  private async runImport(operationId: string, request: ImportRequest): Promise<void> {
+  private async runImport(operationId: string, request: ImportRequest, lease: DataMutationLease): Promise<void> {
     this.markRunning(operationId, "importing", "Importing environment package.");
     try {
-      const result = await this.importFromPackage(request, operationId);
+      const result = await this.importFromPackageInternal(request, operationId);
       this.finishOperation(operationId, "succeeded", "Environment package imported.", result);
     } catch (error) {
       this.finishOperation(operationId, "failed", "Environment package import failed.", undefined, (error as Error).message);
+    } finally {
+      lease.release();
     }
   }
 
@@ -266,6 +365,7 @@ export class EnvironmentPackageService {
     const entries: ArchiveEntry[] = [];
     const browserDataEntries = await this.browserDataEntries(exportedEnvironments, warnings);
     const extensionEntries = await this.extensionEntries(extensions, warnings);
+    const retainedArtifacts = await this.retainedArtifactEntries(extensions);
     const manifest: EnvironmentPackageManifest = {
       kind: ENVIRONMENT_PACKAGE_KIND,
       schemaVersion: ENVIRONMENT_PACKAGE_SCHEMA_VERSION,
@@ -279,19 +379,22 @@ export class EnvironmentPackageService {
         browserData: browserDataEntries.count,
         groups: groups.length,
         extensions: extensions.length,
+        retainedExtensionArtifacts: retainedArtifacts.data.length,
       },
     };
     const data: EnvironmentPackageData = {
       schemaVersion: ENVIRONMENT_PACKAGE_SCHEMA_VERSION,
       environments: exportedEnvironments,
       groups,
-      extensions: extensions.map((extension) => extensionForLegacyTransfer(extension)),
+      extensions,
+      retainedExtensionArtifacts: retainedArtifacts.data,
       environmentExtensionBindings,
     };
     entries.push(jsonArchiveEntry(MANIFEST_ENTRY, manifest));
-    entries.push(jsonArchiveEntry(DATA_ENTRY, data));
+    entries.push(jsonArchiveEntry(DATA_ENTRY, portablePackageData(data)));
     entries.push(...browserDataEntries.entries);
     entries.push(...extensionEntries.entries);
+    entries.push(...retainedArtifacts.entries);
     this.setProgress(operationId, "collecting", entries.length, entries.length, "Collected environment package entries.");
     return { entries, manifest, warnings };
   }
@@ -365,8 +468,9 @@ export class EnvironmentPackageService {
     const entries: ArchiveEntry[] = [];
     let count = 0;
     for (const extension of extensions) {
-      const directory = extension.localPath ?? path.join(this.options.extensionCacheDir, extension.id);
-      if (!(await pathExists(directory))) {
+      const directory = extension.localPath
+        ?? (extension.provenance?.artifact.retained ? undefined : path.join(this.options.extensionCacheDir, extension.id));
+      if (!directory || !(await pathExists(directory))) {
         warnings.push(`Extension files not found for ${extension.name}.`);
         continue;
       }
@@ -376,17 +480,62 @@ export class EnvironmentPackageService {
     return { count, entries };
   }
 
+  private async retainedArtifactEntries(extensions: ExtensionEntity[]): Promise<{
+    data: EnvironmentPackageData["retainedExtensionArtifacts"];
+    entries: ArchiveEntry[];
+  }> {
+    const data: EnvironmentPackageData["retainedExtensionArtifacts"] = [];
+    const entries: ArchiveEntry[] = [];
+    for (const extension of extensions) {
+      if (!extension.provenance?.artifact.retained) continue;
+      const canonicalPath = path.join(this.extensionArtifactDir, extension.id, "current.crx");
+      if (extension.artifactArchivePath !== canonicalPath || extension.sourceUrl !== canonicalPath) {
+        throw packageInvalid(`Retained artifact path is not canonical for ${extension.name}.`);
+      }
+      const artifactStats = await fs.lstat(canonicalPath).catch(() => undefined);
+      if (!artifactStats?.isFile() || artifactStats.isSymbolicLink() || artifactStats.nlink !== 1) {
+        throw packageInvalid(`Retained artifact is missing or linked for ${extension.name}.`);
+      }
+      const fingerprint = await sha256File(canonicalPath).catch(() => undefined);
+      if (!fingerprint || fingerprint !== extension.provenance.artifact.sha256) {
+        throw packageInvalid(`Retained artifact fingerprint changed for ${extension.name}.`);
+      }
+      const validationRoot = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-package-artifact-verify-"));
+      await validateTransferredExtensionArtifact({
+        extension,
+        artifactPath: canonicalPath,
+        expectedSha256: fingerprint,
+        validationDir: path.join(validationRoot, "unpacked"),
+        unpackedRoot: extension.localPath,
+        verifyFile: this.verifyStoreCrxFile,
+        preflightPackage: this.preflightPackage,
+      }).finally(() => fs.rm(validationRoot, { recursive: true, force: true }).catch(() => undefined));
+      const archivePath = `extension-artifacts/${extension.id}/current.crx`;
+      data.push({ extensionId: extension.id, archivePath, sha256: fingerprint });
+      entries.push({ archivePath, filePath: canonicalPath });
+    }
+    return { data, entries };
+  }
+
   private async prepareImport(inputPath: string, operationId?: string): Promise<PreparedImport> {
     this.setProgress(operationId, "extracting", 0, 1, "Extracting environment package.");
     const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-environment-import-"));
     try {
       await extractZipArchive(inputPath, stagingDir, "Environment package contains an unsafe path.");
-      const manifest = parseManifest(await readJsonArchiveFile(path.join(stagingDir, MANIFEST_ENTRY)));
-      const data = parsePackageData(await readJsonArchiveFile(path.join(stagingDir, DATA_ENTRY)));
-      validateManifestData(manifest, data);
+      const manifest = parseManifest(await readJsonArchiveFile(path.join(stagingDir, MANIFEST_ENTRY), 1 * 1024 * 1024));
+      const decoded = parsePackageData(await readJsonArchiveFile(path.join(stagingDir, DATA_ENTRY), 16 * 1024 * 1024));
+      validateManifestData(manifest, decoded);
+      const data = migratePackageDataToCurrent(decoded);
+      await validateStagedRetainedArtifacts(
+        data,
+        stagingDir,
+        this.verifyStoreCrxFile,
+        this.preflightPackage,
+      );
       const environmentIdMap = Object.fromEntries(data.environments.map((environment) => [environment.id, createId()]));
       const { extensionIdMap, reusedExtensionIds, warnings: identityWarnings } =
         await this.resolveExtensionIdMap(data.extensions, stagingDir);
+      validatePackageExtensionReferences(data);
       const browserDataCount = await countExistingDirectories(
         data.environments.map((environment) => path.join(stagingDir, "browser-data", environment.id)),
       );
@@ -408,11 +557,14 @@ export class EnvironmentPackageService {
         extensionIdMap,
         reusedExtensionIds,
         extensionLocalPaths: {},
+        extensionArtifactPaths: {},
+        extensionManifestKeys: await readPackageManifestKeys(data.extensions, stagingDir),
         counts: {
           environments: data.environments.length,
           browserData: browserDataCount,
           groups: data.groups.length,
           extensions: data.extensions.length,
+          retainedExtensionArtifacts: data.retainedExtensionArtifacts.length,
         },
         warnings,
       };
@@ -452,7 +604,7 @@ export class EnvironmentPackageService {
       if (!diskManifestKey) continue;
       const current = extension.manifestKey
         ? extension
-        : await this.options.repository.updateExtension(extension.id, { manifestKey: diskManifestKey });
+        : { ...extension, manifestKey: diskManifestKey };
       if (current.manifestKey !== diskManifestKey) continue;
       installed.push({ extension: current, diskManifestKey });
     }
@@ -475,10 +627,28 @@ export class EnvironmentPackageService {
           : undefined;
       // Portable reuse is an identity decision, not merely a package-content match. Require the archive
       // entity, archive bytes, local entity and local bytes to agree on one nonempty browser key.
+      let sameTree = false;
+      if (candidate?.extension.localPath && packageDiskManifestKey) {
+        const [packageTree, candidateTree] = await Promise.all([
+          fingerprintStagedExtensionTree(path.join(stagingDir, "extensions", extension.id), {
+            maxFiles: 20_000,
+            maxFilesystemNodes: 50_000,
+            maxExpandedBytes: 512 * 1024 * 1024,
+          }).catch(() => undefined),
+          fingerprintStagedExtensionTree(candidate.extension.localPath, {
+            maxFiles: 20_000,
+            maxFilesystemNodes: 50_000,
+            maxExpandedBytes: 512 * 1024 * 1024,
+          }).catch(() => undefined),
+        ]);
+        sameTree = Boolean(packageTree && candidateTree && packageTree.sha256 === candidateTree.sha256);
+      }
       const reusable = extension.manifestKey
         && packageDiskManifestKey === extension.manifestKey
         && candidate?.extension.manifestKey === extension.manifestKey
         && candidate.diskManifestKey === extension.manifestKey
+        && sameTree
+        && (!extension.storeId || !candidate.extension.storeId || extension.storeId === candidate.extension.storeId)
         ? candidate.extension
         : undefined;
       if (reusable) {
@@ -541,55 +711,228 @@ export class EnvironmentPackageService {
   }
 }
 
-function parseManifest(input: unknown): EnvironmentPackageManifest {
+function parseManifest(input: unknown): AnyEnvironmentPackageManifest {
   if (!isRecord(input)) throw Object.assign(new Error("Package manifest must be an object."), { status: 400 });
   if (input.kind !== ENVIRONMENT_PACKAGE_KIND) throw Object.assign(new Error("Unsupported environment package kind."), { status: 400 });
-  if (input.schemaVersion !== ENVIRONMENT_PACKAGE_SCHEMA_VERSION) throw Object.assign(new Error("Unsupported environment package schema version."), { status: 400 });
   const counts = isRecord(input.counts) ? input.counts : {};
-  return {
+  const base = {
     kind: ENVIRONMENT_PACKAGE_KIND,
-    schemaVersion: ENVIRONMENT_PACKAGE_SCHEMA_VERSION,
     exportedAt: readString(input.exportedAt, "manifest.exportedAt"),
     scope: input.scope === "all" ? "all" : "selected",
     containsSecrets: true,
     containsBrowserData: input.containsBrowserData === true,
     containsExtensions: input.containsExtensions === true,
-    counts: {
-      environments: readNumber(counts.environments, "manifest.counts.environments"),
-      browserData: readNumber(counts.browserData, "manifest.counts.browserData"),
-      groups: readNumber(counts.groups, "manifest.counts.groups"),
-      extensions: readNumber(counts.extensions, "manifest.counts.extensions"),
+  } as const;
+  const baseCounts = {
+    environments: readNumber(counts.environments, "manifest.counts.environments"),
+    browserData: readNumber(counts.browserData, "manifest.counts.browserData"),
+    groups: readNumber(counts.groups, "manifest.counts.groups"),
+    extensions: readNumber(counts.extensions, "manifest.counts.extensions"),
+  };
+  if (input.schemaVersion === ENVIRONMENT_PACKAGE_SCHEMA_VERSION_V1) {
+    return { ...base, schemaVersion: ENVIRONMENT_PACKAGE_SCHEMA_VERSION_V1, counts: baseCounts } satisfies EnvironmentPackageManifestV1;
+  }
+  if (input.schemaVersion === ENVIRONMENT_PACKAGE_SCHEMA_VERSION_V2) {
+    return {
+      ...base,
+      schemaVersion: ENVIRONMENT_PACKAGE_SCHEMA_VERSION_V2,
+      counts: {
+        ...baseCounts,
+        retainedExtensionArtifacts: readNumber(counts.retainedExtensionArtifacts, "manifest.counts.retainedExtensionArtifacts"),
+      },
+    } satisfies EnvironmentPackageManifestV2;
+  }
+  throw Object.assign(new Error("Unsupported environment package schema version."), { status: 400 });
+}
+
+function parsePackageData(input: unknown): AnyEnvironmentPackageData {
+  return decodeEnvironmentPackageData(input);
+}
+
+function validateManifestData(manifest: AnyEnvironmentPackageManifest, data: AnyEnvironmentPackageData): void {
+  if (manifest.schemaVersion !== data.schemaVersion) throw Object.assign(new Error("Package manifest and data schema versions disagree."), { status: 400 });
+  if (manifest.counts.environments !== data.environments.length) throw Object.assign(new Error("Package environment count does not match manifest."), { status: 400 });
+  if (manifest.counts.groups !== data.groups.length) throw Object.assign(new Error("Package group count does not match manifest."), { status: 400 });
+  if (manifest.counts.extensions !== data.extensions.length) throw Object.assign(new Error("Package extension count does not match manifest."), { status: 400 });
+  if (manifest.schemaVersion === ENVIRONMENT_PACKAGE_SCHEMA_VERSION_V2 && data.schemaVersion === ENVIRONMENT_PACKAGE_SCHEMA_VERSION_V2) {
+    if (manifest.counts.retainedExtensionArtifacts !== data.retainedExtensionArtifacts.length) throw Object.assign(new Error("Package retained artifact count does not match manifest."), { status: 400 });
+  }
+}
+
+function migratePackageDataToCurrent(data: AnyEnvironmentPackageData): EnvironmentPackageData {
+  const current: EnvironmentPackageData = data.schemaVersion === ENVIRONMENT_PACKAGE_SCHEMA_VERSION_V2
+    ? data
+    : {
+        schemaVersion: ENVIRONMENT_PACKAGE_SCHEMA_VERSION_V2,
+        environments: data.environments,
+        groups: data.groups,
+        extensions: data.extensions.map(migrateLegacyPackageExtension),
+        retainedExtensionArtifacts: [],
+        environmentExtensionBindings: data.environmentExtensionBindings,
+      };
+  return {
+    ...current,
+    environments: current.environments.map(withoutPackageExtensionPaths),
+    extensions: current.extensions.map(sanitizeTransferredPackageExtension),
+  };
+}
+
+function migrateLegacyPackageExtension(extension: LegacyTransferExtension): ExtensionEntity {
+  const remote = extension.sourceKind === "remote-zip"
+    || extension.sourceKind === "remote-crx"
+    || Boolean(extension.sourceId);
+  if (!remote) return { ...extension };
+  return {
+    ...extension,
+    sourceKind: "managed-snapshot",
+    sourceUrl: "",
+    sourceId: undefined,
+    updatePolicy: "pinned",
+    artifactArchivePath: undefined,
+    updateProviderId: undefined,
+    updateState: { status: "provider-disabled" },
+    provenance: {
+      schemaVersion: 1,
+      artifact: {
+        providerId: "legacy",
+        legacySourceUrl: extension.sourceUrl || undefined,
+        format: extension.sourceKind === "remote-zip" ? "zip" : "unknown",
+        sha256: extension.sha256,
+        retained: false,
+      },
+      verification: {
+        level: "legacy-unknown",
+        manifestSha256: extension.manifestSha256,
+      },
     },
   };
 }
 
-function parsePackageData(input: unknown): EnvironmentPackageData {
-  if (!isRecord(input)) throw Object.assign(new Error("Package data must be an object."), { status: 400 });
-  if (input.schemaVersion !== ENVIRONMENT_PACKAGE_SCHEMA_VERSION) throw Object.assign(new Error("Unsupported package data schema version."), { status: 400 });
-  if (!Array.isArray(input.environments)) throw Object.assign(new Error("Package data must include environments."), { status: 400 });
-  if (!Array.isArray(input.groups)) throw Object.assign(new Error("Package data must include groups."), { status: 400 });
-  if (!Array.isArray(input.extensions)) throw Object.assign(new Error("Package data must include extensions."), { status: 400 });
+function portablePackageData(data: EnvironmentPackageData): EnvironmentPackageData {
   return {
-    schemaVersion: ENVIRONMENT_PACKAGE_SCHEMA_VERSION,
-    environments: input.environments as BrowserEnvironment[],
-    groups: input.groups as GroupEntity[],
-    extensions: input.extensions.map((extension) => {
-      if (!isRecord(extension)) throw Object.assign(new Error("Package extensions must be objects."), { status: 400 });
-      return extensionForLegacyTransfer(extension as unknown as ExtensionEntity);
-    }),
-    environmentExtensionBindings: normalizeExtensionBindingMetadata(input.environmentExtensionBindings),
+    ...data,
+    environments: data.environments.map(withoutPackageExtensionPaths),
+    extensions: data.extensions.map(sanitizeTransferredPackageExtension),
   };
 }
 
-function validateManifestData(manifest: EnvironmentPackageManifest, data: EnvironmentPackageData): void {
-  if (manifest.counts.environments !== data.environments.length) {
-    throw Object.assign(new Error("Package environment count does not match manifest."), { status: 400 });
+function withoutPackageExtensionPaths(environment: BrowserEnvironment): BrowserEnvironment {
+  return {
+    ...environment,
+    runtimeProfile: {
+      ...environment.runtimeProfile,
+      runtime: {
+        ...environment.runtimeProfile.runtime,
+        extensionPaths: [],
+      },
+    },
+  };
+}
+
+function sanitizeTransferredPackageExtension(extension: ExtensionEntity): ExtensionEntity {
+  if (extension.provenance?.artifact.retained) {
+    const archivePath = `extension-artifacts/${extension.id}/current.crx`;
+    return {
+      ...extension,
+      sourceKind: "local-crx",
+      sourceUrl: archivePath,
+      sourceId: undefined,
+      artifactArchivePath: archivePath,
+      localPath: undefined,
+      directoryMode: undefined,
+    };
   }
-  if (manifest.counts.groups !== data.groups.length) {
-    throw Object.assign(new Error("Package group count does not match manifest."), { status: 400 });
+  const hadRemoteAuthority = extension.sourceKind === "remote-zip"
+    || extension.sourceKind === "remote-crx"
+    || Boolean(extension.sourceId)
+    || Boolean(extension.updateProviderId)
+    || Boolean(extension.provenance?.artifact.legacySourceUrl);
+  return {
+    ...extension,
+    sourceKind: "managed-snapshot",
+    sourceUrl: "",
+    sourceId: undefined,
+    artifactArchivePath: undefined,
+    updateProviderId: undefined,
+    updateState: hadRemoteAuthority ? { status: "provider-disabled" } : undefined,
+    updatePolicy: "pinned",
+    localPath: undefined,
+    directoryMode: undefined,
+  };
+}
+
+async function validateStagedRetainedArtifacts(
+  data: EnvironmentPackageData,
+  stagingDir: string,
+  verifyFile: typeof verifyChromeWebStoreCrx3File,
+  preflightPackage: typeof preflightExtensionPackage,
+): Promise<void> {
+  const extensionById = new Map(data.extensions.map((extension) => [extension.id, extension]));
+  for (const artifact of data.retainedExtensionArtifacts) {
+    const extension = extensionById.get(artifact.extensionId);
+    if (!extension) throw packageInvalid(`Retained artifact references an unknown extension ${artifact.extensionId}.`);
+    if (extension.artifactArchivePath !== artifact.archivePath || extension.sourceUrl !== artifact.archivePath) {
+      throw packageInvalid(`Retained artifact path disagrees with extension ${artifact.extensionId}.`);
+    }
+    const stagedPath = path.join(stagingDir, ...artifact.archivePath.split("/"));
+    const unpackedRoot = path.join(stagingDir, "extensions", extension.id);
+    await validateTransferredExtensionArtifact({
+      extension,
+      artifactPath: stagedPath,
+      expectedSha256: artifact.sha256,
+      validationDir: path.join(stagingDir, ".artifact-validation", artifact.extensionId),
+      unpackedRoot: await pathExists(unpackedRoot) ? unpackedRoot : undefined,
+      verifyFile,
+      preflightPackage,
+    });
   }
-  if (manifest.counts.extensions !== data.extensions.length) {
-    throw Object.assign(new Error("Package extension count does not match manifest."), { status: 400 });
+}
+
+async function sha256File(filePath: string): Promise<string> {
+  const handle = await fs.open(filePath, "r");
+  const hash = createHash("sha256");
+  try {
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let position = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, position);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    return hash.digest("hex");
+  } finally {
+    await handle.close();
+  }
+}
+
+function packageInvalid(message: string): Error {
+  return Object.assign(new Error(message), { status: 400, code: "ENVIRONMENT_PACKAGE_SCHEMA_INVALID" });
+}
+
+function validatePackageExtensionReferences(data: EnvironmentPackageData): void {
+  const extensionIds = new Set(data.extensions.map((extension) => extension.id));
+  for (const environment of data.environments) {
+    for (const extensionId of environment.extensionIds) {
+      if (!extensionIds.has(extensionId)) {
+        throw packageInvalid(`Environment ${environment.id} references unknown extension ${extensionId}.`);
+      }
+    }
+  }
+  const bindingPairs = new Set<string>();
+  for (const binding of data.environmentExtensionBindings ?? []) {
+    if (!data.environments.some((environment) => environment.id === binding.environmentId)) {
+      throw packageInvalid(`Binding references unknown environment ${binding.environmentId}.`);
+    }
+    if (!extensionIds.has(binding.extensionId)) {
+      throw packageInvalid(`Binding references unknown extension ${binding.extensionId}.`);
+    }
+    const pair = `${binding.environmentId}\0${binding.extensionId}`;
+    if (bindingPairs.has(pair)) throw packageInvalid("Package contains duplicate extension bindings.");
+    bindingPairs.add(pair);
+    if (!data.environments.find((environment) => environment.id === binding.environmentId)?.extensionIds.includes(binding.extensionId)) {
+      throw packageInvalid("Package binding metadata references an unbound entity pair.");
+    }
   }
 }
 
@@ -599,6 +942,17 @@ async function countExistingDirectories(paths: string[]): Promise<number> {
     if (await pathExists(itemPath)) count += 1;
   }
   return count;
+}
+
+async function readPackageManifestKeys(
+  extensions: ExtensionEntity[],
+  stagingDir: string,
+): Promise<Record<string, string>> {
+  const entries = await Promise.all(extensions.map(async (extension) => {
+    const key = await readManifestKey(path.join(stagingDir, "extensions", extension.id));
+    return key ? ([extension.id, key] as const) : undefined;
+  }));
+  return Object.fromEntries(entries.filter((entry): entry is [string, string] => Boolean(entry)));
 }
 
 async function readManifestKey(directory: string): Promise<string | undefined> {

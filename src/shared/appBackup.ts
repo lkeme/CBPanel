@@ -11,6 +11,7 @@ import {
 import {
   extensionForLegacyTransfer,
   normalizeExtensionAuthorityFields,
+  downgradeIncompleteExtensionAuthority,
   type LegacyTransferExtension,
 } from "./extensionAcquisition";
 import type { BrowserProfile } from "./profile";
@@ -19,13 +20,12 @@ import type { AppSettings } from "./settings";
 export const APP_BACKUP_KIND = "cbpanel.appBackup";
 export const APP_BACKUP_SCHEMA_VERSION_V1 = 1;
 export const APP_BACKUP_SCHEMA_VERSION_V2 = 2;
-/** Production writers remain v1 until retained-artifact verification/rebasing lands in Child 3. */
-export const APP_BACKUP_SCHEMA_VERSION = APP_BACKUP_SCHEMA_VERSION_V1;
+export const APP_BACKUP_SCHEMA_VERSION = APP_BACKUP_SCHEMA_VERSION_V2;
 
 export type AppBackupOperationType = "export" | "restore";
 export type AppBackupOperationStatus = "queued" | "running" | "succeeded" | "failed";
 
-export interface AppBackupCounts {
+export interface AppBackupCountsV1 {
   profiles: number;
   environments: number;
   trashEnvironments: number;
@@ -38,18 +38,18 @@ export interface AppBackupCounts {
   runtimeExtensions: number;
 }
 
-export interface AppBackupManifest {
+export interface AppBackupManifestV1 {
   kind: typeof APP_BACKUP_KIND;
-  schemaVersion: typeof APP_BACKUP_SCHEMA_VERSION;
+  schemaVersion: typeof APP_BACKUP_SCHEMA_VERSION_V1;
   exportedAt: string;
   containsSecrets: true;
   containsBrowserData: boolean;
   containsExtensions: boolean;
-  counts: AppBackupCounts;
+  counts: AppBackupCountsV1;
 }
 
-export interface AppBackupData {
-  schemaVersion: typeof APP_BACKUP_SCHEMA_VERSION;
+export interface AppBackupDataV1 {
+  schemaVersion: typeof APP_BACKUP_SCHEMA_VERSION_V1;
   settings: AppSettings;
   profiles: BrowserProfile[];
   environments: BrowserEnvironment[];
@@ -61,16 +61,13 @@ export interface AppBackupData {
   environmentExtensionBindings?: ExtensionBindingMetadata[];
 }
 
-export type AppBackupManifestV1 = AppBackupManifest;
-export type AppBackupDataV1 = AppBackupData;
-
 export interface ExtensionArtifactTransferEntry {
   extensionId: string;
   archivePath: string;
   sha256: string;
 }
 
-export type AppBackupCountsV2 = Omit<AppBackupCounts, "extensionSources"> & {
+export type AppBackupCountsV2 = Omit<AppBackupCountsV1, "extensionSources"> & {
   retainedExtensionArtifacts: number;
 };
 
@@ -97,10 +94,14 @@ export interface AppBackupDataV2 {
   environmentExtensionBindings?: ExtensionBindingMetadata[];
 }
 
+export type AppBackupCounts = AppBackupCountsV2;
+export type AppBackupManifest = AppBackupManifestV2;
+export type AppBackupData = AppBackupDataV2;
+
 export type AnyAppBackupManifest = AppBackupManifestV1 | AppBackupManifestV2;
 export type AnyAppBackupData = AppBackupDataV1 | AppBackupDataV2;
 
-/** Pure discriminator used by Child 3 before filesystem publication; current services still accept v1 only. */
+/** Discriminates the one-way legacy reader from the current portable schema. */
 export function decodeAppBackupData(input: unknown): AnyAppBackupData {
   const record = backupRecord(input, "Backup data");
   const common = decodeBackupCollections(record);
@@ -119,7 +120,11 @@ export function decodeAppBackupData(input: unknown): AnyAppBackupData {
       throw backupError("Backup v2 data must include retainedExtensionArtifacts.");
     }
     const extensions = common.extensions.map(normalizeV2Extension);
-    const retainedExtensionArtifacts = record.retainedExtensionArtifacts.map(normalizeArtifactTransferEntry);
+    const retainedExtensionArtifacts = record.retainedExtensionArtifacts.map(normalizeArtifactTransferEntry)
+      .filter((entry) => {
+        const extension = extensions.find((candidate) => candidate.id === entry.extensionId);
+        return !extension || extension.provenance?.artifact.retained !== false;
+      });
     validateExtensionArtifactTransfers(extensions, retainedExtensionArtifacts);
     return {
       schemaVersion: APP_BACKUP_SCHEMA_VERSION_V2,
@@ -145,6 +150,12 @@ export function validateExtensionArtifactTransfers(
     if (!extension.provenance?.artifact.retained || !extension.artifactArchivePath) {
       throw backupError("Retained extension artifact lacks retained provenance.");
     }
+    if (
+      (!isRelativePortableArtifactPath(extension.artifactArchivePath) && extension.artifactArchivePath !== entry.archivePath)
+      || (!isRelativePortableArtifactPath(extension.sourceUrl) && extension.sourceUrl !== entry.archivePath)
+    ) {
+      throw backupError("Retained extension artifact path disagrees with its portable archive entry.");
+    }
     if (entry.sha256 !== extension.provenance.artifact.sha256) {
       throw backupError("Retained extension artifact fingerprint disagrees with provenance.");
     }
@@ -160,6 +171,10 @@ export function validateExtensionArtifactTransfers(
   }
 }
 
+function isRelativePortableArtifactPath(value: string | undefined): boolean {
+  return typeof value === "string" && /^extension-artifacts\/[A-Za-z0-9_-]{1,256}\/current\.crx$/.test(value);
+}
+
 function decodeBackupCollections(record: Record<string, unknown>): Omit<
   AppBackupDataV2,
   "schemaVersion" | "retainedExtensionArtifacts" | "environmentExtensionBindings"
@@ -168,6 +183,7 @@ function decodeBackupCollections(record: Record<string, unknown>): Omit<
     if (!Array.isArray(record[field])) throw backupError(`Backup data must include ${field}.`);
   }
   if (!backupIsRecord(record.settings)) throw backupError("Backup data must include settings.");
+  validateBackupTransferIds(record);
   return {
     settings: record.settings as unknown as AppSettings,
     profiles: record.profiles as BrowserProfile[],
@@ -179,9 +195,42 @@ function decodeBackupCollections(record: Record<string, unknown>): Omit<
   };
 }
 
+function validateBackupTransferIds(record: Record<string, unknown>): void {
+  const collections: Array<{ value: unknown; label: string }> = [];
+  for (const [index, value] of (record.profiles as unknown[]).entries()) collections.push({ value, label: `profile ${index}` });
+  for (const [index, value] of (record.environments as unknown[]).entries()) collections.push({ value, label: `environment ${index}` });
+  for (const [index, value] of (record.groups as unknown[]).entries()) collections.push({ value, label: `group ${index}` });
+  for (const [index, value] of (record.tags as unknown[]).entries()) collections.push({ value, label: `tag ${index}` });
+  for (const [index, value] of (record.proxies as unknown[]).entries()) collections.push({ value, label: `proxy ${index}` });
+  for (const [index, value] of (record.extensions as unknown[]).entries()) collections.push({ value, label: `extension ${index}` });
+  for (const item of collections) {
+    const value = backupRecord(item.value, `Backup ${item.label}`);
+    assertSafeTransferId(value.id, `Backup ${item.label} id`);
+    if (Array.isArray(value.extensionIds)) {
+      for (const extensionId of value.extensionIds) assertSafeTransferId(extensionId, `Backup ${item.label} extension id`);
+    }
+  }
+}
+
+function assertSafeTransferId(value: unknown, label: string): void {
+  if (
+    typeof value !== "string"
+    || !value.trim()
+    || value.length > 256
+    || /[\\/\u0000-\u001f\u007f]/.test(value)
+    || value === "."
+    || value === ".."
+    || /^[a-z]:/i.test(value)
+    || value.startsWith("\\\\")
+    || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(value)
+  ) {
+    throw backupError(`${label} is unsafe.`);
+  }
+}
+
 function normalizeV2Extension(input: ExtensionEntity): ExtensionEntity {
   const record = backupRecord(input, "Backup extension");
-  const authority = normalizeExtensionAuthorityFields(record);
+  const authority = downgradeIncompleteExtensionAuthority(normalizeExtensionAuthorityFields(record, { allowLegacyIncomplete: true }));
   return {
     ...record,
     ...authority,
@@ -193,6 +242,7 @@ function normalizeV2Extension(input: ExtensionEntity): ExtensionEntity {
 function normalizeArtifactTransferEntry(input: unknown): ExtensionArtifactTransferEntry {
   const record = backupRecord(input, "Retained extension artifact");
   const extensionId = backupString(record.extensionId, "Retained extension artifact id");
+  assertSafeTransferId(extensionId, "Retained extension artifact id");
   const archivePath = backupString(record.archivePath, "Retained extension artifact path");
   if (archivePath.includes("\\") || archivePath.startsWith("/") || /^[a-z]:/i.test(archivePath)) {
     throw backupError("Retained extension artifact path must be relative.");

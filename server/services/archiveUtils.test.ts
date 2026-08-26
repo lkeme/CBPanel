@@ -84,6 +84,19 @@ test("isSafeArchivePath rejects traversal, absolute and drive-qualified names", 
   }
 });
 
+test("isSafeArchivePath rejects cross-platform ADS, device, control, and ambiguous segments", () => {
+  for (const candidate of [
+    "extensions/item/file.txt:secret",
+    "extensions/CON/config.json",
+    "extensions/item./manifest.json",
+    "extensions/item /manifest.json",
+    "extensions/./manifest.json",
+    "extensions/item/manifest\u0000.json",
+  ]) {
+    assert.equal(isSafeArchivePath(candidate), false, candidate);
+  }
+});
+
 test("safeJoin resolves inside the root and rejects anything that escapes it", () => {
   const root = path.resolve("/tmp/extract-root");
 

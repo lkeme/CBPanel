@@ -104,9 +104,11 @@ export interface ExtensionProvenanceV1 {
   };
   artifact: {
     providerId: ExtensionArtifactProviderId | "manual-local" | "legacy";
+    /** Historical provenance only; never executable network or filesystem authority. */
+    legacySourceUrl?: string;
     finalByteHost?: string;
     fetchedAt?: string;
-    format: "crx3" | "crx2" | "zip" | "directory";
+    format: "crx3" | "crx2" | "zip" | "directory" | "unknown";
     size?: number;
     sha256?: string;
     retained: boolean;
@@ -115,10 +117,13 @@ export interface ExtensionProvenanceV1 {
     level: ExtensionVerificationLevel;
     verifiedAt?: string;
     proofDerivedStoreId?: string;
-    developerKeySha256?: string;
+      developerKeySha256?: string;
+      publisherKeySha256?: string;
     publisherTrustRootId?: string;
-    publisherTrustRootVersion?: number;
-    manifestSha256?: string;
+      publisherTrustRootVersion?: number;
+      manifestSha256?: string;
+      /** Fingerprint of the committed unpacked tree after the exact developer key is applied. */
+      treeSha256?: string;
   };
   transfer?: {
     kind: "direct-acquisition" | "full-backup-restore" | "environment-package-import";
@@ -139,6 +144,8 @@ export type ExtensionAuthorityFields = Pick<
 >;
 
 export interface ExtensionCatalogItem {
+  /** Opaque server-side handle for optional catalog facts; never a provider token. */
+  observationId?: string;
   namespace: ExtensionStoreNamespace;
   storeId: string;
   storeUrl: string;
@@ -224,6 +231,20 @@ export type ExtensionAcquisitionErrorCode =
   | "CRX_DEVELOPER_PROOF_INVALID"
   | "CRX_ID_MISMATCH"
   | "CWS_PUBLISHER_PROOF_REQUIRED"
+  | "EXTENSION_ARCHIVE_INVALID"
+  | "EXTENSION_ARCHIVE_UNSAFE_PATH"
+  | "EXTENSION_ARCHIVE_RESOURCE_LIMIT"
+  | "EXTENSION_MANIFEST_INVALID"
+  | "ACQUISITION_TEMP_BUDGET_EXCEEDED"
+  | "ACQUISITION_SESSION_NOT_FOUND"
+  | "ACQUISITION_SESSION_NOT_READY"
+  | "ACQUISITION_SESSION_CONSUMED"
+  | "ACQUISITION_CONFLICT_TARGET_INVALID"
+  | "ACQUISITION_IDENTITY_CONFLICT"
+  | "ACQUISITION_PERMISSION_INCREASE"
+  | "ACQUISITION_UPDATE_PROVIDER_INVALID"
+  | "ACQUISITION_RECONCILIATION_REQUIRED"
+  | "ACQUISITION_COMMIT_FAILED"
   | "ACQUISITION_CANCELLED"
   | "ACQUISITION_EXPIRED";
 
@@ -238,27 +259,112 @@ export interface ExtensionPreflightReport {
   };
   package: {
     name: string;
+    description: string;
     version: string;
     manifestVersion: number;
     format: "crx3";
     size: number;
     sha256: string;
+    manifestSha256: string;
+    treeSha256: string;
+    entryCount: number;
+    filesystemNodeCount: number;
+    fileCount: number;
+    expandedBytes: number;
+    icon?: {
+      relativePath: string;
+      mimeType: string;
+      size: number;
+    };
   };
   transport: {
     selectedProviderId: ExtensionArtifactProviderId;
     finalByteHost: string;
     fetchedAt: string;
+    durationMs: number;
   };
   verification: {
     level: "cws-publisher-verified";
     developerKeySha256: string;
     publisherTrustRootId: string;
     publisherTrustRootVersion: number;
+    developerProofAlgorithm: "rsa-sha256" | "ecdsa-sha256";
+    publisherProofAlgorithm: "rsa-sha256" | "ecdsa-sha256";
   };
   permissions: string[];
   hostPermissions: string[];
+  optionalPermissions: string[];
+  optionalHostPermissions: string[];
   permissionRisks: ExtensionPermissionRisk[];
   discrepancies: Array<{ field: "name" | "version"; catalog?: string; package: string }>;
+  permissionApproval?: {
+    token: string;
+    added: string[];
+  };
+  catalog?: {
+    providerId: ExtensionCatalogProviderId;
+    observedAt: string;
+  };
+  conflicts: ExtensionAcquisitionConflictCandidate[];
+}
+
+export type ExtensionAcquisitionPurpose = "install" | "update";
+export type ExtensionAcquisitionSessionStatus =
+  | "created"
+  | "downloading"
+  | "verifying"
+  | "analyzing"
+  | "ready"
+  | "committing"
+  | "consumed"
+  | "rejected"
+  | "cancelled"
+  | "expired";
+
+export interface ExtensionAcquisitionConflictCandidate {
+  extensionId: string;
+  name: string;
+  version: string;
+  installState: ExtensionEntity["installState"];
+  matchBy: "store-identity" | "developer-identity" | "metadata-store-id";
+  eligible: boolean;
+  blockingReason?: "developer-identity-mismatch" | "ambiguous-metadata" | "installed-identity-missing";
+}
+
+export interface ExtensionAcquisitionSessionError {
+  code: ExtensionAcquisitionErrorCode;
+  message: string;
+}
+
+export interface ExtensionAcquisitionSessionView {
+  sessionId: string;
+  purpose: ExtensionAcquisitionPurpose;
+  namespace: ExtensionStoreNamespace;
+  storeId: string;
+  selectedProviderId: ExtensionArtifactProviderId;
+  status: ExtensionAcquisitionSessionStatus;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt?: string;
+  downloadedBytes?: number;
+  report?: ExtensionPreflightReport;
+  error?: ExtensionAcquisitionSessionError;
+}
+
+export interface ExtensionAcquisitionSessionCreateRequest {
+  namespace: ExtensionStoreNamespace;
+  storeId: string;
+  artifactProviderId: ExtensionArtifactProviderId;
+  purpose: ExtensionAcquisitionPurpose;
+  targetExtensionId?: string;
+  catalogObservationId?: string;
+}
+
+export interface ExtensionAcquisitionSessionConfirmRequest {
+  disposition: "create" | "upgrade" | "reuse";
+  targetExtensionId?: string;
+  environmentIds?: string[];
+  permissionApprovalToken?: string;
 }
 
 export function isCanonicalChromeExtensionId(value: unknown): value is string {
@@ -344,7 +450,7 @@ export function normalizeExtensionProvenance(input: unknown): ExtensionProvenanc
     ["chrome-web-store", "crxsoso", "manual-local", "legacy"] as const,
     "Extension artifact provider",
   );
-  const format = enumField(artifact.format, ["crx3", "crx2", "zip", "directory"] as const, "Extension artifact format");
+  const format = enumField(artifact.format, ["crx3", "crx2", "zip", "directory", "unknown"] as const, "Extension artifact format");
   if (typeof artifact.retained !== "boolean") throw contractError("Extension artifact retained must be boolean.");
   const level = enumField(
     verification.level,
@@ -382,6 +488,7 @@ export function normalizeExtensionProvenance(input: unknown): ExtensionProvenanc
     catalog,
     artifact: {
       providerId,
+      legacySourceUrl: optionalString(artifact.legacySourceUrl, "Legacy artifact source URL"),
       finalByteHost: optionalHostname(artifact.finalByteHost, "Artifact byte host"),
       fetchedAt: optionalIsoTimestamp(artifact.fetchedAt, "Artifact fetch time"),
       format,
@@ -394,12 +501,14 @@ export function normalizeExtensionProvenance(input: unknown): ExtensionProvenanc
       verifiedAt: optionalIsoTimestamp(verification.verifiedAt, "Verification time"),
       proofDerivedStoreId: optionalCanonicalId(verification.proofDerivedStoreId, "Proof-derived store id"),
       developerKeySha256: optionalSha256(verification.developerKeySha256, "Developer key fingerprint"),
+      publisherKeySha256: optionalSha256(verification.publisherKeySha256, "Publisher key fingerprint"),
       publisherTrustRootId: optionalString(verification.publisherTrustRootId, "Publisher trust root id"),
       publisherTrustRootVersion: optionalNonNegativeNumber(
         verification.publisherTrustRootVersion,
         "Publisher trust root version",
       ),
       manifestSha256: optionalSha256(verification.manifestSha256, "Manifest fingerprint"),
+      treeSha256: optionalSha256(verification.treeSha256, "Extension tree fingerprint"),
     },
     transfer,
   };
@@ -435,13 +544,23 @@ export function normalizeExtensionUpdateState(input: unknown): ExtensionUpdateSt
   };
 }
 
-export function normalizeExtensionAuthorityFields(input: unknown): ExtensionAuthorityFields {
+export function normalizeExtensionAuthorityFields(
+  input: unknown,
+  options: { allowLegacyIncomplete?: boolean } = {},
+): ExtensionAuthorityFields {
   const record = requiredRecord(input, "Extension authority fields");
   const storeIdentity = normalizeExtensionStoreIdentity(record.storeIdentity);
   const provenance = normalizeExtensionProvenance(record.provenance);
   const artifactArchivePath = optionalString(record.artifactArchivePath, "Extension artifact archive path");
   const updateProviderId = normalizeExtensionUpdateProviderId(record.updateProviderId);
   const updateState = normalizeExtensionUpdateState(record.updateState);
+  if (
+    !options.allowLegacyIncomplete
+    && provenance?.verification.level === "cws-publisher-verified"
+    && (!provenance.verification.publisherKeySha256 || !provenance.verification.treeSha256)
+  ) {
+    throw contractError("Fresh Web Store publisher verification requires publisher and tree fingerprints.");
+  }
 
   if (storeIdentity) {
     if (record.storeId !== undefined && record.storeId !== storeIdentity.storeId) {
@@ -490,6 +609,39 @@ export function normalizeExtensionAuthorityFields(input: unknown): ExtensionAuth
     }
   }
   return { storeIdentity, provenance, artifactArchivePath, updateProviderId, updateState };
+}
+
+/** Converts pre-tree-fingerprint verified claims into non-authoritative legacy evidence. */
+export function downgradeIncompleteExtensionAuthority(
+  authority: ExtensionAuthorityFields,
+): ExtensionAuthorityFields {
+  const provenance = authority.provenance;
+  if (
+    !provenance
+    || provenance.verification.level !== "cws-publisher-verified"
+    || (provenance.verification.publisherKeySha256 && provenance.verification.treeSha256)
+  ) return authority;
+  return {
+    storeIdentity: undefined,
+    provenance: {
+      schemaVersion: 1,
+      artifact: {
+        providerId: "legacy",
+        legacySourceUrl: provenance.artifact.legacySourceUrl,
+        format: provenance.artifact.format,
+        sha256: provenance.artifact.sha256,
+        retained: false,
+      },
+      verification: {
+        level: "legacy-unknown",
+        manifestSha256: provenance.verification.manifestSha256,
+      },
+      transfer: provenance.transfer,
+    },
+    artifactArchivePath: undefined,
+    updateProviderId: undefined,
+    updateState: { status: "provider-disabled" },
+  };
 }
 
 export type LegacyTransferExtension = Omit<
@@ -629,6 +781,12 @@ function optionalNonNegativeNumber(value: unknown, label: string): number | unde
 
 function assertProvenanceInvariants(provenance: ExtensionProvenanceV1): void {
   const { artifact, verification } = provenance;
+  if (artifact.retained && !artifact.sha256) {
+    throw contractError("Retained artifact provenance requires a file fingerprint.");
+  }
+  if (artifact.legacySourceUrl && artifact.providerId !== "legacy") {
+    throw contractError("Only legacy provenance can retain a historical source URL.");
+  }
   if (artifact.providerId === "legacy" && verification.level !== "legacy-unknown") {
     throw contractError("Legacy artifact provenance cannot claim a fresh verification level.");
   }
@@ -653,6 +811,8 @@ function assertProvenanceInvariants(provenance: ExtensionProvenanceV1): void {
       || verification.developerKeySha256
       || verification.publisherTrustRootId
       || verification.publisherTrustRootVersion !== undefined
+      || verification.publisherKeySha256
+      || verification.treeSha256
     ) {
       throw contractError("Unverified artifact provenance cannot carry cryptographic identity evidence.");
     }

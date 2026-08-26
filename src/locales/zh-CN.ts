@@ -576,6 +576,7 @@ export const zhCN = {
   "extension.kind.localDirectory": "本地目录",
   "extension.kind.localZip": "ZIP 包",
   "extension.kind.localCrx": "CRX 包",
+  "extension.kind.managedSnapshot": "托管快照",
   "extension.kind.remoteZip": "远程 ZIP",
   "extension.kind.remoteCrx": "远程 CRX",
   "extension.kind.chromeWebStore": "Chrome 应用商店",

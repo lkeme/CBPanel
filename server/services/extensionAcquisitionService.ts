@@ -89,6 +89,17 @@ type SearchOperation = {
   controller: AbortController;
 };
 
+export interface ExtensionCatalogObservation {
+  observationId: string;
+  storeId: string;
+  providerId: ExtensionCatalogProviderId;
+  observedAt: string;
+  name: string;
+  version?: string;
+}
+
+type CatalogObservationState = ExtensionCatalogObservation & { expiresAt: number };
+
 type NormalizedProviderPage = {
   items: ExtensionCatalogItem[];
   excludedNonCanonicalCount: number;
@@ -126,6 +137,8 @@ export class ExtensionAcquisitionService {
 
   private readonly health = new Map<ExtensionAcquisitionCapabilityId, ExtensionCapabilityHealth>();
 
+  private readonly observations = new Map<string, CatalogObservationState>();
+
   private activeSearch?: SearchOperation;
 
   private searchSequence = 0;
@@ -156,6 +169,17 @@ export class ExtensionAcquisitionService {
   /** Called by the settings write path so disabling/revoking a gate aborts before another API read. */
   settingsChanged(settings: AppSettings): void {
     this.observeSearchGates(normalizeSettings(settings));
+  }
+
+  catalogObservation(observationId: string, storeId: string): ExtensionCatalogObservation | undefined {
+    if (!isValidExtensionAcquisitionCursor(observationId) || !isCanonicalChromeExtensionId(storeId)) return undefined;
+    const observation = this.observations.get(observationId);
+    if (!observation || observation.storeId !== storeId || observation.expiresAt <= this.now()) {
+      this.observations.delete(observationId);
+      return undefined;
+    }
+    const { expiresAt: _expiresAt, ...view } = observation;
+    return { ...view };
   }
 
   async search(
@@ -221,7 +245,10 @@ export class ExtensionAcquisitionService {
       this.recordHealth("crxsoso-search", "healthy");
       return {
         query: normalizedRequest.query,
-        items: page.items,
+        items: page.items.map((item) => ({
+          ...item,
+          observationId: this.issueObservation(item),
+        })),
         excludedNonCanonicalCount: page.excludedNonCanonicalCount,
         ...(nextCursor ? { cursor: nextCursor } : {}),
         hasMore: page.hasMore,
@@ -263,6 +290,7 @@ export class ExtensionAcquisitionService {
     if (!settings.extensionAcquisition.crxsosoSearchEnabled) {
       this.cancelActiveSearch(new ExtensionAcquisitionError("CATALOG_PROVIDER_DISABLED"));
       this.deleteCursors("crxsoso");
+      this.observations.clear();
       return;
     }
     if (
@@ -271,6 +299,7 @@ export class ExtensionAcquisitionService {
     ) {
       this.cancelActiveSearch(new ExtensionAcquisitionError("CATALOG_DISCLOSURE_REQUIRED"));
       this.deleteCursors("crxsoso");
+      this.observations.clear();
     }
   }
 
@@ -358,6 +387,32 @@ export class ExtensionAcquisitionService {
       return cursor;
     }
     throw new Error("Could not allocate an extension catalog cursor.");
+  }
+
+  private issueObservation(item: ExtensionCatalogItem): string {
+    const now = this.now();
+    for (const [id, observation] of this.observations) {
+      if (observation.expiresAt <= now) this.observations.delete(id);
+    }
+    while (this.observations.size >= this.maxCursorEntries) {
+      const oldest = this.observations.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.observations.delete(oldest);
+    }
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const observationId = randomBytes(24).toString("base64url");
+      if (this.observations.has(observationId)) continue;
+      this.observations.set(observationId, {
+        observationId,
+        storeId: item.storeId,
+        providerId: item.catalogProviderId,
+        observedAt: item.observedAt,
+        name: item.name,
+        expiresAt: now + this.cursorTtlMs,
+      });
+      return observationId;
+    }
+    throw new Error("Could not allocate an extension catalog observation.");
   }
 
   private ensureCursorCapacity(): void {
@@ -609,21 +664,37 @@ function publicErrorStatus(code: ExtensionAcquisitionErrorCode): number {
     case "ACQUISITION_INPUT_EMPTY":
     case "ACQUISITION_INPUT_UNSUPPORTED":
     case "EXTENSION_CATALOG_CURSOR_INVALID":
+    case "EXTENSION_ARCHIVE_INVALID":
+    case "EXTENSION_ARCHIVE_UNSAFE_PATH":
+    case "EXTENSION_ARCHIVE_RESOURCE_LIMIT":
+    case "EXTENSION_MANIFEST_INVALID":
       return 400;
     case "CATALOG_DISCLOSURE_REQUIRED":
       return 428;
     case "CATALOG_PROVIDER_DISABLED":
     case "ARTIFACT_PROVIDER_DISABLED":
+    case "ACQUISITION_SESSION_NOT_READY":
+    case "ACQUISITION_SESSION_CONSUMED":
+    case "ACQUISITION_CONFLICT_TARGET_INVALID":
+    case "ACQUISITION_IDENTITY_CONFLICT":
+    case "ACQUISITION_PERMISSION_INCREASE":
+    case "ACQUISITION_UPDATE_PROVIDER_INVALID":
       return 409;
+    case "ACQUISITION_RECONCILIATION_REQUIRED":
+      return 503;
     case "EXTENSION_CATALOG_CURSOR_EXPIRED":
     case "ACQUISITION_EXPIRED":
+    case "ACQUISITION_SESSION_NOT_FOUND":
       return 410;
     case "EXTENSION_CATALOG_RATE_LIMITED":
       return 429;
     case "ACQUISITION_CANCELLED":
       return 499;
     case "ARTIFACT_TOO_LARGE":
+    case "ACQUISITION_TEMP_BUDGET_EXCEEDED":
       return 413;
+    case "ACQUISITION_COMMIT_FAILED":
+      return 500;
     case "EXTENSION_CATALOG_TIMEOUT":
     case "ARTIFACT_TIMEOUT":
       return 504;
@@ -682,6 +753,34 @@ function publicErrorMessage(code: ExtensionAcquisitionErrorCode): string {
     case "CRX_ID_MISMATCH":
     case "CWS_PUBLISHER_PROOF_REQUIRED":
       return "The package did not satisfy remote store verification requirements.";
+    case "EXTENSION_ARCHIVE_INVALID":
+      return "The extension package archive is invalid.";
+    case "EXTENSION_ARCHIVE_UNSAFE_PATH":
+      return "The extension package contains an unsafe path or entry type.";
+    case "EXTENSION_ARCHIVE_RESOURCE_LIMIT":
+      return "The extension package exceeds safe extraction limits.";
+    case "EXTENSION_MANIFEST_INVALID":
+      return "The extension package Manifest is missing or invalid.";
+    case "ACQUISITION_TEMP_BUDGET_EXCEEDED":
+      return "Extension acquisition temporary storage is full.";
+    case "ACQUISITION_SESSION_NOT_FOUND":
+      return "The extension acquisition session no longer exists.";
+    case "ACQUISITION_SESSION_NOT_READY":
+      return "The extension acquisition session is not ready to confirm.";
+    case "ACQUISITION_SESSION_CONSUMED":
+      return "The extension acquisition session was already consumed.";
+    case "ACQUISITION_CONFLICT_TARGET_INVALID":
+      return "The selected extension conflict target is no longer eligible.";
+    case "ACQUISITION_IDENTITY_CONFLICT":
+      return "The selected extension conflicts with a different verified developer identity.";
+    case "ACQUISITION_PERMISSION_INCREASE":
+      return "The extension update adds permissions and requires a separate review.";
+    case "ACQUISITION_UPDATE_PROVIDER_INVALID":
+      return "The extension is not eligible for the selected update provider.";
+    case "ACQUISITION_RECONCILIATION_REQUIRED":
+      return "The extension commit needs startup reconciliation before it can be retried.";
+    case "ACQUISITION_COMMIT_FAILED":
+      return "The verified extension could not be committed safely.";
     case "ACQUISITION_CANCELLED":
       return "The extension acquisition operation was cancelled.";
     case "ACQUISITION_EXPIRED":

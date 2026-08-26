@@ -1,15 +1,23 @@
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { normalizeExtensionBindingMetadata, type ExtensionEntity } from "../../src/shared/entities";
-import { extensionForLegacyTransfer } from "../../src/shared/extensionAcquisition";
+import type { ExtensionEntity } from "../../src/shared/entities";
+import type { LegacyTransferExtension } from "../../src/shared/extensionAcquisition";
 import {
   APP_BACKUP_KIND,
   APP_BACKUP_SCHEMA_VERSION,
+  APP_BACKUP_SCHEMA_VERSION_V1,
+  APP_BACKUP_SCHEMA_VERSION_V2,
+  decodeAppBackupData,
+  type AnyAppBackupData,
+  type AnyAppBackupManifest,
   type AppBackupCounts,
   type AppBackupData,
   type AppBackupManifest,
+  type AppBackupManifestV1,
+  type AppBackupManifestV2,
   type AppBackupOperation,
   type AppBackupOperationResult,
 } from "../../src/shared/appBackup";
@@ -25,15 +33,30 @@ import {
   replaceDirectory,
   writeZipArchive,
 } from "./archiveUtils";
+import {
+  DataMutationCoordinator,
+  type DataMutationLease,
+} from "./dataMutationCoordinator";
+import {
+  verifyChromeWebStoreCrx3File,
+} from "./crx3Verifier";
+import {
+  preflightExtensionPackage,
+} from "./extensionPackagePreflight";
+import { validateTransferredExtensionArtifact } from "./extensionArtifactTransferVerifier";
 
 type AppBackupServiceOptions = {
   repository: PanelRepository;
   browserDataDir: string;
   extensionCacheDir: string;
   extensionRuntimeDir?: string;
+  extensionArtifactDir?: string;
   activeEnvironmentIds: () => Set<string>;
   /** Runs synchronously after a restore/rollback commits settings so in-flight derived work can abort. */
   settingsChanged?: (settings: AppBackupData["settings"]) => void;
+  mutationCoordinator?: DataMutationCoordinator;
+  verifyStoreCrxFileForTesting?: typeof verifyChromeWebStoreCrx3File;
+  preflightPackageForTesting?: typeof preflightExtensionPackage;
 };
 
 type ExportRequest = {
@@ -56,6 +79,7 @@ type RollbackSnapshot = {
   directory: string;
   browserDataExisted: boolean;
   extensionCacheExisted: boolean;
+  extensionArtifactExisted: boolean;
 };
 
 const MANIFEST_ENTRY = "manifest.json";
@@ -64,17 +88,33 @@ const DATA_ENTRY = "data.json";
 export class AppBackupService {
   private readonly operations = new Map<string, AppBackupOperation>();
 
-  constructor(private readonly options: AppBackupServiceOptions) {}
+  private readonly mutationCoordinator: DataMutationCoordinator;
+
+  private readonly extensionArtifactDir: string;
+
+  private readonly verifyStoreCrxFile: typeof verifyChromeWebStoreCrx3File;
+
+  private readonly preflightPackage: typeof preflightExtensionPackage;
+
+  constructor(private readonly options: AppBackupServiceOptions) {
+    this.mutationCoordinator = options.mutationCoordinator ?? new DataMutationCoordinator();
+    this.extensionArtifactDir = options.extensionArtifactDir
+      ?? path.join(path.dirname(path.resolve(options.extensionCacheDir)), "extension-artifacts");
+    this.verifyStoreCrxFile = options.verifyStoreCrxFileForTesting ?? verifyChromeWebStoreCrx3File;
+    this.preflightPackage = options.preflightPackageForTesting ?? preflightExtensionPackage;
+  }
 
   startExport(request: ExportRequest): AppBackupOperation {
+    const lease = this.mutationCoordinator.enter("app-backup");
     const operation = this.createOperation("export", "queued", "Preparing full backup export.");
-    void this.runExport(operation.id, request);
+    void this.runExport(operation.id, request, lease);
     return operation;
   }
 
   startRestore(request: RestoreRequest): AppBackupOperation {
+    const lease = this.mutationCoordinator.enter("app-backup");
     const operation = this.createOperation("restore", "queued", "Preparing full backup restore.");
-    void this.runRestore(operation.id, request);
+    void this.runRestore(operation.id, request, lease);
     return operation;
   }
 
@@ -102,6 +142,15 @@ export class AppBackupService {
   }
 
   async exportToBackup(request: ExportRequest, operationId?: string): Promise<AppBackupOperationResult> {
+    const lease = this.mutationCoordinator.enter("app-backup");
+    try {
+      return await this.exportToBackupInternal(request, operationId);
+    } finally {
+      lease.release();
+    }
+  }
+
+  private async exportToBackupInternal(request: ExportRequest, operationId?: string): Promise<AppBackupOperationResult> {
     this.assertNoActiveEnvironment("Stop running environments before exporting a full backup.");
     const outputPath = ensureBackupExtension(path.resolve(request.outputPath));
     const data = await this.options.repository.exportFullBackupData();
@@ -119,11 +168,21 @@ export class AppBackupService {
   }
 
   async restoreFromBackup(request: RestoreRequest, operationId?: string): Promise<AppBackupOperationResult> {
+    const lease = this.mutationCoordinator.enter("app-backup");
+    try {
+      return await this.restoreFromBackupInternal(request, operationId);
+    } finally {
+      lease.release();
+    }
+  }
+
+  private async restoreFromBackupInternal(request: RestoreRequest, operationId?: string): Promise<AppBackupOperationResult> {
     this.assertNoActiveEnvironment("Stop running environments before restoring a full backup.");
     const inputPath = path.resolve(request.inputPath);
     const prepared = await this.prepareRestore(inputPath, operationId);
     const rollback = await this.createRollbackSnapshot(operationId);
     let publicationStarted = false;
+    let rollbackFailed = false;
     try {
       // Preparation and rollback snapshotting are both asynchronous. Re-read the runtime hold at the
       // publication boundary so a browser that appeared in that interval cannot have its files replaced.
@@ -142,33 +201,46 @@ export class AppBackupService {
     } catch (error) {
       // The boundary recheck can fail before a single managed path was touched. Rolling back in that case
       // is itself a destructive publication under the browser that just appeared.
-      if (publicationStarted) await this.rollbackRestore(rollback).catch(() => undefined);
+      if (publicationStarted) {
+        try {
+          await this.rollbackRestore(rollback);
+        } catch {
+          rollbackFailed = true;
+        }
+      }
+      if (rollbackFailed) {
+        throw backupInvalid("Full backup restore needs recovery from its preserved rollback snapshot.");
+      }
       throw error;
     } finally {
       await Promise.all([
         fs.rm(prepared.stagingDir, { recursive: true, force: true }).catch(() => undefined),
-        fs.rm(rollback.directory, { recursive: true, force: true }).catch(() => undefined),
+        ...(rollbackFailed ? [] : [fs.rm(rollback.directory, { recursive: true, force: true }).catch(() => undefined)]),
       ]);
     }
   }
 
-  private async runExport(operationId: string, request: ExportRequest): Promise<void> {
+  private async runExport(operationId: string, request: ExportRequest, lease: DataMutationLease): Promise<void> {
     this.markRunning(operationId, "exporting", "Exporting full backup.");
     try {
-      const result = await this.exportToBackup(request, operationId);
+      const result = await this.exportToBackupInternal(request, operationId);
       this.finishOperation(operationId, "succeeded", "Full backup exported.", result);
     } catch (error) {
       this.finishOperation(operationId, "failed", "Full backup export failed.", undefined, (error as Error).message);
+    } finally {
+      lease.release();
     }
   }
 
-  private async runRestore(operationId: string, request: RestoreRequest): Promise<void> {
+  private async runRestore(operationId: string, request: RestoreRequest, lease: DataMutationLease): Promise<void> {
     this.markRunning(operationId, "restoring", "Restoring full backup.");
     try {
-      const result = await this.restoreFromBackup(request, operationId);
+      const result = await this.restoreFromBackupInternal(request, operationId);
       this.finishOperation(operationId, "succeeded", "Full backup restored.", result);
     } catch (error) {
       this.finishOperation(operationId, "failed", "Full backup restore failed.", undefined, (error as Error).message);
+    } finally {
+      lease.release();
     }
   }
 
@@ -181,10 +253,7 @@ export class AppBackupService {
     const entries: ArchiveEntry[] = [];
     const browserDataEntries = await this.browserDataEntries(data, warnings);
     const extensionEntries = await this.extensionEntries(data.extensions, warnings);
-    const legacyData: AppBackupData = {
-      ...data,
-      extensions: data.extensions.map((extension) => extensionForLegacyTransfer(extension)),
-    };
+    const artifactEntries = await this.retainedArtifactEntries(data);
     const manifest: AppBackupManifest = {
       kind: APP_BACKUP_KIND,
       schemaVersion: APP_BACKUP_SCHEMA_VERSION,
@@ -192,13 +261,14 @@ export class AppBackupService {
       containsSecrets: true,
       containsBrowserData: browserDataEntries.count > 0,
       containsExtensions: extensionEntries.count > 0,
-      counts: backupCounts(legacyData, browserDataEntries.count, extensionEntries.count),
+      counts: backupCounts(data, browserDataEntries.count, extensionEntries.count),
     };
 
     entries.push(jsonArchiveEntry(MANIFEST_ENTRY, manifest));
-    entries.push(jsonArchiveEntry(DATA_ENTRY, legacyData));
+    entries.push(jsonArchiveEntry(DATA_ENTRY, portableBackupData(data)));
     entries.push(...browserDataEntries.entries);
     entries.push(...extensionEntries.entries);
+    entries.push(...artifactEntries);
     this.setProgress(operationId, "collecting", entries.length, entries.length, "Collected full backup entries.");
     return { entries, manifest, warnings };
   }
@@ -222,8 +292,9 @@ export class AppBackupService {
     const entries: ArchiveEntry[] = [];
     let count = 0;
     for (const extension of extensions) {
-      const directory = extension.localPath ?? path.join(this.options.extensionCacheDir, extension.id);
-      if (!(await pathExists(directory))) {
+      const directory = extension.localPath
+        ?? (extension.provenance?.artifact.retained ? undefined : path.join(this.options.extensionCacheDir, extension.id));
+      if (!directory || !(await pathExists(directory))) {
         if (extension.installState === "installed") warnings.push(`Extension files not found for ${extension.name}.`);
         continue;
       }
@@ -233,14 +304,48 @@ export class AppBackupService {
     return { count, entries };
   }
 
+  private async retainedArtifactEntries(data: AppBackupData): Promise<ArchiveEntry[]> {
+    const extensionById = new Map(data.extensions.map((extension) => [extension.id, extension]));
+    const entries: ArchiveEntry[] = [];
+    for (const artifact of data.retainedExtensionArtifacts) {
+      const extension = extensionById.get(artifact.extensionId);
+      if (!extension) throw backupInvalid("Retained extension artifact references an unknown extension.");
+      const canonicalPath = path.join(this.extensionArtifactDir, extension.id, "current.crx");
+      if (extension.artifactArchivePath !== canonicalPath || extension.sourceUrl !== canonicalPath) {
+        throw backupInvalid(`Retained extension path is not canonical for ${extension.name}.`);
+      }
+      const stats = await fs.lstat(canonicalPath).catch(() => undefined);
+      if (!stats?.isFile() || stats.isSymbolicLink() || stats.nlink !== 1) {
+        throw backupInvalid(`Retained extension artifact is missing or linked for ${extension.name}.`);
+      }
+      const fingerprint = await sha256File(canonicalPath);
+      if (fingerprint !== artifact.sha256 || fingerprint !== extension.provenance?.artifact.sha256) {
+        throw backupInvalid(`Retained extension artifact fingerprint changed for ${extension.name}.`);
+      }
+      const validationRoot = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-backup-artifact-verify-"));
+      await validateTransferredExtensionArtifact({
+        extension,
+        artifactPath: canonicalPath,
+        expectedSha256: artifact.sha256,
+        validationDir: path.join(validationRoot, "unpacked"),
+        unpackedRoot: extension.localPath,
+        verifyFile: this.verifyStoreCrxFile,
+        preflightPackage: this.preflightPackage,
+      }).finally(() => fs.rm(validationRoot, { recursive: true, force: true }).catch(() => undefined));
+      entries.push({ archivePath: artifact.archivePath, filePath: canonicalPath });
+    }
+    return entries;
+  }
+
   private async prepareRestore(inputPath: string, operationId?: string): Promise<PreparedRestore> {
     this.setProgress(operationId, "extracting", 0, 1, "Extracting full backup.");
     const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-backup-restore-"));
     try {
       await extractZipArchive(inputPath, stagingDir, "App backup contains an unsafe path.");
-      const manifest = parseManifest(await readJsonArchiveFile(path.join(stagingDir, MANIFEST_ENTRY)));
-      const data = parseBackupData(await readJsonArchiveFile(path.join(stagingDir, DATA_ENTRY)));
-      validateManifestData(manifest, data);
+      const manifest = parseManifest(await readJsonArchiveFile(path.join(stagingDir, MANIFEST_ENTRY), 1 * 1024 * 1024));
+      const decodedData = parseBackupData(await readJsonArchiveFile(path.join(stagingDir, DATA_ENTRY), 16 * 1024 * 1024));
+      validateManifestData(manifest, decodedData);
+      const data = migrateBackupDataToCurrent(decodedData);
       const browserDataCount = await countExistingDirectories(data.environments.map((environment) => path.join(stagingDir, "browser-data", environment.id)));
       const extensionFileCount = await countExistingDirectories(data.extensions.map((extension) => path.join(stagingDir, "extensions", extension.id)));
       const warnings: string[] = [];
@@ -250,7 +355,13 @@ export class AppBackupService {
       if (manifest.counts.runtimeExtensions > extensionFileCount) {
         warnings.push("Backup metadata references extension files missing from the archive.");
       }
-      const restoredData = this.materializeRestoredExtensionPaths(data, stagingDir, warnings);
+      await validateStagedRetainedArtifacts(
+        data,
+        stagingDir,
+        this.verifyStoreCrxFile,
+        this.preflightPackage,
+      );
+      const restoredData = await this.materializeRestoredExtensionPaths(data, stagingDir, warnings);
       this.setProgress(operationId, "validating", restoredData.environments.length, restoredData.environments.length, "Validated full backup.");
       return {
         data: restoredData,
@@ -264,14 +375,16 @@ export class AppBackupService {
     }
   }
 
-  private materializeRestoredExtensionPaths(data: AppBackupData, stagingDir: string, warnings: string[]): AppBackupData {
+  private async materializeRestoredExtensionPaths(data: AppBackupData, stagingDir: string, warnings: string[]): Promise<AppBackupData> {
     const extensionPaths = new Map<string, string>();
+    const retainedIds = new Set(data.retainedExtensionArtifacts.map((artifact) => artifact.extensionId));
     const extensions = data.extensions.map((extension) => {
       const stagedPath = path.join(stagingDir, "extensions", extension.id);
       const restoredPath = path.join(this.options.extensionCacheDir, extension.id);
       if (fsExistsSyncSafe(stagedPath)) {
         extensionPaths.set(extension.id, restoredPath);
-        const restoredDirectory = extension.sourceKind === "local-directory";
+        const hasRetainedArtifact = retainedIds.has(extension.id);
+        const restoredDirectory = !hasRetainedArtifact;
         if (restoredDirectory && extension.localPath !== restoredPath) {
           // Re-homing into the cache severs a reference-mode dev link and changes the
           // path-derived browser ID, so extension data from before the backup is orphaned.
@@ -281,11 +394,41 @@ export class AppBackupService {
         }
         return {
           ...extension,
-          sourceUrl: restoredDirectory ? restoredPath : extension.sourceUrl,
+          sourceKind: restoredDirectory ? ("managed-snapshot" as const) : ("local-crx" as const),
+          sourceUrl: restoredDirectory
+            ? ""
+            : path.join(this.extensionArtifactDir, extension.id, "current.crx"),
           localPath: restoredPath,
-          directoryMode: restoredDirectory ? ("copy" as const) : extension.directoryMode,
+          artifactArchivePath: restoredDirectory
+            ? undefined
+            : path.join(this.extensionArtifactDir, extension.id, "current.crx"),
+          provenance: !restoredDirectory && extension.provenance
+            ? {
+                ...extension.provenance,
+                transfer: { kind: "full-backup-restore" as const, at: nowIso() },
+              }
+            : extension.provenance,
+          directoryMode: undefined,
           installState: "installed" as const,
           lastError: undefined,
+        };
+      }
+      if (retainedIds.has(extension.id)) {
+        const artifactArchivePath = path.join(this.extensionArtifactDir, extension.id, "current.crx");
+        return {
+          ...extension,
+          sourceKind: "local-crx" as const,
+          sourceUrl: artifactArchivePath,
+          artifactArchivePath,
+          localPath: undefined,
+          installState: "local-missing" as const,
+          provenance: extension.provenance
+            ? {
+                ...extension.provenance,
+                transfer: { kind: "full-backup-restore" as const, at: nowIso() },
+              }
+            : undefined,
+          lastError: "Extension unpacked files are missing from the restored backup.",
         };
       }
       if (extension.installState !== "installed") return extension;
@@ -322,31 +465,43 @@ export class AppBackupService {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-backup-rollback-"));
     const browserDataExisted = await pathExists(this.options.browserDataDir);
     const extensionCacheExisted = await pathExists(this.options.extensionCacheDir);
+    const extensionArtifactExisted = await pathExists(this.extensionArtifactDir);
     if (browserDataExisted) await fs.cp(this.options.browserDataDir, path.join(directory, "browser-data"), { recursive: true, force: false });
     if (extensionCacheExisted) await fs.cp(this.options.extensionCacheDir, path.join(directory, "extensions"), { recursive: true, force: false });
+    if (extensionArtifactExisted) {
+      await fs.cp(this.extensionArtifactDir, path.join(directory, "extension-artifacts"), { recursive: true, force: false });
+    }
     return {
       data: await this.options.repository.exportFullBackupData(),
       directory,
       browserDataExisted,
       extensionCacheExisted,
+      extensionArtifactExisted,
     };
   }
 
   private async restoreFilesystem(prepared: PreparedRestore, operationId?: string): Promise<void> {
-    this.setProgress(operationId, "restoring-files", 0, 2, "Replacing browser data.");
+    this.setProgress(operationId, "restoring-files", 0, 3, "Replacing browser data.");
     await replaceManagedDirectory(path.join(prepared.stagingDir, "browser-data"), this.options.browserDataDir);
-    this.setProgress(operationId, "restoring-files", 1, 2, "Replacing extension files.");
+    this.setProgress(operationId, "restoring-files", 1, 3, "Replacing extension files.");
     await replaceManagedDirectory(path.join(prepared.stagingDir, "extensions"), this.options.extensionCacheDir);
+    this.setProgress(operationId, "restoring-files", 2, 3, "Replacing retained extension artifacts.");
+    await replaceManagedDirectory(path.join(prepared.stagingDir, "extension-artifacts"), this.extensionArtifactDir);
     await fs.rm(
       this.options.extensionRuntimeDir ?? path.join(path.dirname(this.options.extensionCacheDir), "extension-runtimes"),
       { recursive: true, force: true },
     );
-    this.setProgress(operationId, "restoring-files", 2, 2, "Runtime files restored.");
+    this.setProgress(operationId, "restoring-files", 3, 3, "Runtime files restored.");
   }
 
   private async rollbackRestore(snapshot: RollbackSnapshot): Promise<void> {
     await rollbackDirectory(path.join(snapshot.directory, "browser-data"), this.options.browserDataDir, snapshot.browserDataExisted);
     await rollbackDirectory(path.join(snapshot.directory, "extensions"), this.options.extensionCacheDir, snapshot.extensionCacheExisted);
+    await rollbackDirectory(
+      path.join(snapshot.directory, "extension-artifacts"),
+      this.extensionArtifactDir,
+      snapshot.extensionArtifactExisted,
+    );
     await this.options.repository.restoreFullBackupData(snapshot.data);
     this.options.settingsChanged?.(snapshot.data.settings);
   }
@@ -417,19 +572,18 @@ export class AppBackupService {
   }
 }
 
-function parseManifest(input: unknown): AppBackupManifest {
+function parseManifest(input: unknown): AnyAppBackupManifest {
   if (!isRecord(input)) throw Object.assign(new Error("Backup manifest must be an object."), { status: 400 });
   if (input.kind !== APP_BACKUP_KIND) throw Object.assign(new Error("Unsupported app backup kind."), { status: 400 });
-  if (input.schemaVersion !== APP_BACKUP_SCHEMA_VERSION) throw Object.assign(new Error("Unsupported app backup schema version."), { status: 400 });
   const counts = isRecord(input.counts) ? input.counts : {};
-  return {
+  const common = {
     kind: APP_BACKUP_KIND,
-    schemaVersion: APP_BACKUP_SCHEMA_VERSION,
     exportedAt: readString(input.exportedAt, "manifest.exportedAt"),
     containsSecrets: true,
     containsBrowserData: input.containsBrowserData === true,
     containsExtensions: input.containsExtensions === true,
-    counts: {
+  } as const;
+  const baseCounts = {
       profiles: readNumber(counts.profiles, "manifest.counts.profiles"),
       environments: readNumber(counts.environments, "manifest.counts.environments"),
       trashEnvironments: readNumber(counts.trashEnvironments, "manifest.counts.trashEnvironments"),
@@ -438,47 +592,180 @@ function parseManifest(input: unknown): AppBackupManifest {
       tags: readNumber(counts.tags, "manifest.counts.tags"),
       proxies: readNumber(counts.proxies, "manifest.counts.proxies"),
       extensions: readNumber(counts.extensions, "manifest.counts.extensions"),
-      extensionSources: readNumber(counts.extensionSources, "manifest.counts.extensionSources"),
       runtimeExtensions: readNumber(counts.runtimeExtensions, "manifest.counts.runtimeExtensions"),
+  };
+  if (input.schemaVersion === APP_BACKUP_SCHEMA_VERSION_V1) {
+    return {
+      ...common,
+      schemaVersion: APP_BACKUP_SCHEMA_VERSION_V1,
+      counts: {
+        ...baseCounts,
+      extensionSources: readNumber(counts.extensionSources, "manifest.counts.extensionSources"),
+      },
+    } satisfies AppBackupManifestV1;
+  }
+  if (input.schemaVersion === APP_BACKUP_SCHEMA_VERSION_V2) {
+    return {
+      ...common,
+      schemaVersion: APP_BACKUP_SCHEMA_VERSION_V2,
+      counts: {
+        ...baseCounts,
+        retainedExtensionArtifacts: readNumber(
+          counts.retainedExtensionArtifacts,
+          "manifest.counts.retainedExtensionArtifacts",
+        ),
+      },
+    } satisfies AppBackupManifestV2;
+  }
+  throw Object.assign(new Error("Unsupported app backup schema version."), { status: 400 });
+}
+
+function parseBackupData(input: unknown): AnyAppBackupData {
+  return decodeAppBackupData(input);
+}
+
+function migrateBackupDataToCurrent(data: AnyAppBackupData): AppBackupData {
+  const current: AppBackupData = data.schemaVersion === APP_BACKUP_SCHEMA_VERSION_V2
+    ? data
+    : {
+    schemaVersion: APP_BACKUP_SCHEMA_VERSION_V2,
+    settings: data.settings,
+    profiles: data.profiles,
+    environments: data.environments,
+    groups: data.groups,
+    tags: data.tags,
+    proxies: data.proxies,
+    extensions: data.extensions.map(migrateLegacyBackupExtension),
+    retainedExtensionArtifacts: [],
+    environmentExtensionBindings: data.environmentExtensionBindings,
+  };
+  return {
+    ...current,
+    profiles: current.profiles.map(withoutSerializedExtensionPaths),
+    environments: current.environments.map((environment) => ({
+      ...environment,
+      runtimeProfile: withoutSerializedExtensionPaths(environment.runtimeProfile),
+    })),
+    extensions: current.extensions.map(sanitizeTransferredExtension),
+  };
+}
+
+function migrateLegacyBackupExtension(extension: LegacyTransferExtension): ExtensionEntity {
+  const remote = extension.sourceKind === "remote-zip"
+    || extension.sourceKind === "remote-crx"
+    || Boolean(extension.sourceId);
+  if (!remote) return { ...extension };
+  const format = extension.sourceKind === "remote-zip" ? "zip" : "unknown";
+  return {
+    ...extension,
+    sourceKind: "managed-snapshot",
+    sourceUrl: "",
+    sourceId: undefined,
+    updatePolicy: "pinned",
+    artifactArchivePath: undefined,
+    updateProviderId: undefined,
+    updateState: { status: "provider-disabled" },
+    provenance: {
+      schemaVersion: 1,
+      artifact: {
+        providerId: "legacy",
+        legacySourceUrl: extension.sourceUrl || undefined,
+        format,
+        sha256: extension.sha256,
+        retained: false,
+      },
+      verification: {
+        level: "legacy-unknown",
+        manifestSha256: extension.manifestSha256,
+      },
     },
   };
 }
 
-function parseBackupData(input: unknown): AppBackupData {
-  if (!isRecord(input)) throw Object.assign(new Error("Backup data must be an object."), { status: 400 });
-  if (input.schemaVersion !== APP_BACKUP_SCHEMA_VERSION) throw Object.assign(new Error("Unsupported app backup data schema version."), { status: 400 });
-  if (!Array.isArray(input.profiles)) throw Object.assign(new Error("Backup data must include profiles."), { status: 400 });
-  if (!Array.isArray(input.environments)) throw Object.assign(new Error("Backup data must include environments."), { status: 400 });
-  if (!Array.isArray(input.groups)) throw Object.assign(new Error("Backup data must include groups."), { status: 400 });
-  if (!Array.isArray(input.tags)) throw Object.assign(new Error("Backup data must include tags."), { status: 400 });
-  if (!Array.isArray(input.proxies)) throw Object.assign(new Error("Backup data must include proxies."), { status: 400 });
-  if (!Array.isArray(input.extensions)) throw Object.assign(new Error("Backup data must include extensions."), { status: 400 });
-  if (!Array.isArray(input.extensionSources)) throw Object.assign(new Error("Backup data must include extensionSources."), { status: 400 });
-  if (!isRecord(input.settings)) throw Object.assign(new Error("Backup data must include settings."), { status: 400 });
+function portableBackupData(data: AppBackupData): AppBackupData {
   return {
-    schemaVersion: APP_BACKUP_SCHEMA_VERSION,
-    settings: input.settings as unknown as AppBackupData["settings"],
-    profiles: input.profiles as AppBackupData["profiles"],
-    environments: input.environments as AppBackupData["environments"],
-    groups: input.groups as AppBackupData["groups"],
-    tags: input.tags as AppBackupData["tags"],
-    proxies: input.proxies as AppBackupData["proxies"],
-    extensions: input.extensions.map((extension) => {
-      if (!isRecord(extension)) throw Object.assign(new Error("Backup extensions must be objects."), { status: 400 });
-      return extensionForLegacyTransfer(extension as unknown as ExtensionEntity);
-    }),
-    extensionSources: input.extensionSources as AppBackupData["extensionSources"],
-    environmentExtensionBindings: normalizeExtensionBindingMetadata(input.environmentExtensionBindings),
+    ...data,
+    profiles: data.profiles.map(withoutSerializedExtensionPaths),
+    environments: data.environments.map((environment) => ({
+      ...environment,
+      runtimeProfile: withoutSerializedExtensionPaths(environment.runtimeProfile),
+    })),
+    extensions: data.extensions.map(sanitizeTransferredExtension),
   };
 }
 
-function validateManifestData(manifest: AppBackupManifest, data: AppBackupData): void {
-  const counts = backupCounts(data, manifest.counts.browserData, manifest.counts.runtimeExtensions);
-  for (const key of ["profiles", "environments", "trashEnvironments", "groups", "tags", "proxies", "extensions", "extensionSources"] as const) {
-    if (manifest.counts[key] !== counts[key]) {
-      throw Object.assign(new Error(`Backup ${key} count does not match manifest.`), { status: 400 });
-    }
+function sanitizeTransferredExtension(extension: ExtensionEntity): ExtensionEntity {
+  if (extension.provenance?.artifact.retained) {
+    const archivePath = `extension-artifacts/${extension.id}/current.crx`;
+    return {
+      ...extension,
+      sourceKind: "local-crx",
+      sourceUrl: archivePath,
+      sourceId: undefined,
+      artifactArchivePath: archivePath,
+      localPath: undefined,
+      directoryMode: undefined,
+    };
   }
+  const hadRemoteAuthority = extension.sourceKind === "remote-zip"
+    || extension.sourceKind === "remote-crx"
+    || Boolean(extension.sourceId)
+    || Boolean(extension.updateProviderId)
+    || Boolean(extension.provenance?.artifact.legacySourceUrl);
+  return {
+    ...extension,
+    sourceKind: "managed-snapshot",
+    sourceUrl: "",
+    sourceId: undefined,
+    artifactArchivePath: undefined,
+    updateProviderId: undefined,
+    updateState: hadRemoteAuthority ? { status: "provider-disabled" } : undefined,
+    updatePolicy: "pinned",
+    localPath: undefined,
+    directoryMode: undefined,
+  };
+}
+
+function withoutSerializedExtensionPaths(profile: BrowserProfile): BrowserProfile {
+  return {
+    ...profile,
+    runtime: {
+      ...profile.runtime,
+      extensionPaths: [],
+    },
+  };
+}
+
+function validateManifestData(manifest: AnyAppBackupManifest, data: AnyAppBackupData): void {
+  if (manifest.schemaVersion === APP_BACKUP_SCHEMA_VERSION_V1) {
+    if (data.schemaVersion !== APP_BACKUP_SCHEMA_VERSION_V1) throw schemaVersionMismatch();
+    const counts = backupCountsForDecoded(
+      data,
+      manifest.counts.browserData,
+      manifest.counts.runtimeExtensions,
+    ) as AppBackupManifestV1["counts"];
+    for (const key of ["profiles", "environments", "trashEnvironments", "groups", "tags", "proxies", "extensions", "extensionSources"] as const) {
+      if (manifest.counts[key] !== counts[key]) throw backupCountMismatch(key);
+    }
+    return;
+  }
+  if (data.schemaVersion !== APP_BACKUP_SCHEMA_VERSION_V2) throw schemaVersionMismatch();
+  const counts = backupCountsForDecoded(
+    data,
+    manifest.counts.browserData,
+    manifest.counts.runtimeExtensions,
+  ) as AppBackupManifestV2["counts"];
+  for (const key of ["profiles", "environments", "trashEnvironments", "groups", "tags", "proxies", "extensions", "retainedExtensionArtifacts"] as const) {
+    if (manifest.counts[key] !== counts[key]) throw backupCountMismatch(key);
+  }
+}
+
+function schemaVersionMismatch(): Error {
+  return Object.assign(new Error("Backup manifest and data schema versions disagree."), { status: 400 });
+}
+
+function backupCountMismatch(key: string): Error {
+  return Object.assign(new Error(`Backup ${key} count does not match manifest.`), { status: 400 });
 }
 
 function backupCounts(data: AppBackupData, browserData: number, runtimeExtensions: number): AppBackupCounts {
@@ -491,9 +778,30 @@ function backupCounts(data: AppBackupData, browserData: number, runtimeExtension
     tags: data.tags.length,
     proxies: data.proxies.length,
     extensions: data.extensions.length,
-    extensionSources: data.extensionSources.length,
+    retainedExtensionArtifacts: data.retainedExtensionArtifacts.length,
     runtimeExtensions,
   };
+}
+
+function backupCountsForDecoded(
+  data: AnyAppBackupData,
+  browserData: number,
+  runtimeExtensions: number,
+): AppBackupManifestV1["counts"] | AppBackupManifestV2["counts"] {
+  const base = {
+    profiles: data.profiles.length,
+    environments: data.environments.filter((environment) => !environment.deletedAt).length,
+    trashEnvironments: data.environments.filter((environment) => Boolean(environment.deletedAt)).length,
+    browserData,
+    groups: data.groups.length,
+    tags: data.tags.length,
+    proxies: data.proxies.length,
+    extensions: data.extensions.length,
+    runtimeExtensions,
+  };
+  return data.schemaVersion === APP_BACKUP_SCHEMA_VERSION_V1
+    ? { ...base, extensionSources: data.extensionSources.length }
+    : { ...base, retainedExtensionArtifacts: data.retainedExtensionArtifacts.length };
 }
 
 async function countExistingDirectories(paths: string[]): Promise<number> {
@@ -502,6 +810,65 @@ async function countExistingDirectories(paths: string[]): Promise<number> {
     if (await pathExists(itemPath)) count += 1;
   }
   return count;
+}
+
+async function validateStagedRetainedArtifacts(
+  data: AppBackupData,
+  stagingDir: string,
+  verifyFile: typeof verifyChromeWebStoreCrx3File,
+  preflightPackage: typeof preflightExtensionPackage,
+): Promise<void> {
+  const extensionById = new Map(data.extensions.map((extension) => [extension.id, extension]));
+  for (const artifact of data.retainedExtensionArtifacts) {
+    const extension = extensionById.get(artifact.extensionId);
+    if (!extension?.storeIdentity || !extension.provenance || !extension.manifestKey) {
+      throw backupInvalid(`Retained extension evidence is incomplete for ${artifact.extensionId}.`);
+    }
+    if (extension.artifactArchivePath !== artifact.archivePath || extension.sourceUrl !== artifact.archivePath) {
+      throw backupInvalid(`Retained extension path disagrees with its portable archive entry for ${artifact.extensionId}.`);
+    }
+    const stagedPath = path.join(stagingDir, ...artifact.archivePath.split("/"));
+    const stats = await fs.lstat(stagedPath).catch(() => undefined);
+    if (!stats?.isFile() || stats.isSymbolicLink() || stats.nlink !== 1) {
+      throw backupInvalid(`Retained extension artifact is missing or linked for ${artifact.extensionId}.`);
+    }
+    if (await sha256File(stagedPath) !== artifact.sha256) {
+      throw backupInvalid(`Retained extension artifact fingerprint is invalid for ${artifact.extensionId}.`);
+    }
+    const validationDir = path.join(stagingDir, ".artifact-validation", artifact.extensionId);
+    const unpackedRoot = path.join(stagingDir, "extensions", extension.id);
+    await validateTransferredExtensionArtifact({
+      extension,
+      artifactPath: stagedPath,
+      expectedSha256: artifact.sha256,
+      validationDir,
+      unpackedRoot: await pathExists(unpackedRoot) ? unpackedRoot : undefined,
+      verifyFile,
+      preflightPackage,
+    });
+  }
+}
+
+async function sha256File(filePath: string): Promise<string> {
+  const handle = await fs.open(filePath, "r");
+  const hash = createHash("sha256");
+  try {
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let position = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, position);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    return hash.digest("hex");
+  } finally {
+    await handle.close();
+  }
+}
+
+function backupInvalid(message: string): Error {
+  return Object.assign(new Error(message), { status: 400, code: "APP_BACKUP_SCHEMA_INVALID" });
 }
 
 async function replaceManagedDirectory(source: string, target: string): Promise<void> {

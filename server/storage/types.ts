@@ -20,6 +20,8 @@ export type EnvironmentPackageImportInput = {
   environmentIdMap?: Record<string, string>;
   extensionIdMap?: Record<string, string>;
   extensionLocalPaths?: Record<string, string>;
+  extensionArtifactPaths?: Record<string, string>;
+  extensionManifestKeys?: Record<string, string>;
   environmentExtensionBindings?: ExtensionBindingMetadata[];
 };
 
@@ -38,6 +40,14 @@ export type EnvironmentExtensionBinding = {
   extensionId: string;
   /** Null marks a binding created before lifecycle protection was introduced. */
   lifecycleRevision?: string;
+};
+
+export type ExtensionAcquisitionDatabaseCommitInput = {
+  extension: ExtensionEntity;
+  /** Undefined creates a new row; otherwise the exact row revision must still match. */
+  expectedExistingUpdatedAt?: string;
+  expectedEnvironmentBindings?: ExtensionBindingMetadata[];
+  environmentBindings: ExtensionBindingMetadata[];
 };
 
 export interface ProfileRepository {
@@ -102,8 +112,10 @@ export interface RegistryRepository {
   getExtension(id: string): Promise<ExtensionEntity | undefined>;
   createExtension(input: Partial<ExtensionEntity>): Promise<ExtensionEntity>;
   updateExtension(id: string, patch: Partial<ExtensionEntity>): Promise<ExtensionEntity>;
+  commitExtensionAcquisition(input: ExtensionAcquisitionDatabaseCommitInput): Promise<ExtensionEntity>;
   deleteExtension(id: string): Promise<void>;
   listEnvironmentExtensionBindings(environmentId: string): Promise<EnvironmentExtensionBinding[]>;
+  listExtensionEnvironmentBindings(extensionId: string): Promise<EnvironmentExtensionBinding[]>;
   bindExtensionToEnvironments(id: string, environmentIds: string[]): Promise<BrowserEnvironment[]>;
   unbindExtensionFromEnvironments(id: string, environmentIds?: string[]): Promise<BrowserEnvironment[]>;
   listExtensionSources(): Promise<ExtensionSourceEntity[]>;

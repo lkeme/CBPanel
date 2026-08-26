@@ -76,6 +76,7 @@ const sourceKindKeys: Record<ExtensionSourceKind, TranslationKey> = {
   "local-directory": "extension.kind.localDirectory",
   "local-zip": "extension.kind.localZip",
   "local-crx": "extension.kind.localCrx",
+  "managed-snapshot": "extension.kind.managedSnapshot",
   "remote-zip": "extension.kind.remoteZip",
   "remote-crx": "extension.kind.remoteCrx",
   "chrome-web-store": "extension.kind.chromeWebStore",

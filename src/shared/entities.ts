@@ -13,6 +13,7 @@ export type ExtensionSourceKind =
   | "local-directory"
   | "local-zip"
   | "local-crx"
+  | "managed-snapshot"
   | "remote-zip"
   | "remote-crx"
   | "chrome-web-store";
@@ -161,6 +162,8 @@ export interface ExtensionEntity {
   manifestVersion?: number;
   permissions: string[];
   hostPermissions: string[];
+  optionalPermissions?: string[];
+  optionalHostPermissions?: string[];
   permissionRisks: ExtensionPermissionRisk[];
   installState: ExtensionInstallState;
   updatePolicy: ExtensionUpdatePolicy;

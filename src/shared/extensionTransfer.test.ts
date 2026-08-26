@@ -110,7 +110,7 @@ test("schema-v2 transfer decoders reject unknown trust and unsafe artifact entri
 });
 
 function verifiedExtension(): ExtensionEntity {
-  const artifactArchivePath = "D:/cbpanel/extension-artifacts/extension-store/current.crx";
+  const artifactArchivePath = "extension-artifacts/extension-store/current.crx";
   return {
     id: "extension-store",
     name: "Verified Extension",
@@ -142,9 +142,11 @@ function verifiedExtension(): ExtensionEntity {
         verifiedAt: "2026-08-26T00:00:02.000Z",
         proofDerivedStoreId: STORE_ID,
         developerKeySha256: "b".repeat(64),
+        publisherKeySha256: "e".repeat(64),
         publisherTrustRootId: "chromium-cws",
         publisherTrustRootVersion: 1,
         manifestSha256: "c".repeat(64),
+        treeSha256: "d".repeat(64),
       },
     },
     artifactArchivePath,

@@ -12,7 +12,7 @@ import {
   maskProfileSecrets,
   normalizeProfile,
 } from "../src/shared/profile";
-import type { NetworkCheckResult, ProxyEntity, SystemDiagnostics } from "../src/shared/entities";
+import type { BrowserEnvironment, NetworkCheckResult, ProxyEntity, SystemDiagnostics } from "../src/shared/entities";
 import { resolveNetworkTraceProvider } from "../src/shared/settings";
 import {
   payloadTooLargeMessage,
@@ -30,10 +30,12 @@ import { createExtensionAcquisitionRouter } from "./routes/extensionAcquisitionR
 import { BinaryService } from "./services/binaryService";
 import { AppBackupService } from "./services/appBackupService";
 import { DesktopRuntimeService } from "./services/desktopRuntimeService";
+import { DataMutationCoordinator } from "./services/dataMutationCoordinator";
 import { ExtensionService } from "./services/extensionService";
 import { EnvironmentDataService } from "./services/environmentDataService";
 import { EnvironmentPackageService } from "./services/environmentPackageService";
 import { ExtensionAcquisitionService } from "./services/extensionAcquisitionService";
+import { ExtensionAcquisitionSessionService } from "./services/extensionAcquisitionSessionService";
 import { createExtensionProviderRegistry } from "./services/extensionProviders/providerRegistry";
 import { GithubMirrorProbeService } from "./services/githubMirrorProbeService";
 import { installPackagedInspectorShim } from "./services/packagedRuntime";
@@ -53,6 +55,8 @@ const DATA_DIR = process.env.CBPANEL_DATA_DIR
 const STORE_PATH = path.join(DATA_DIR, "profiles.json");
 const BROWSER_DATA_DIR = path.join(DATA_DIR, "browser-data");
 const EXTENSION_RUNTIME_DIR = path.join(DATA_DIR, "extension-runtimes");
+const EXTENSION_ARTIFACT_DIR = path.join(DATA_DIR, "extension-artifacts");
+const EXTENSION_ACQUISITION_DIR = path.join(DATA_DIR, "extension-acquisitions");
 const PORT = Number(process.env.PORT ?? 4173);
 const HOST = "127.0.0.1";
 const SHELL_MODE = process.env.CBPANEL_SHELL === "desktop" ? "desktop" : "web";
@@ -73,6 +77,7 @@ const repository = new SqlitePanelRepository({
   legacyJsonPath: STORE_PATH,
   portable: PORTABLE,
 });
+const dataMutationCoordinator = new DataMutationCoordinator();
 
 const binaryService = new BinaryService({
   dataDir: DATA_DIR,
@@ -106,9 +111,12 @@ function activeEnvironmentIds(): Set<string> {
 }
 
 function activeDataOperation(): string | undefined {
-  if (appBackupService.hasOperationInFlight()) return "执行应用备份或恢复";
-  if (environmentPackageService.hasOperationInFlight()) return "导入或导出环境包";
-  return undefined;
+  switch (dataMutationCoordinator.activeReason()) {
+    case "app-backup": return "执行应用备份或恢复";
+    case "environment-package": return "导入或导出环境包";
+    case "extension-cache-commit": return "提交扩展缓存";
+    default: return undefined;
+  }
 }
 
 function assertNoDataOperationInFlight(): void {
@@ -120,15 +128,15 @@ function assertNoDataOperationInFlight(): void {
   });
 }
 
-const extensionService = new ExtensionService({
-  repository,
-  extensionCacheDir: path.join(DATA_DIR, "extensions"),
-  extensionArchiveDir: path.join(DATA_DIR, "extension-archives"),
-  extensionRuntimeDir: EXTENSION_RUNTIME_DIR,
-  browserDataDir: BROWSER_DATA_DIR,
-  activeEnvironmentIds,
-});
-void extensionService.sweepCacheArtifacts().catch(() => undefined);
+async function withEnvironmentRelationMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const lease = dataMutationCoordinator.enter("extension-cache-commit");
+  try {
+    return await lease.runWithExtensions(["extension-bindings"], operation);
+  } finally {
+    lease.release();
+  }
+}
+
 const extensionProviderHttpClient = new ProviderHttpClient();
 const extensionProviderRegistry = createExtensionProviderRegistry({
   chromeWebStore: {
@@ -142,9 +150,40 @@ const extensionProviderRegistry = createExtensionProviderRegistry({
     httpClient: extensionProviderHttpClient,
   },
 });
+
+const extensionService = new ExtensionService({
+  repository,
+  extensionCacheDir: path.join(DATA_DIR, "extensions"),
+  extensionArchiveDir: path.join(DATA_DIR, "extension-archives"),
+  extensionRuntimeDir: EXTENSION_RUNTIME_DIR,
+  extensionArtifactDir: EXTENSION_ARTIFACT_DIR,
+  extensionAcquisitionDir: EXTENSION_ACQUISITION_DIR,
+  mutationCoordinator: dataMutationCoordinator,
+  readSettings: () => repository.getSettings(),
+  probeArtifactProvider: (providerId, storeId, destinationPath, signal) => (
+    extensionProviderRegistry.artifact(providerId).resolveCurrent({ storeId, destinationPath }, signal)
+  ),
+  browserDataDir: BROWSER_DATA_DIR,
+  activeEnvironmentIds,
+});
 const extensionAcquisitionService = new ExtensionAcquisitionService({
   readSettings: () => repository.getSettings(),
   providerRegistry: extensionProviderRegistry,
+});
+const extensionAcquisitionSessionService = new ExtensionAcquisitionSessionService({
+  acquisitionRoot: EXTENSION_ACQUISITION_DIR,
+  repository,
+  providerRegistry: extensionProviderRegistry,
+  readSettings: () => repository.getSettings(),
+  resolveCatalogObservation: (observationId, storeId) => (
+    extensionAcquisitionService.catalogObservation(observationId, storeId)
+  ),
+  commitPrepared: (acquisition, request) => (
+    extensionService.commitPreparedAcquisition(acquisition, request)
+  ),
+  recordUpdateObservation: (targetExtensionId, providerId, observation, expectedUpdatedAt) => (
+    extensionService.recordRemoteUpdateObservation(targetExtensionId, providerId, observation, expectedUpdatedAt)
+  ),
 });
 const sessionService = new SessionService({
   browserDataDir: BROWSER_DATA_DIR,
@@ -166,15 +205,22 @@ const environmentPackageService = new EnvironmentPackageService({
   repository,
   browserDataDir: BROWSER_DATA_DIR,
   extensionCacheDir: path.join(DATA_DIR, "extensions"),
+  extensionArtifactDir: EXTENSION_ARTIFACT_DIR,
   activeEnvironmentIds,
+  mutationCoordinator: dataMutationCoordinator,
 });
 const appBackupService = new AppBackupService({
   repository,
   browserDataDir: BROWSER_DATA_DIR,
   extensionCacheDir: path.join(DATA_DIR, "extensions"),
+  extensionArtifactDir: EXTENSION_ARTIFACT_DIR,
   extensionRuntimeDir: EXTENSION_RUNTIME_DIR,
   activeEnvironmentIds,
-  settingsChanged: (settings) => extensionAcquisitionService.settingsChanged(settings),
+  settingsChanged: (settings) => {
+    extensionAcquisitionService.settingsChanged(settings);
+    extensionAcquisitionSessionService.settingsChanged(settings);
+  },
+  mutationCoordinator: dataMutationCoordinator,
 });
 const githubMirrorProbeService = new GithubMirrorProbeService();
 const desktopRuntimeService = new DesktopRuntimeService({
@@ -591,6 +637,7 @@ async function createApp(): Promise<express.Express> {
     try {
       const settings = await repository.saveSettings(request.body ?? {});
       extensionAcquisitionService.settingsChanged(settings);
+      extensionAcquisitionSessionService.settingsChanged(settings);
       response.json(settings);
     } catch (error) {
       sendError(response, error);
@@ -599,7 +646,19 @@ async function createApp(): Promise<express.Express> {
 
   app.use(
     "/api/extension-acquisition",
-    createExtensionAcquisitionRouter(extensionAcquisitionService),
+    createExtensionAcquisitionRouter({
+      capabilities: () => extensionAcquisitionService.capabilities(),
+      search: (request, signal) => extensionAcquisitionService.search(request, signal),
+      resolve: (request) => extensionAcquisitionService.resolve(request),
+      createSession: (request) => extensionAcquisitionSessionService.create(request),
+      listSessions: () => extensionAcquisitionSessionService.list(),
+      getSession: (sessionId) => extensionAcquisitionSessionService.get(sessionId),
+      cancelSession: (sessionId) => extensionAcquisitionSessionService.cancel(sessionId),
+      confirmSession: (sessionId, request) => extensionAcquisitionSessionService.confirm(sessionId, request),
+      transitionUpdateProvider: (extensionId, providerId) => (
+        extensionService.transitionUpdateProvider(extensionId, providerId)
+      ),
+    }),
   );
 
   app.get("/api/storage/info", async (_request, response) => {
@@ -678,7 +737,7 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/environments", async (request, response) => {
     try {
-      response.status(201).json(await repository.createEnvironment(request.body ?? {}));
+      response.status(201).json(await withEnvironmentRelationMutation(() => repository.createEnvironment(request.body ?? {})));
     } catch (error) {
       sendError(response, error);
     }
@@ -688,10 +747,12 @@ async function createApp(): Promise<express.Express> {
     try {
       const environmentIds = Array.isArray(request.body?.environmentIds) ? request.body.environmentIds : [];
       const patch = request.body?.patch ?? {};
-      const updated = [];
-      for (const environmentId of environmentIds) {
-        updated.push(await repository.updateEnvironment(String(environmentId), patch));
-      }
+      const updated: BrowserEnvironment[] = [];
+      await withEnvironmentRelationMutation(async () => {
+        for (const environmentId of environmentIds) {
+          updated.push(await repository.updateEnvironment(String(environmentId), patch));
+        }
+      });
       response.json(updated);
     } catch (error) {
       sendError(response, error);
@@ -831,7 +892,7 @@ async function createApp(): Promise<express.Express> {
 
   app.put("/api/environments/:id", async (request, response) => {
     try {
-      response.json(await repository.updateEnvironment(request.params.id, request.body ?? {}));
+      response.json(await withEnvironmentRelationMutation(() => repository.updateEnvironment(request.params.id, request.body ?? {})));
     } catch (error) {
       sendError(response, error);
     }
@@ -839,7 +900,7 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/environments/:id/duplicate", async (request, response) => {
     try {
-      response.status(201).json(await repository.duplicateEnvironment(request.params.id));
+      response.status(201).json(await withEnvironmentRelationMutation(() => repository.duplicateEnvironment(request.params.id)));
     } catch (error) {
       sendError(response, error);
     }
@@ -850,7 +911,7 @@ async function createApp(): Promise<express.Express> {
       if (sessionService.hasActiveSession(request.params.id)) {
         throw Object.assign(new Error("先停止运行中的会话，再删除环境"), { status: 409 });
       }
-      await repository.softDeleteEnvironment(request.params.id);
+      await withEnvironmentRelationMutation(() => repository.softDeleteEnvironment(request.params.id));
       response.status(204).end();
     } catch (error) {
       sendError(response, error);
@@ -1107,7 +1168,7 @@ async function createApp(): Promise<express.Express> {
   app.put("/api/extensions/:id", async (request, response) => {
     try {
       const patch = readExtensionPreferencePatch(request.body);
-      response.json(await repository.updateExtension(request.params.id, patch));
+      response.json(await extensionService.updatePreferences(request.params.id, patch));
     } catch (error) {
       sendError(response, error);
     }
@@ -1221,6 +1282,29 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/extensions/:id/check-update", async (request, response) => {
     try {
+      const extension = await repository.getExtension(request.params.id);
+      if (extension?.updateProviderId && extension.storeIdentity?.namespace === "chrome-web-store") {
+        const settings = await repository.getSettings();
+        const providerEnabled = extension.updateProviderId === "chrome-web-store"
+          ? settings.extensionAcquisition.googleArtifactEnabled
+          : settings.extensionAcquisition.crxsosoArtifactEnabled;
+        if (!providerEnabled) {
+          response.json(await extensionService.recordRemoteUpdateObservation(
+            extension.id,
+            extension.updateProviderId,
+            { status: "provider-disabled" },
+          ));
+          return;
+        }
+        response.status(202).json(await extensionAcquisitionSessionService.create({
+          namespace: "chrome-web-store",
+          storeId: extension.storeIdentity.storeId,
+          artifactProviderId: extension.updateProviderId,
+          purpose: "update",
+          targetExtensionId: extension.id,
+        }));
+        return;
+      }
       response.json(await extensionService.checkUpdate(request.params.id));
     } catch (error) {
       sendError(response, error);
@@ -1230,6 +1314,25 @@ async function createApp(): Promise<express.Express> {
   app.post("/api/extensions/:id/update", async (request, response) => {
     try {
       response.json(await extensionService.update(request.params.id));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.post("/api/extensions/:id/update-provider", async (request, response) => {
+    try {
+      if (!request.body || typeof request.body !== "object" || Array.isArray(request.body)) {
+        throw Object.assign(new Error("Update provider request must be an object."), { status: 400, code: "ACQUISITION_INPUT_UNSUPPORTED" });
+      }
+      const keys = Object.keys(request.body);
+      if (keys.length !== 1 || !keys.includes("providerId")) {
+        throw Object.assign(new Error("Update provider request contains unsupported fields."), { status: 400, code: "ACQUISITION_INPUT_UNSUPPORTED" });
+      }
+      const providerId = request.body.providerId;
+      if (providerId !== "chrome-web-store" && providerId !== "crxsoso") {
+        throw Object.assign(new Error("Update provider is unsupported."), { status: 400, code: "ACQUISITION_UPDATE_PROVIDER_INVALID" });
+      }
+      response.json(await extensionService.transitionUpdateProvider(request.params.id, providerId));
     } catch (error) {
       sendError(response, error);
     }
@@ -1263,12 +1366,7 @@ async function createApp(): Promise<express.Express> {
   app.post("/api/extensions/:id/unbind-environments", async (request, response) => {
     try {
       const environmentIds = readUnbindEnvironmentIds(request.body?.environmentIds);
-      const environments = await repository.unbindExtensionFromEnvironments(request.params.id, environmentIds);
-      await extensionService.cleanupRuntimeBindings(
-        request.params.id,
-        environments.map((environment) => environment.id),
-      );
-      response.json(environments);
+      response.json(await extensionService.unbindFromEnvironments(request.params.id, environmentIds));
     } catch (error) {
       sendError(response, error);
     }
@@ -1325,7 +1423,7 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/trash/environments/:id/restore", async (request, response) => {
     try {
-      response.json(await repository.restoreEnvironment(request.params.id));
+      response.json(await withEnvironmentRelationMutation(() => repository.restoreEnvironment(request.params.id)));
     } catch (error) {
       sendError(response, error);
     }
@@ -1340,7 +1438,7 @@ async function createApp(): Promise<express.Express> {
       if (sessionService.profileIdsHoldingRuntime().has(request.params.id)) {
         throw Object.assign(new Error("先停止运行中的会话，再永久删除环境"), { status: 409 });
       }
-      await repository.permanentlyDeleteEnvironment(request.params.id);
+      await withEnvironmentRelationMutation(() => repository.permanentlyDeleteEnvironment(request.params.id));
       // Best-effort, and strictly after the rows are gone: a directory a live browser still holds must
       // not turn a delete that already committed into a failure. What survives stays reclaimable through
       // the browser-data prune action, which is the only place this route could report it anyway.
@@ -1356,7 +1454,7 @@ async function createApp(): Promise<express.Express> {
       // The ids must be read before the rows are deleted; afterwards nothing names the directories left
       // behind. `deleted` stays in the response because the trash view reports its count.
       const trashedIds = (await repository.listTrashEnvironments()).map((item) => item.environment.id);
-      const cleared = await repository.clearTrashEnvironments();
+      const cleared = await withEnvironmentRelationMutation(() => repository.clearTrashEnvironments());
       // Deliberately not the 409 the single delete raises: this is a batch the user asked to empty, and one
       // session stuck in an unconfirmed close would otherwise block reclaiming every other environment's
       // data. The rows all go; the held directories are skipped and reported, and the browser-data prune
@@ -1723,6 +1821,8 @@ let server: http.Server;
 let shutdownPromise: Promise<void> | undefined;
 
 async function main(): Promise<void> {
+  await extensionService.initialize();
+  await extensionAcquisitionSessionService.initialize();
   const app = await createApp();
   server = http.createServer(app);
   server.listen(PORT, "127.0.0.1", () => {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,11 +8,124 @@ import { unzipSync, zipSync } from "fflate";
 import { APP_BACKUP_KIND } from "../../src/shared/appBackup";
 import { defaultProfile } from "../../src/shared/profile";
 import { SqlitePanelRepository } from "../storage/sqliteStore";
+import { createSyntheticStoreCrx3 } from "../testing/crx3Fixture";
 import { AppBackupService } from "./appBackupService";
+import { createCrx3VerifierForTesting } from "./crx3Verifier";
 import { ExtensionAcquisitionService } from "./extensionAcquisitionService";
 import type { ExtensionProviderRegistry } from "./extensionProviders/providerRegistry";
 import type { CatalogSearchPage, CatalogSearchProvider } from "./extensionProviders/types";
 import { ExtensionService } from "./extensionService";
+import { fingerprintManifest } from "./extensionPackagePreflight";
+import { fingerprintStagedExtensionTree } from "./boundedZipAnalyzer";
+
+test("schema-v2 backup round-trips retained verified CRX evidence with receiving-root paths", async () => {
+  const sourceDirectory = await makeTempDir();
+  const sourceRepository = new SqlitePanelRepository({ dataDir: sourceDirectory, seed: () => [] });
+  const fixture = createSyntheticStoreCrx3({
+    name: "Portable Backup Extension",
+    version: "4.0.0",
+    permissions: ["storage"],
+    hostPermissions: [],
+  });
+  const manifest = {
+    manifest_version: 3,
+    name: "Portable Backup Extension",
+    version: "4.0.0",
+    permissions: ["storage"],
+    host_permissions: [],
+    background: { service_worker: "worker.js" },
+  };
+  const extensionId = "portable-backup-extension";
+  const extensionRoot = path.join(sourceDirectory, "extensions", extensionId);
+  await fs.mkdir(extensionRoot, { recursive: true });
+  await fs.writeFile(
+    path.join(extensionRoot, "manifest.json"),
+    `${JSON.stringify({ ...manifest, key: fixture.developerSpkiBase64 }, null, 2)}\n`,
+    "utf8",
+  );
+  await fs.writeFile(path.join(extensionRoot, "worker.js"), "chrome.runtime.onInstalled.addListener(() => undefined);", "utf8");
+  const artifactPath = path.join(sourceDirectory, "extension-artifacts", extensionId, "current.crx");
+  await fs.mkdir(path.dirname(artifactPath), { recursive: true });
+  await fs.writeFile(artifactPath, fixture.bytes);
+  const sha256 = createHash("sha256").update(fixture.bytes).digest("hex");
+  const manifestSha256 = fingerprintManifest(manifest);
+  const treeSha256 = (await fingerprintStagedExtensionTree(extensionRoot)).sha256;
+  const verifier = createCrx3VerifierForTesting(fixture.publisherSpkiSha256);
+  await sourceRepository.createExtension({
+    id: extensionId,
+    name: manifest.name,
+    sourceKind: "local-crx",
+    sourceUrl: artifactPath,
+    storeId: fixture.storeId,
+    storeUrl: `https://chromewebstore.google.com/detail/${fixture.storeId}`,
+    storeIdentity: {
+      namespace: "chrome-web-store",
+      storeId: fixture.storeId,
+      listingUrl: `https://chromewebstore.google.com/detail/${fixture.storeId}`,
+    },
+    provenance: {
+      schemaVersion: 1,
+      artifact: {
+        providerId: "chrome-web-store",
+        finalByteHost: "clients2.googleusercontent.com",
+        fetchedAt: "2026-08-26T00:00:01.000Z",
+        format: "crx3",
+        size: fixture.bytes.byteLength,
+        sha256,
+        retained: true,
+      },
+      verification: {
+        level: "cws-publisher-verified",
+        verifiedAt: "2026-08-26T00:00:02.000Z",
+        proofDerivedStoreId: fixture.storeId,
+        developerKeySha256: fixture.developerSpkiSha256,
+        publisherKeySha256: fixture.publisherSpkiSha256,
+        publisherTrustRootId: "cbpanel-test-only-cws",
+        publisherTrustRootVersion: 0,
+        manifestSha256,
+        treeSha256,
+      },
+    },
+    artifactArchivePath: artifactPath,
+    updateProviderId: "chrome-web-store",
+    updateState: { status: "idle" },
+    version: manifest.version,
+    manifestVersion: 3,
+    permissions: ["storage"],
+    hostPermissions: [],
+    optionalPermissions: [],
+    optionalHostPermissions: [],
+    permissionRisks: [],
+    installState: "installed",
+    updatePolicy: "auto",
+    sha256,
+    manifestSha256,
+    localPath: extensionRoot,
+    manifestKey: fixture.developerSpkiBase64,
+  });
+  const backupPath = path.join(sourceDirectory, "portable.cbpb");
+  await makeService(sourceDirectory, sourceRepository, new Set(), undefined, verifier.verifyFile)
+    .exportToBackup({ outputPath: backupPath });
+  const archive = unzipSync(await fs.readFile(backupPath));
+  const serialized = JSON.parse(Buffer.from(archive["data.json"]).toString("utf8"));
+  assert.equal(serialized.schemaVersion, 2);
+  assert.equal(serialized.extensions[0].artifactArchivePath, `extension-artifacts/${extensionId}/current.crx`);
+  assert.equal(serialized.extensions[0].localPath, undefined);
+  assert.equal(JSON.stringify(serialized.extensions[0]).includes(sourceDirectory), false);
+  sourceRepository.close();
+
+  const targetDirectory = await makeTempDir();
+  const targetRepository = new SqlitePanelRepository({ dataDir: targetDirectory, seed: () => [] });
+  await makeService(targetDirectory, targetRepository, new Set(), undefined, verifier.verifyFile)
+    .restoreFromBackup({ inputPath: backupPath });
+  const restored = await targetRepository.getExtension(extensionId);
+  assert.equal(restored?.artifactArchivePath, path.join(targetDirectory, "extension-artifacts", extensionId, "current.crx"));
+  assert.equal(restored?.sourceUrl, restored?.artifactArchivePath);
+  assert.equal(restored?.localPath, path.join(targetDirectory, "extensions", extensionId));
+  assert.equal(restored?.provenance?.verification.developerKeySha256, fixture.developerSpkiSha256);
+  assert.equal(JSON.stringify(restored).includes(sourceDirectory), false);
+  targetRepository.close();
+});
 
 test("app backup export and restore replaces app data, browser data, and extension files", async () => {
   const directory = await makeTempDir();
@@ -49,12 +163,6 @@ test("app backup export and restore replaces app data, browser data, and extensi
     localPath: extensionDir,
     sha256: "b".repeat(64),
   });
-  const storeExtension = await repository.createExtension({
-    id: "backup-store-extension",
-    name: "Verified Store Snapshot",
-    installState: "local-missing",
-    ...verifiedAuthority(directory, "backup-store-extension"),
-  });
   await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
   const lifecycleRevision = (await repository.listEnvironmentExtensionBindings(profile.id))[0]?.lifecycleRevision;
   assert.ok(lifecycleRevision);
@@ -70,23 +178,6 @@ test("app backup export and restore replaces app data, browser data, and extensi
   assert.equal(exported.counts.runtimeExtensions, 1);
   const exportedEntries = unzipSync(await fs.readFile(backupPath));
   assert.equal(Object.keys(exportedEntries).some((entry) => entry.startsWith("extension-runtimes/")), false);
-  const exportedData = JSON.parse(Buffer.from(exportedEntries["data.json"]).toString("utf8"));
-  const exportedStoreExtension = exportedData.extensions.find((item: { id?: string }) => item.id === storeExtension.id);
-  assert.ok(exportedStoreExtension);
-  for (const field of ["storeIdentity", "provenance", "artifactArchivePath", "updateProviderId", "updateState"]) {
-    assert.equal(field in exportedStoreExtension, false, field);
-  }
-  // Schema v1 has no acquisition authority. Even a hand-edited archive cannot smuggle future trust
-  // fields through the legacy reader; it keeps only the legacy extension projection.
-  Object.assign(exportedData.extensions[0], {
-    storeIdentity: { namespace: "attacker", storeId: "forged", listingUrl: "https://evil.test" },
-    provenance: { schemaVersion: 99, verification: { level: "cws-publisher-verified" } },
-    artifactArchivePath: "C:/exporting-machine/forged.crx",
-    updateProviderId: "attacker",
-    updateState: { status: "available", availableVersion: "999" },
-  });
-  exportedEntries["data.json"] = Buffer.from(JSON.stringify(exportedData));
-  await fs.writeFile(backupPath, zipSync(exportedEntries));
 
   await repository.createProfile({ name: "Will Be Removed" });
   await fs.rm(path.join(directory, "browser-data", profile.id), { recursive: true, force: true });
@@ -109,15 +200,10 @@ test("app backup export and restore replaces app data, browser data, and extensi
   assert.deepEqual(restoredProfiles.map((item) => item.name), ["Backup Env"]);
   assert.equal(restoredEnvironment?.proxyId, proxy.id);
   assert.equal(restoredProxy?.password, "secret");
-  assert.equal(restoredExtension?.sourceKind, "local-directory");
-  assert.equal(restoredExtension?.sourceUrl, path.join(directory, "extensions", extension.id));
   assert.equal(restoredExtension?.localPath, path.join(directory, "extensions", extension.id));
-  assert.equal(restoredExtension?.directoryMode, "copy");
-  assert.equal(restoredExtension?.storeIdentity, undefined);
-  assert.equal(restoredExtension?.provenance, undefined);
-  const restoredStoreExtension = (await repository.listExtensions()).find((item) => item.id === storeExtension.id);
-  assert.equal(restoredStoreExtension?.storeIdentity, undefined);
-  assert.equal(restoredStoreExtension?.provenance, undefined);
+  assert.equal(restoredExtension?.sourceKind, "managed-snapshot");
+  assert.equal(restoredExtension?.sourceUrl, "");
+  assert.equal(restoredExtension?.directoryMode, undefined);
   assert.deepEqual(restoredEnvironment?.runtimeProfile.runtime.extensionPaths, [path.join(directory, "extensions", extension.id)]);
   assert.deepEqual(restoredProfile?.runtime.extensionPaths, [path.join(directory, "extensions", extension.id)]);
   assert.equal(
@@ -156,7 +242,9 @@ test("app backup restore warns that a reference-mode extension is re-homed into 
   const restored = await service.restoreFromBackup({ inputPath: backupPath });
   const restoredExtension = (await repository.listExtensions()).find((item) => item.id === extension.id);
 
-  assert.equal(restoredExtension?.directoryMode, "copy");
+  assert.equal(restoredExtension?.sourceKind, "managed-snapshot");
+  assert.equal(restoredExtension?.sourceUrl, "");
+  assert.equal(restoredExtension?.directoryMode, undefined);
   assert.equal(restoredExtension?.localPath, path.join(directory, "extensions", extension.id));
   assert.equal(restored.warnings.some((warning) => warning.includes("Dev Extension")), true);
   const extensionService = new ExtensionService({
@@ -383,59 +471,22 @@ async function writeExtensionDirectory(root: string, name: string): Promise<stri
   return directory;
 }
 
-function verifiedAuthority(root: string, entityId: string) {
-  const storeId = "dhdgffkkebhmkfjojejmpbldmpobfkfo";
-  const artifactArchivePath = path.join(root, "extension-artifacts", entityId, "current.crx");
-  return {
-    sourceKind: "local-crx" as const,
-    sourceUrl: artifactArchivePath,
-    sha256: "a".repeat(64),
-    manifestSha256: "c".repeat(64),
-    storeIdentity: {
-      namespace: "chrome-web-store" as const,
-      storeId,
-      listingUrl: `https://chromewebstore.google.com/detail/${storeId}`,
-    },
-    provenance: {
-      schemaVersion: 1 as const,
-      artifact: {
-        providerId: "chrome-web-store" as const,
-        finalByteHost: "clients2.googleusercontent.com",
-        fetchedAt: "2026-08-26T00:00:01.000Z",
-        format: "crx3" as const,
-        size: 123,
-        sha256: "a".repeat(64),
-        retained: true,
-      },
-      verification: {
-        level: "cws-publisher-verified" as const,
-        verifiedAt: "2026-08-26T00:00:02.000Z",
-        proofDerivedStoreId: storeId,
-        developerKeySha256: "b".repeat(64),
-        publisherTrustRootId: "chromium-cws",
-        publisherTrustRootVersion: 1,
-        manifestSha256: "c".repeat(64),
-      },
-    },
-    artifactArchivePath,
-    updateProviderId: "chrome-web-store" as const,
-    updateState: { status: "idle" as const, checkedAt: "2026-08-26T00:00:03.000Z" },
-  };
-}
-
 function makeService(
   directory: string,
   repository: SqlitePanelRepository,
   activeIds = new Set<string>(),
   settingsChanged?: ConstructorParameters<typeof AppBackupService>[0]["settingsChanged"],
+  verifyStoreCrxFileForTesting?: ReturnType<typeof createCrx3VerifierForTesting>["verifyFile"],
 ): AppBackupService {
   return new AppBackupService({
     repository,
     browserDataDir: path.join(directory, "browser-data"),
     extensionCacheDir: path.join(directory, "extensions"),
     extensionRuntimeDir: path.join(directory, "extension-runtimes"),
+    extensionArtifactDir: path.join(directory, "extension-artifacts"),
     activeEnvironmentIds: () => activeIds,
     settingsChanged,
+    verifyStoreCrxFileForTesting,
   });
 }
 

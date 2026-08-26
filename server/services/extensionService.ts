@@ -1,4 +1,4 @@
-import { createHash, createPublicKey, createVerify, generateKeyPairSync } from "node:crypto";
+import { createHash, createPublicKey, createVerify, generateKeyPairSync, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
@@ -19,9 +19,24 @@ import {
   type ExtensionSourceKind,
   isPreserveLifecycleRevision,
 } from "../../src/shared/entities";
+import { chromeWebStoreListingUrl } from "../../src/shared/extensionAcquisition";
 import { createId, nowIso } from "../../src/shared/profile";
+import { normalizeSettings, type AppSettings } from "../../src/shared/settings";
 import type { PanelRepository } from "../storage/types";
+import { fingerprintStagedExtensionTree } from "./boundedZipAnalyzer";
+import { verifyChromeWebStoreCrx3File } from "./crx3Verifier";
 import { ExtensionRuntimeService, type ExtensionRuntimeMaterializeResult } from "./extensionRuntimeService";
+import { DataMutationCoordinator } from "./dataMutationCoordinator";
+import {
+  ExtensionAcquisitionCommitJournal,
+  type ExtensionCommitJournalRecord,
+  type ExtensionCommitPublication,
+} from "./extensionAcquisitionCommitJournal";
+import type {
+  PreparedExtensionAcquisition,
+} from "./extensionAcquisitionSessionService";
+import type { ExtensionAcquisitionSessionConfirmRequest } from "../../src/shared/extensionAcquisition";
+import type { ResolvedArtifact } from "./extensionProviders/types";
 
 type ExtensionServiceOptions = {
   repository: PanelRepository;
@@ -30,6 +45,22 @@ type ExtensionServiceOptions = {
   browserDataDir?: string;
   /** Where uploaded archives are persisted so `sourceUrl` stays readable for reinstall/update. */
   extensionArchiveDir?: string;
+  /** Exact retained store CRX artifacts, separate from manual uploaded archives. */
+  extensionArtifactDir?: string;
+  extensionAcquisitionDir?: string;
+  mutationCoordinator?: DataMutationCoordinator;
+  readSettings?: () => Promise<AppSettings>;
+  probeArtifactProvider?: (
+    providerId: "chrome-web-store" | "crxsoso",
+    storeId: string,
+    destinationPath: string,
+    signal: AbortSignal,
+  ) => Promise<ResolvedArtifact>;
+  /** Offline tests only; production omits this and uses Chromium's pinned publisher root. */
+  verifyStoreCrxFileForTesting?: typeof verifyChromeWebStoreCrx3File;
+  acquisitionCommitFaultForTesting?: (
+    phase: "prepared" | "files-published" | "database-written" | "database-committed" | "complete",
+  ) => void | Promise<void>;
   fetchImpl?: typeof fetch;
   activeEnvironmentIds?: () => Set<string>;
 };
@@ -170,23 +201,75 @@ export class ExtensionService {
 
   private readonly extensionArchiveDir: string;
 
+  private readonly extensionArtifactDir: string;
+
+  private readonly mutationCoordinator: DataMutationCoordinator;
+
+  private readonly extensionAcquisitionDir: string;
+
+  private readonly commitJournal: ExtensionAcquisitionCommitJournal;
+
+  private readonly verifyStoreCrxFile: typeof verifyChromeWebStoreCrx3File;
+
+  private providerProbeReservations = 0;
+
   private readonly runtimeService: ExtensionRuntimeService;
 
   constructor(private readonly options: ExtensionServiceOptions) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.extensionArchiveDir = options.extensionArchiveDir
       ?? path.join(path.dirname(path.resolve(options.extensionCacheDir)), "extension-archives");
+    this.extensionArtifactDir = options.extensionArtifactDir
+      ?? path.join(path.dirname(path.resolve(options.extensionCacheDir)), "extension-artifacts");
+    this.extensionAcquisitionDir = options.extensionAcquisitionDir
+      ?? path.join(path.dirname(path.resolve(options.extensionCacheDir)), "extension-acquisitions");
+    this.mutationCoordinator = options.mutationCoordinator ?? new DataMutationCoordinator();
+    this.verifyStoreCrxFile = options.verifyStoreCrxFileForTesting ?? verifyChromeWebStoreCrx3File;
     const dataDir = path.dirname(path.resolve(options.extensionCacheDir));
+    this.commitJournal = new ExtensionAcquisitionCommitJournal({
+      journalRoot: path.join(dataDir, "extension-acquisition-journal"),
+      allowedRoots: [
+        path.resolve(options.extensionCacheDir),
+        path.resolve(this.extensionArtifactDir),
+        path.resolve(this.extensionAcquisitionDir),
+      ],
+    });
     this.runtimeService = new ExtensionRuntimeService({
       runtimeDir: options.extensionRuntimeDir ?? path.join(dataDir, "extension-runtimes"),
       browserDataDir: options.browserDataDir ?? path.join(dataDir, "browser-data"),
     });
   }
 
+  /** Startup barrier: recover any interrupted acquisition before launch or API mutations become reachable. */
+  async initialize(): Promise<void> {
+    await this.commitJournal.initialize();
+    await this.commitJournal.reconcileAll({
+      databaseState: (record) => this.commitDatabaseState(record),
+      rollbackFiles: (record) => this.rollbackCommitFiles(record),
+      finalizeFiles: (record) => this.finalizeCommitFiles(record),
+      cleanupSession: (record) => fs.rm(path.join(this.extensionAcquisitionDir, record.sessionId), {
+        recursive: true,
+        force: true,
+      }),
+    });
+    this.providerProbeReservations = 0;
+    await this.sweepCacheArtifacts();
+  }
+
   async importDirectory(
     directory: string,
     mode: ExtensionDirectoryMode = "copy",
     options: ExtensionImportOptions = {},
+  ): Promise<ExtensionEntity> {
+    return this.withExtensionMutation(["extension-import"], () => (
+      this.importDirectoryInternal(directory, mode, options)
+    ));
+  }
+
+  private async importDirectoryInternal(
+    directory: string,
+    mode: ExtensionDirectoryMode,
+    options: ExtensionImportOptions,
   ): Promise<ExtensionEntity> {
     const sourcePath = path.resolve(directory);
     assertPathHasNoComma(sourcePath);
@@ -246,6 +329,10 @@ export class ExtensionService {
 
   /** Best-effort removal of interrupted extract/copy swap leftovers in the extension cache. */
   async sweepCacheArtifacts(): Promise<void> {
+    return this.withExtensionMutation(["extension-cache-sweep"], () => this.sweepCacheArtifactsInternal());
+  }
+
+  private async sweepCacheArtifactsInternal(): Promise<void> {
     await this.runtimeService.sweepArtifacts();
     const environments = [
       ...await this.options.repository.listEnvironments(),
@@ -317,11 +404,11 @@ export class ExtensionService {
   }
 
   async importZip(filePath: string, options: ExtensionImportOptions = {}): Promise<ExtensionEntity> {
-    return this.importLocalAsset(filePath, "zip", options);
+    return this.withExtensionMutation(["extension-import"], () => this.importLocalAsset(filePath, "zip", options));
   }
 
   async importCrx(filePath: string, options: ExtensionImportOptions = {}): Promise<ExtensionEntity> {
-    return this.importLocalAsset(filePath, "crx", options);
+    return this.withExtensionMutation(["extension-import"], () => this.importLocalAsset(filePath, "crx", options));
   }
 
   /**
@@ -332,6 +419,396 @@ export class ExtensionService {
     bytes: Uint8Array,
     assetKind: ExtensionAssetKind,
     options: ExtensionImportOptions = {},
+  ): Promise<ExtensionEntity> {
+    return this.withExtensionMutation(["extension-import"], () => (
+      this.importUploadedArchiveInternal(bytes, assetKind, options)
+    ));
+  }
+
+  async commitPreparedAcquisition(
+    acquisition: PreparedExtensionAcquisition,
+    request: ExtensionAcquisitionSessionConfirmRequest,
+  ): Promise<ExtensionEntity> {
+    const targetId = request.disposition === "create"
+      ? createId("extension")
+      : request.targetExtensionId?.trim();
+    if (!targetId) throw acquisitionError("ACQUISITION_CONFLICT_TARGET_INVALID", "Acquisition target is missing.");
+    assertServerExtensionId(targetId);
+    if (request.disposition !== "create") {
+      const candidate = acquisition.conflictCandidates.find((item) => item.extensionId === targetId);
+      if (!candidate?.eligible) {
+        throw acquisitionError("ACQUISITION_CONFLICT_TARGET_INVALID", "Acquisition target was not issued as an eligible server candidate.");
+      }
+    }
+    const developerMutationKey = `developer:${acquisition.verification.developerSpkiSha256}`;
+    if (
+      request.disposition === "create"
+      && acquisition.conflictCandidates.some((item) => item.matchBy === "store-identity" && item.blockingReason === "developer-identity-mismatch")
+    ) {
+      throw acquisitionError("ACQUISITION_IDENTITY_CONFLICT", "The canonical store id is already associated with another developer identity.");
+    }
+    return this.withExtensionMutation([
+      targetId,
+      `store:chrome-web-store:${acquisition.storeId}`,
+      developerMutationKey,
+      "extension-bindings",
+    ], () => (
+      this.commitPreparedAcquisitionInternal(acquisition, request, targetId)
+    ));
+  }
+
+  private async commitPreparedAcquisitionInternal(
+    acquisition: PreparedExtensionAcquisition,
+    request: ExtensionAcquisitionSessionConfirmRequest,
+    targetId: string,
+  ): Promise<ExtensionEntity> {
+    await assertPreparedAcquisitionPaths(acquisition, this.extensionAcquisitionDir);
+    // The provider gate is required before and during network I/O. Once this session has a
+    // complete, verified local artifact, disabling a source must not strand a user-confirmed
+    // package; no network request occurs below. The current setting is still read as a
+    // synchronization point for callers that update settings concurrently.
+    await this.options.readSettings?.();
+
+    const currentExtensions = await this.options.repository.listExtensions();
+    const existing = request.disposition === "create"
+      ? undefined
+      : currentExtensions.find((extension) => extension.id === targetId);
+    if (request.disposition !== "create" && !existing) {
+      throw acquisitionError("ACQUISITION_CONFLICT_TARGET_INVALID", "The selected extension no longer exists.");
+    }
+    if (request.disposition === "create" && currentExtensions.some((extension) => extension.id === targetId)) {
+      throw acquisitionError("ACQUISITION_CONFLICT_TARGET_INVALID", "The generated extension target already exists.");
+    }
+    if (request.disposition === "create") {
+      if (currentExtensions.some((extension) => (
+        extension.storeIdentity?.namespace === "chrome-web-store"
+        && extension.storeIdentity.storeId === acquisition.storeId
+      ))) {
+        throw acquisitionError("ACQUISITION_CONFLICT_TARGET_INVALID", "An existing canonical store record must be explicitly upgraded or reused.");
+      }
+      if (currentExtensions.some((extension) => (
+        extension.storeId === acquisition.storeId && !extension.storeIdentity
+      ))) {
+        throw acquisitionError("ACQUISITION_CONFLICT_TARGET_INVALID", "An existing legacy store record must be explicitly upgraded.");
+      }
+      if (currentExtensions.some((extension) => (
+        extension.id !== targetId && persistedDeveloperFingerprint(extension) === acquisition.verification.developerSpkiSha256
+      ))) {
+        throw acquisitionError("ACQUISITION_IDENTITY_CONFLICT", "The verified developer identity is already used by another extension.");
+      }
+    }
+
+    const mismatchedStoreIdentity = currentExtensions.some((extension) => (
+      extension.storeIdentity?.namespace === "chrome-web-store"
+      && extension.storeIdentity.storeId === acquisition.storeId
+      && persistedDeveloperFingerprint(extension) !== undefined
+      && persistedDeveloperFingerprint(extension) !== acquisition.verification.developerSpkiSha256
+    ));
+    if (mismatchedStoreIdentity) {
+      throw acquisitionError("ACQUISITION_IDENTITY_CONFLICT", "The canonical store id is already bound to another developer identity.");
+    }
+    if (existing) {
+      if (request.disposition !== "create" && acquisition.targetUpdatedAt && existing.updatedAt !== acquisition.targetUpdatedAt) {
+        throw acquisitionError("ACQUISITION_CONFLICT_TARGET_INVALID", "The extension changed after this update session was created.");
+      }
+      if (request.disposition === "upgrade" && compareExtensionVersions(acquisition.package.version, existing.version) < 0) {
+        throw acquisitionError("ACQUISITION_CONFLICT_TARGET_INVALID", "The verified package is older than the installed extension.");
+      }
+      const developerFingerprint = persistedDeveloperFingerprint(existing);
+      if (
+        request.disposition === "upgrade"
+        && existing.provenance?.verification.level === "cws-publisher-verified"
+        && (
+          existing.provenance.verification.publisherTrustRootId !== acquisition.verification.publisherTrustRootId
+          || (existing.provenance.verification.publisherTrustRootVersion ?? 0) > acquisition.verification.publisherTrustRootVersion
+          || (
+            existing.provenance.verification.publisherKeySha256 !== undefined
+            && existing.provenance.verification.publisherKeySha256 !== acquisition.verification.publisherSpkiSha256
+          )
+        )
+      ) {
+        throw acquisitionError("ACQUISITION_IDENTITY_CONFLICT", "The update would weaken or change publisher verification evidence.");
+      }
+      const metadataOnlyWithoutIdentity = existing.installState === "metadata-only"
+        && (
+          existing.storeIdentity?.namespace === "chrome-web-store"
+            ? existing.storeIdentity.storeId === acquisition.storeId
+            : !existing.storeIdentity && existing.storeId === acquisition.storeId
+        )
+        && developerFingerprint === undefined;
+      if (developerFingerprint !== acquisition.verification.developerSpkiSha256 && !metadataOnlyWithoutIdentity) {
+        throw acquisitionError("ACQUISITION_IDENTITY_CONFLICT", "The selected extension developer identity changed.");
+      }
+      if (
+        existing.storeIdentity
+        && (existing.storeIdentity.namespace !== "chrome-web-store" || existing.storeIdentity.storeId !== acquisition.storeId)
+      ) {
+        throw acquisitionError("ACQUISITION_IDENTITY_CONFLICT", "The selected extension has a different canonical store identity.");
+      }
+      if (
+        request.disposition === "upgrade"
+        && !metadataOnlyWithoutIdentity
+        && (existing.updateProviderId !== acquisition.selectedProviderId || existing.storeIdentity?.storeId !== acquisition.storeId)
+      ) {
+        throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "The update provider or canonical id changed.");
+      }
+      await this.assertNotInUse(existing.id);
+    }
+    const environmentIds = uniqueBoundedIds(request.environmentIds ?? []);
+    const activeEnvironmentIds = this.options.activeEnvironmentIds?.() ?? new Set<string>();
+    const existingBindings = existing
+      ? await this.options.repository.listExtensionEnvironmentBindings(existing.id)
+      : [];
+    if (existingBindings.some((binding) => activeEnvironmentIds.has(binding.environmentId))) {
+      throw Object.assign(new Error("Stop environments using this extension before applying the verified package."), {
+        status: 409,
+        code: "EXTENSION_IN_USE",
+      });
+    }
+    if (environmentIds.some((environmentId) => activeEnvironmentIds.has(environmentId))) {
+      throw Object.assign(new Error("Stop the selected environment before binding a newly acquired extension."), {
+        status: 409,
+        code: "EXTENSION_IN_USE",
+      });
+    }
+
+    const verification = await this.verifyStoreCrxFile(acquisition.artifactPath, acquisition.storeId);
+    assertSameVerificationFacts(acquisition.verification, verification);
+    const stagedFingerprint = await fingerprintStagedExtensionTree(acquisition.stagedRoot, {
+      maxFiles: 20_000,
+      maxExpandedBytes: 512 * 1024 * 1024,
+    });
+    if (
+      stagedFingerprint.sha256 !== acquisition.package.treeSha256
+      || stagedFingerprint.fileCount !== acquisition.package.stagedFileCount
+      || stagedFingerprint.expandedBytes !== acquisition.package.stagedExpandedBytes
+    ) {
+      throw acquisitionError("ACQUISITION_COMMIT_FAILED", "Staged extension files changed after preflight.");
+    }
+
+    const addedPermissions = existing && existing.installState !== "metadata-only"
+      ? permissionsAdded(existing, {
+          ...existing,
+          permissions: acquisition.package.permissions,
+          hostPermissions: acquisition.package.hostPermissions,
+          optionalPermissions: acquisition.package.optionalPermissions,
+          optionalHostPermissions: acquisition.package.optionalHostPermissions,
+        })
+      : [];
+    if (addedPermissions.length > 0) {
+      if (
+        !acquisition.permissionApprovalToken
+        || !safeTokenEquals(request.permissionApprovalToken, acquisition.permissionApprovalToken)
+        || !sameStringSet(addedPermissions, acquisition.addedPermissions)
+      ) {
+        throw Object.assign(
+          acquisitionError("ACQUISITION_PERMISSION_INCREASE", "The verified update adds permissions and requires explicit approval."),
+          { permissions: addedPermissions },
+        );
+      }
+    }
+
+    if (request.disposition === "reuse") {
+      if (
+        !existing?.localPath
+        || !isLoadableInstallState(existing.installState)
+        || (existing.storeIdentity?.storeId ?? existing.storeId) !== acquisition.storeId
+      ) {
+        throw acquisitionError("ACQUISITION_CONFLICT_TARGET_INVALID", "The reusable extension is not locally loadable.");
+      }
+      await readManifestFromDirectory(existing.localPath);
+      if (environmentIds.length > 0) {
+        await this.options.repository.bindExtensionToEnvironments(existing.id, environmentIds);
+      }
+      return (await this.options.repository.getExtension(existing.id)) ?? existing;
+    }
+
+    // The package Manifest may omit `key`; only then may the exact verified CRX developer
+    // SPKI be added for the unpacked browser copy. A conflicting signed key is never
+    // silently rewritten because the original Manifest bytes are covered by CRX3 proofs.
+    const signedManifestKey = await readManifestKeyExact(acquisition.stagedRoot);
+    if (signedManifestKey && signedManifestKey !== verification.developerSpkiBase64) {
+      throw acquisitionError("ACQUISITION_IDENTITY_CONFLICT", "The signed Manifest key conflicts with the verified developer identity.");
+    }
+    if (!signedManifestKey) await applyManifestKey(acquisition.stagedRoot, verification.developerSpkiBase64);
+    const publishedTreeFingerprint = await fingerprintStagedExtensionTree(acquisition.stagedRoot, {
+      maxFiles: 20_000,
+      maxExpandedBytes: 512 * 1024 * 1024,
+    });
+    const timestamp = nowIso();
+    const artifactLivePath = path.resolve(this.extensionArtifactDir, targetId, "current.crx");
+    const treeLivePath = path.resolve(this.options.extensionCacheDir, targetId);
+    const storeUrl = chromeWebStoreListingUrl(acquisition.storeId);
+    const entity: ExtensionEntity = {
+      ...(existing ?? {
+        id: targetId,
+        createdAt: timestamp,
+        status: "enabled" as const,
+      }),
+      id: targetId,
+      name: acquisition.package.name,
+      description: acquisition.package.description,
+      sourceKind: "local-crx",
+      sourceUrl: artifactLivePath,
+      sourceId: undefined,
+      storeId: acquisition.storeId,
+      storeUrl,
+      storeIdentity: {
+        namespace: "chrome-web-store",
+        storeId: acquisition.storeId,
+        listingUrl: storeUrl,
+      },
+      provenance: {
+        schemaVersion: 1,
+        ...(acquisition.catalog ? {
+          catalog: {
+            providerId: acquisition.catalog.providerId,
+            observedAt: acquisition.catalog.observedAt,
+          },
+        } : {}),
+        artifact: {
+          providerId: acquisition.selectedProviderId,
+          finalByteHost: acquisition.report.transport.finalByteHost,
+          fetchedAt: acquisition.report.transport.fetchedAt,
+          format: "crx3",
+          size: verification.crxSize,
+          sha256: verification.crxSha256,
+          retained: true,
+        },
+        verification: {
+          level: "cws-publisher-verified",
+          verifiedAt: timestamp,
+          proofDerivedStoreId: verification.developerDerivedId,
+          developerKeySha256: verification.developerSpkiSha256,
+          publisherKeySha256: verification.publisherSpkiSha256,
+          publisherTrustRootId: verification.publisherTrustRootId,
+          publisherTrustRootVersion: verification.publisherTrustRootVersion,
+          manifestSha256: acquisition.package.manifestSha256,
+          treeSha256: publishedTreeFingerprint.sha256,
+        },
+        transfer: {
+          kind: "direct-acquisition",
+          at: timestamp,
+        },
+      },
+      artifactArchivePath: artifactLivePath,
+      updateProviderId: acquisition.selectedProviderId,
+      updateState: { status: "idle", checkedAt: timestamp },
+      version: acquisition.package.version,
+      manifestVersion: acquisition.package.manifestVersion,
+      permissions: [...acquisition.package.permissions],
+      hostPermissions: [...acquisition.package.hostPermissions],
+      optionalPermissions: [...acquisition.package.optionalPermissions],
+      optionalHostPermissions: [...acquisition.package.optionalHostPermissions],
+      permissionRisks: acquisition.package.permissionRisks.map((risk) => ({ ...risk })),
+      installState: "installed",
+      updatePolicy: existing?.updatePolicy
+        ?? (acquisition.selectedProviderId === "chrome-web-store" ? "auto" : "notify"),
+      sha256: verification.crxSha256,
+      manifestSha256: acquisition.package.manifestSha256,
+      localPath: treeLivePath,
+      manifestKey: verification.developerSpkiBase64,
+      directoryMode: undefined,
+      lastInstalledAt: timestamp,
+      lastCheckedAt: timestamp,
+      lastError: undefined,
+      status: existing?.status ?? "enabled",
+      createdAt: existing?.createdAt ?? timestamp,
+      updatedAt: timestamp,
+    };
+
+    const newBindings = [...existingBindings];
+    const existingBindingIds = new Set(existingBindings.map((binding) => binding.environmentId));
+    for (const environmentId of environmentIds) {
+      if (existingBindingIds.has(environmentId)) continue;
+      newBindings.push({
+        environmentId,
+        extensionId: targetId,
+        lifecycleRevision: createId("binding"),
+      });
+    }
+    newBindings.sort((left, right) => left.environmentId.localeCompare(right.environmentId));
+    const oldDatabaseFingerprint = existing
+      ? extensionDatabaseProjectionFingerprint(existing, existingBindings)
+      : undefined;
+    const newDatabaseFingerprint = extensionDatabaseProjectionFingerprint(entity, newBindings);
+    const artifactOldFingerprint = await fingerprintPublishedPath("artifact", artifactLivePath);
+    const treeOldFingerprint = await fingerprintPublishedPath("tree", treeLivePath);
+    const publications: [ExtensionCommitPublication, ExtensionCommitPublication] = [
+      {
+        kind: "artifact",
+        stagedPath: path.resolve(acquisition.artifactPath),
+        livePath: artifactLivePath,
+        asidePath: path.resolve(this.extensionArtifactDir, targetId, `.old-${acquisition.sessionId}`),
+        oldFingerprint: artifactOldFingerprint,
+        newFingerprint: verification.crxSha256,
+      },
+      {
+        kind: "tree",
+        stagedPath: path.resolve(acquisition.stagedRoot),
+        livePath: treeLivePath,
+        asidePath: path.resolve(this.options.extensionCacheDir, `.old-${targetId}-${acquisition.sessionId}`),
+        oldFingerprint: treeOldFingerprint,
+        newFingerprint: publishedTreeFingerprint.sha256,
+      },
+    ];
+
+    let journal: ExtensionCommitJournalRecord | undefined;
+    try {
+      await syncPublishedTree(acquisition.stagedRoot);
+      await syncFile(acquisition.artifactPath);
+      journal = await this.commitJournal.create({
+        sessionId: acquisition.sessionId,
+        targetExtensionId: targetId,
+        oldEntityFingerprint: oldDatabaseFingerprint,
+        newEntityFingerprint: newDatabaseFingerprint,
+        publications,
+      });
+      await this.options.acquisitionCommitFaultForTesting?.("prepared");
+      await this.publishCommitFiles(journal);
+      journal = await this.commitJournal.advance(journal, "files-published");
+      await this.options.acquisitionCommitFaultForTesting?.("files-published");
+      await this.options.repository.commitExtensionAcquisition({
+        extension: entity,
+        expectedExistingUpdatedAt: existing?.updatedAt,
+        expectedEnvironmentBindings: existingBindings,
+        environmentBindings: newBindings,
+      });
+      await this.options.acquisitionCommitFaultForTesting?.("database-written");
+      journal = await this.commitJournal.advance(journal, "database-committed");
+      await this.options.acquisitionCommitFaultForTesting?.("database-committed");
+      await this.finalizeCommitFiles(journal);
+      journal = await this.commitJournal.advance(journal, "complete");
+      await this.options.acquisitionCommitFaultForTesting?.("complete");
+      await this.commitJournal.remove(journal);
+      return entity;
+    } catch (error) {
+      if (!journal) throw error;
+      const databaseState = await this.commitDatabaseState(journal).catch(() => undefined);
+      try {
+        await this.commitJournal.reconcile(journal, {
+          databaseState: (record) => this.commitDatabaseState(record),
+          rollbackFiles: (record) => this.rollbackCommitFiles(record),
+          finalizeFiles: (record) => this.finalizeCommitFiles(record),
+        });
+      } catch (reconciliationError) {
+        throw Object.assign(
+          acquisitionError("ACQUISITION_RECONCILIATION_REQUIRED", "The extension commit is awaiting durable startup reconciliation."),
+          { reconciliationRequired: true, cause: reconciliationError },
+        );
+      }
+      if (databaseState === "new") {
+        const committed = await this.options.repository.getExtension(targetId);
+        if (committed) return committed;
+      }
+      throw acquisitionError("ACQUISITION_COMMIT_FAILED", "The extension commit was rolled back safely.", error);
+    }
+  }
+
+  private async importUploadedArchiveInternal(
+    bytes: Uint8Array,
+    assetKind: ExtensionAssetKind,
+    options: ExtensionImportOptions,
   ): Promise<ExtensionEntity> {
     const identity = await this.identityFromArchiveBytes(bytes, assetKind);
     const conflict = await this.resolveImportDisposition(identity, options);
@@ -369,14 +846,24 @@ export class ExtensionService {
 
   /** Deletes the DB row (and bindings) then best-effort cleans panel-owned cache/archive files. */
   async deleteExtension(id: string): Promise<void> {
+    return this.withExtensionMutation([id], () => this.deleteExtensionInternal(id));
+  }
+
+  private async deleteExtensionInternal(id: string): Promise<void> {
     const extension = await this.getExtensionOrThrow(id);
     await this.options.repository.deleteExtension(id);
     await this.cleanupExtensionFiles(extension);
-    await this.cleanupRuntimeBindings(id);
+    await this.cleanupRuntimeBindingsInternal(id);
   }
 
   /** Best-effort cleanup after the repository has removed one or more bindings. */
   async cleanupRuntimeBindings(extensionId: string, environmentIds?: string[]): Promise<void> {
+    return this.withExtensionMutation([extensionId], () => (
+      this.cleanupRuntimeBindingsInternal(extensionId, environmentIds)
+    ));
+  }
+
+  private async cleanupRuntimeBindingsInternal(extensionId: string, environmentIds?: string[]): Promise<void> {
     const held = this.options.activeEnvironmentIds?.() ?? new Set<string>();
     const removable = environmentIds?.filter((environmentId) => !held.has(environmentId));
     if (environmentIds && removable?.length === 0) return;
@@ -389,12 +876,31 @@ export class ExtensionService {
 
   /** New bindings require a package that CBPanel can load now; historical bindings stay untouched. */
   async bindToEnvironments(id: string, environmentIds: string[]): Promise<BrowserEnvironment[]> {
+    return this.withExtensionMutation([id], () => this.bindToEnvironmentsInternal(id, environmentIds));
+  }
+
+  async updatePreferences(
+    id: string,
+    patch: Partial<Pick<ExtensionEntity, "status" | "updatePolicy">>,
+  ): Promise<ExtensionEntity> {
+    return this.withExtensionMutation([id], () => this.options.repository.updateExtension(id, patch));
+  }
+
+  async unbindFromEnvironments(id: string, environmentIds?: string[]): Promise<BrowserEnvironment[]> {
+    return this.withExtensionMutation([id], async () => {
+      const environments = await this.options.repository.unbindExtensionFromEnvironments(id, environmentIds);
+      await this.cleanupRuntimeBindingsInternal(id, environments.map((environment) => environment.id));
+      return environments;
+    });
+  }
+
+  private async bindToEnvironmentsInternal(id: string, environmentIds: string[]): Promise<BrowserEnvironment[]> {
     const extension = await this.getExtensionOrThrow(id);
     if (!isLoadableInstallState(extension.installState) || !extension.localPath) {
       throw bindPackageRequiredError();
     }
     assertPathHasNoComma(extension.localPath);
-    const checked = await this.check(id);
+    const checked = await this.checkInternal(id);
     if (!isLoadableInstallState(checked.installState) || !checked.localPath) {
       throw bindPackageRequiredError(checked.lastError);
     }
@@ -420,6 +926,10 @@ export class ExtensionService {
   }
 
   async refreshSource(id: string): Promise<ExtensionSourceRefreshResult> {
+    return this.withExtensionMutation([`extension-source-${id}`], () => this.refreshSourceInternal(id));
+  }
+
+  private async refreshSourceInternal(id: string): Promise<ExtensionSourceRefreshResult> {
     const source = await this.getExtensionSourceOrThrow(id);
     if (source.status === "disabled") {
       throw Object.assign(new Error("Extension source is disabled"), { status: 409 });
@@ -482,6 +992,10 @@ export class ExtensionService {
   }
 
   async install(id: string, options: InUseGuardOptions = {}): Promise<ExtensionEntity> {
+    return this.withExtensionMutation([id], () => this.installInternal(id, options));
+  }
+
+  private async installInternal(id: string, options: InUseGuardOptions = {}): Promise<ExtensionEntity> {
     const extension = await this.getExtensionOrThrow(id);
     await this.assertNotInUse(extension.id, options);
     // Preserve update-available on rollback so the UI Update action and B16 check()
@@ -503,8 +1017,20 @@ export class ExtensionService {
       if (extension.sourceKind === "local-directory") {
         return await this.refreshLocalDirectory(extension);
       }
+      if (extension.provenance?.verification.level === "cws-publisher-verified") {
+        if (extension.localPath && isLoadableInstallState(extension.installState)) {
+          return this.checkInternal(extension.id);
+        }
+        throw Object.assign(new Error("Verified store extension must be reacquired through a provider session."), {
+          status: 409,
+          code: "EXTENSION_STORE_REACQUISITION_REQUIRED",
+        });
+      }
       if (extension.sourceKind === "local-zip" || extension.sourceKind === "local-crx") {
         return await this.installLocalAsset(extension);
+      }
+      if (extension.sourceKind === "managed-snapshot") {
+        return await this.checkInternal(extension.id);
       }
       if (extension.sourceKind === "remote-zip" || extension.sourceKind === "remote-crx") {
         return await this.installRemoteAsset(extension);
@@ -528,6 +1054,10 @@ export class ExtensionService {
   }
 
   async check(id: string): Promise<ExtensionEntity> {
+    return this.withExtensionMutation([id], () => this.checkInternal(id));
+  }
+
+  private async checkInternal(id: string): Promise<ExtensionEntity> {
     const extension = await this.getExtensionOrThrow(id);
     if (!extension.localPath) {
       return this.options.repository.updateExtension(id, {
@@ -567,6 +1097,23 @@ export class ExtensionService {
       // points staying complete forever. Falling back to the stored value is a hard requirement: a
       // manifest that cannot be read must never blank an established digest.
       const manifestSha256 = (await readManifestFingerprint(extension.localPath)) ?? extension.manifestSha256;
+      if (
+        extension.provenance?.verification.level === "cws-publisher-verified"
+        && extension.provenance.verification.treeSha256
+      ) {
+        const treeFingerprint = await fingerprintStagedExtensionTree(extension.localPath, {
+          maxFiles: 20_000,
+          maxExpandedBytes: 512 * 1024 * 1024,
+        }).catch(() => undefined);
+        if (!treeFingerprint || treeFingerprint.sha256 !== extension.provenance.verification.treeSha256) {
+          const message = "Verified extension files no longer match the retained CRX evidence";
+          return this.options.repository.updateExtension(id, {
+            installState: "local-missing",
+            lastCheckedAt: nowIso(),
+            lastError: message,
+          });
+        }
+      }
       const diskManifestKey = !extension.manifestKey
         && manifestKey
         ? manifestKey
@@ -642,7 +1189,18 @@ export class ExtensionService {
   }
 
   async checkUpdate(id: string): Promise<ExtensionEntity> {
+    return this.withExtensionMutation([id], () => this.checkUpdateInternal(id));
+  }
+
+  private async checkUpdateInternal(id: string): Promise<ExtensionEntity> {
     const extension = await this.getExtensionOrThrow(id);
+
+    if (extension.updateProviderId && extension.storeIdentity?.namespace === "chrome-web-store") {
+      return this.options.repository.updateExtension(id, {
+        lastCheckedAt: nowIso(),
+        lastError: undefined,
+      });
+    }
 
     if (extension.sourceId) {
       const source = await this.getExtensionSourceOrThrow(extension.sourceId);
@@ -652,7 +1210,7 @@ export class ExtensionService {
           lastError: "Extension source is disabled",
         });
       }
-      await this.refreshSource(source.id);
+      await this.refreshSourceInternal(source.id);
       const refreshed = await this.getExtensionOrThrow(id);
       return this.options.repository.updateExtension(id, {
         lastCheckedAt: nowIso(),
@@ -667,6 +1225,13 @@ export class ExtensionService {
     if (extension.sourceKind === "local-directory") {
       return this.checkLocalDirectoryUpdate(extension);
     }
+    if (extension.sourceKind === "managed-snapshot") {
+      return this.options.repository.updateExtension(id, {
+        updateState: { status: "provider-disabled", checkedAt: nowIso() },
+        lastCheckedAt: nowIso(),
+        lastError: "Managed snapshot has no remote update provider",
+      });
+    }
 
     return this.options.repository.updateExtension(id, {
       lastCheckedAt: nowIso(),
@@ -675,6 +1240,10 @@ export class ExtensionService {
   }
 
   async update(id: string): Promise<ExtensionEntity> {
+    return this.withExtensionMutation([id], () => this.updateInternal(id));
+  }
+
+  private async updateInternal(id: string): Promise<ExtensionEntity> {
     const extension = await this.getExtensionOrThrow(id);
     await this.assertNotInUse(extension.id);
     if (extension.installState !== "update-available") {
@@ -682,10 +1251,14 @@ export class ExtensionService {
     }
     // Permission increases are gated inside install() for every entry that can apply a package
     // (install / reinstall / update), so scripts cannot bypass the UI-only R3 disable.
-    return this.install(extension.id);
+    return this.installInternal(extension.id);
   }
 
   async reinstall(id: string): Promise<ExtensionEntity> {
+    return this.withExtensionMutation([id], () => this.reinstallInternal(id));
+  }
+
+  private async reinstallInternal(id: string): Promise<ExtensionEntity> {
     const extension = await this.getExtensionOrThrow(id);
     await this.assertNotInUse(extension.id);
     if (extension.sourceKind === "chrome-web-store") {
@@ -694,10 +1267,22 @@ export class ExtensionService {
         code: "EXTENSION_WEB_STORE",
       });
     }
-    return this.install(extension.id);
+    if (extension.provenance?.verification.level === "cws-publisher-verified") {
+      if (extension.localPath && isLoadableInstallState(extension.installState)) return this.checkInternal(id);
+      throw Object.assign(new Error("Verified store extension must be reacquired through a provider session."), {
+        status: 409,
+        code: "EXTENSION_STORE_REACQUISITION_REQUIRED",
+      });
+    }
+    if (extension.sourceKind === "managed-snapshot") return this.checkInternal(id);
+    return this.installInternal(extension.id);
   }
 
   async migrateIdentity(id: string): Promise<ExtensionEntity> {
+    return this.withExtensionMutation([id], () => this.migrateIdentityInternal(id));
+  }
+
+  private async migrateIdentityInternal(id: string): Promise<ExtensionEntity> {
     const extension = await this.getExtensionOrThrow(id);
     if (extension.sourceKind === "chrome-web-store") {
       throw Object.assign(new Error("Chrome Web Store metadata cannot be pinned without a verified asset"), {
@@ -729,7 +1314,7 @@ export class ExtensionService {
     const manifestKey = (await this.readSourceCrxPublicKey(extension)) ?? generateManifestKey();
     await this.options.repository.updateExtension(extension.id, { manifestKey });
     try {
-      return await this.install(extension.id);
+      return await this.installInternal(extension.id);
     } catch (error) {
       // A failed install may still have injected the key into the unpacked manifest; clearing the
       // persisted key then would desync entity and disk and flip the browser-side ID a second time.
@@ -745,9 +1330,26 @@ export class ExtensionService {
     environmentId: string,
     options: EnsureExtensionsOptions = {},
   ): Promise<EnsureExtensionsResult> {
-    const environment = await this.options.repository.getEnvironment(environmentId);
-    if (!environment) throw Object.assign(new Error("Environment does not exist"), { status: 404 });
+    const lease = this.mutationCoordinator.enter("extension-cache-commit");
+    try {
+      const environment = await this.options.repository.getEnvironment(environmentId);
+      if (!environment) throw Object.assign(new Error("Environment does not exist"), { status: 404 });
+      const mutationKeys = environment.extensionIds.length > 0
+        ? environment.extensionIds
+        : [`environment-launch-${environmentId}`];
+      return await lease.runWithExtensions(mutationKeys, () => (
+        this.ensureExtensionsInstalledInternal(environment, options)
+      ));
+    } finally {
+      lease.release();
+    }
+  }
 
+  private async ensureExtensionsInstalledInternal(
+    environment: BrowserEnvironment,
+    options: EnsureExtensionsOptions,
+  ): Promise<EnsureExtensionsResult> {
+    const environmentId = environment.id;
     const extensionById = new Map((await this.options.repository.listExtensions()).map((extension) => [extension.id, extension]));
     const bindingByExtensionId = new Map(
       (await this.options.repository.listEnvironmentExtensionBindings(environmentId))
@@ -772,8 +1374,8 @@ export class ExtensionService {
       // update-available must never auto-install here: update() owns the permission-diff gate,
       // and install() would apply added permissions without the 409 confirmation.
       const installed = isLoadableInstallState(extension.installState)
-        ? await this.check(extension.id)
-        : await this.install(extension.id, { exemptEnvironmentId: environmentId });
+        ? await this.checkInternal(extension.id)
+        : await this.installInternal(extension.id, { exemptEnvironmentId: environmentId });
       if (!isLoadableInstallState(installed.installState) || !installed.localPath) {
         throw Object.assign(new Error(`Extension ${installed.name} is not installed`), { status: 409 });
       }
@@ -825,10 +1427,129 @@ export class ExtensionService {
     return { paths, warnings, registrations };
   }
 
+  async transitionUpdateProvider(
+    id: string,
+    providerId: "chrome-web-store" | "crxsoso",
+  ): Promise<ExtensionEntity> {
+    if (providerId !== "chrome-web-store" && providerId !== "crxsoso") {
+      throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "The requested update provider is unsupported.");
+    }
+    return this.withExtensionMutation([id], async () => {
+      const extension = await this.getExtensionOrThrow(id);
+      if (
+        extension.sourceKind !== "local-crx"
+        || extension.storeIdentity?.namespace !== "chrome-web-store"
+        || extension.provenance?.verification.level !== "cws-publisher-verified"
+        || extension.provenance.verification.proofDerivedStoreId !== extension.storeIdentity.storeId
+        || persistedDeveloperFingerprint(extension) !== extension.provenance.verification.developerKeySha256
+        || !extension.provenance.artifact.retained
+        || extension.artifactArchivePath !== this.canonicalArtifactPath(extension.id)
+      ) {
+        throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "This extension lacks portable verified store evidence.");
+      }
+      const retainedStats = await fs.lstat(extension.artifactArchivePath).catch(() => undefined);
+      if (!retainedStats?.isFile() || retainedStats.isSymbolicLink() || retainedStats.nlink !== 1) {
+        throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "The retained package is missing or linked.");
+      }
+      const retainedVerification = await this.verifyStoreCrxFile(
+        extension.artifactArchivePath,
+        extension.storeIdentity.storeId,
+      );
+      if (
+        retainedVerification.crxSha256 !== extension.provenance.artifact.sha256
+        || retainedVerification.crxSize !== extension.provenance.artifact.size
+        || retainedVerification.developerSpkiSha256 !== extension.provenance.verification.developerKeySha256
+        || retainedVerification.developerDerivedId !== extension.provenance.verification.proofDerivedStoreId
+        || retainedVerification.publisherSpkiSha256 !== extension.provenance.verification.publisherKeySha256
+        || retainedVerification.publisherTrustRootId !== extension.provenance.verification.publisherTrustRootId
+        || retainedVerification.publisherTrustRootVersion !== extension.provenance.verification.publisherTrustRootVersion
+      ) {
+        throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "The retained package no longer matches its verified evidence.");
+      }
+      const settings = this.options.readSettings
+        ? normalizeSettings(await this.options.readSettings())
+        : undefined;
+      if (settings && !isArtifactProviderEnabled(settings, providerId)) {
+        throw acquisitionError("ARTIFACT_PROVIDER_DISABLED", "Enable the selected package provider before switching updates.");
+      }
+      if (extension.updateProviderId === providerId) return extension;
+      if (!this.options.probeArtifactProvider) {
+        throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "The selected update provider cannot be verified right now.");
+      }
+      if (this.providerProbeReservations >= 2) {
+        throw acquisitionError("ACQUISITION_TEMP_BUDGET_EXCEEDED", "Provider transition probes are using their temporary storage budget.");
+      }
+      this.providerProbeReservations += 1;
+      let probeRoot: string | undefined;
+      try {
+        probeRoot = await fs.mkdtemp(path.join(this.extensionAcquisitionDir, ".provider-probe-"));
+        const probePath = path.join(probeRoot, "artifact.crx");
+        const probe = await this.options.probeArtifactProvider(providerId, extension.storeIdentity.storeId, probePath, new AbortController().signal);
+        if (
+          probe.storeId !== extension.storeIdentity.storeId
+          || probe.artifactProviderId !== providerId
+          || path.resolve(probe.download.path) !== path.resolve(probePath)
+        ) {
+          throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "The provider returned inconsistent identity facts.");
+        }
+        const verified = await this.verifyStoreCrxFile(probePath, extension.storeIdentity.storeId);
+        if (
+          verified.crxSha256 !== probe.download.sha256
+          || verified.crxSize !== probe.download.size
+          || verified.developerSpkiSha256 !== extension.provenance.verification.developerKeySha256
+          || verified.developerDerivedId !== extension.provenance.verification.proofDerivedStoreId
+          || verified.publisherSpkiSha256 !== extension.provenance.verification.publisherKeySha256
+          || verified.publisherTrustRootId !== extension.provenance.verification.publisherTrustRootId
+          || verified.publisherTrustRootVersion !== extension.provenance.verification.publisherTrustRootVersion
+        ) {
+          throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "The provider probe failed its CRX3 verification.");
+        }
+      } finally {
+        try {
+          if (probeRoot) await fs.rm(probeRoot, { recursive: true, force: true });
+          this.providerProbeReservations = Math.max(0, this.providerProbeReservations - 1);
+        } catch {
+          // Keep the reservation until startup sweep can reclaim the debt.
+        }
+      }
+      return this.options.repository.updateExtension(id, {
+        updateProviderId: providerId,
+        updateState: { status: "idle", checkedAt: nowIso() },
+        updatePolicy: providerId === "chrome-web-store" ? "auto" : "notify",
+      });
+    });
+  }
+
+  async recordRemoteUpdateObservation(
+    id: string,
+    providerId: "chrome-web-store" | "crxsoso",
+    observation: { status: "idle" | "available" | "provider-disabled" | "provider-unavailable" | "takedown"; availableVersion?: string; errorCode?: string },
+    expectedUpdatedAt?: string,
+  ): Promise<ExtensionEntity> {
+    return this.withExtensionMutation([id], async () => {
+      const extension = await this.getExtensionOrThrow(id);
+      if (expectedUpdatedAt !== undefined && extension.updatedAt !== expectedUpdatedAt) {
+        throw acquisitionError("ACQUISITION_CONFLICT_TARGET_INVALID", "The extension changed while its update was being checked.");
+      }
+      if (extension.updateProviderId !== providerId || extension.storeIdentity?.namespace !== "chrome-web-store") {
+        throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "The update observation no longer matches the extension provider.");
+      }
+      return this.options.repository.updateExtension(id, {
+        updateState: {
+          ...observation,
+          checkedAt: nowIso(),
+        },
+      });
+    });
+  }
+
   async markRegistrationReady(
     registration: Pick<ExtensionLaunchRegistration, "runtimePath" | "signature">,
   ): Promise<void> {
-    await this.runtimeService.markRegistrationReady(registration.runtimePath, registration.signature);
+    const key = `runtime-registration-${createHash("sha256").update(path.resolve(registration.runtimePath)).digest("hex")}`;
+    await this.withExtensionMutation([key], () => (
+      this.runtimeService.markRegistrationReady(registration.runtimePath, registration.signature)
+    ));
   }
 
   async resolveEnvironment(environmentId: string): Promise<{ environment: BrowserEnvironment; profile: BrowserEnvironment["runtimeProfile"] }> {
@@ -1605,6 +2326,115 @@ export class ExtensionService {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
   }
+
+  canonicalArtifactPath(extensionId: string): string {
+    if (!/^[A-Za-z0-9_-]{1,256}$/.test(extensionId)) {
+      throw Object.assign(new Error("Extension id cannot select a managed artifact path"), {
+        status: 400,
+        code: "EXTENSION_ARTIFACT_ID_INVALID",
+      });
+    }
+    return path.join(this.extensionArtifactDir, extensionId, "current.crx");
+  }
+
+  private async publishCommitFiles(record: ExtensionCommitJournalRecord): Promise<void> {
+    for (const publication of record.publications) {
+      await fs.mkdir(path.dirname(publication.livePath), { recursive: true });
+      await fs.rm(publication.asidePath, { recursive: true, force: true });
+      if (await pathExists(publication.livePath)) {
+        await fs.rename(publication.livePath, publication.asidePath);
+      }
+      try {
+        await fs.rename(publication.stagedPath, publication.livePath);
+      } catch (error) {
+        if (await pathExists(publication.asidePath)) {
+          await fs.rename(publication.asidePath, publication.livePath).catch(() => undefined);
+        }
+        throw error;
+      }
+      if (await fingerprintPublishedPath(publication.kind, publication.livePath) !== publication.newFingerprint) {
+        throw acquisitionError("ACQUISITION_COMMIT_FAILED", "Published extension files failed their fingerprint check.");
+      }
+      await syncNearestManagedDirectory(path.dirname(publication.livePath));
+    }
+  }
+
+  private async rollbackCommitFiles(record: ExtensionCommitJournalRecord): Promise<void> {
+    for (const publication of [...record.publications].reverse()) {
+      const liveFingerprint = await fingerprintPublishedPath(publication.kind, publication.livePath);
+      const asideExists = await pathExists(publication.asidePath);
+      const stagedExists = await pathExists(publication.stagedPath);
+      // In the prepared phase a same-byte live file may be the old publication, so only
+      // move it back when an aside proves we already displaced it, or when the staged
+      // source is gone (a crash immediately after the final rename for a new target).
+      if (liveFingerprint === publication.newFingerprint && (asideExists || !stagedExists)) {
+        await fs.mkdir(path.dirname(publication.stagedPath), { recursive: true });
+        if (stagedExists) await fs.rm(publication.stagedPath, { recursive: true, force: true });
+        await fs.rename(publication.livePath, publication.stagedPath);
+      }
+      if (asideExists) {
+        await fs.rm(publication.livePath, { recursive: true, force: true });
+        await fs.rename(publication.asidePath, publication.livePath);
+      }
+      const restoredFingerprint = await fingerprintPublishedPath(publication.kind, publication.livePath);
+      if (restoredFingerprint !== publication.oldFingerprint) {
+        throw new Error("Could not restore the previous extension publication exactly.");
+      }
+      await syncNearestManagedDirectory(path.dirname(publication.livePath));
+    }
+  }
+
+  private async finalizeCommitFiles(record: ExtensionCommitJournalRecord): Promise<void> {
+    for (const publication of record.publications) {
+      let liveFingerprint = await fingerprintPublishedPath(publication.kind, publication.livePath);
+      if (liveFingerprint !== publication.newFingerprint) {
+        const stagedFingerprint = await fingerprintPublishedPath(publication.kind, publication.stagedPath);
+        if (stagedFingerprint !== publication.newFingerprint) {
+          throw new Error("Committed extension publication is missing its verified new bytes.");
+        }
+        await fs.rm(publication.livePath, { recursive: true, force: true });
+        await fs.mkdir(path.dirname(publication.livePath), { recursive: true });
+        await fs.rename(publication.stagedPath, publication.livePath);
+        liveFingerprint = await fingerprintPublishedPath(publication.kind, publication.livePath);
+      }
+      if (liveFingerprint !== publication.newFingerprint) {
+        throw new Error("Committed extension publication fingerprint is invalid.");
+      }
+      await Promise.all([
+        fs.rm(publication.asidePath, { recursive: true, force: true }),
+        fs.rm(publication.stagedPath, { recursive: true, force: true }),
+      ]);
+      await syncNearestManagedDirectory(path.dirname(publication.livePath));
+    }
+  }
+
+  private async commitDatabaseState(record: ExtensionCommitJournalRecord): Promise<"old" | "new"> {
+    const extension = await this.options.repository.getExtension(record.targetExtensionId);
+    if (!extension) {
+      if (!record.oldEntityFingerprint) return "old";
+      throw new Error("Extension commit database state matches neither journal projection.");
+    }
+    const bindings = await this.options.repository.listExtensionEnvironmentBindings(extension.id);
+    const fingerprint = extensionDatabaseProjectionFingerprint(
+      extension,
+      bindings,
+    );
+    if (fingerprint === record.newEntityFingerprint) return "new";
+    if (fingerprint === record.oldEntityFingerprint) return "old";
+    throw new Error("Extension commit database state matches neither journal projection.");
+  }
+
+  private async withExtensionMutation<T>(
+    extensionIds: readonly string[],
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const lease = this.mutationCoordinator.enter("extension-cache-commit");
+    try {
+      return await lease.runWithExtensions(extensionIds, operation);
+    } finally {
+      lease.release();
+    }
+  }
 }
 
 export async function readManifestFromDirectory(directory: string): Promise<ExtensionManifest> {
@@ -1777,6 +2607,289 @@ function isLoadableInstallState(state: ExtensionEntity["installState"]): boolean
   return state === "installed" || state === "update-available";
 }
 
+async function assertPreparedAcquisitionPaths(
+  acquisition: PreparedExtensionAcquisition,
+  acquisitionRoot: string,
+): Promise<void> {
+  if (!/^[A-Za-z0-9_-]{32,128}$/.test(acquisition.sessionId)) {
+    throw acquisitionError("ACQUISITION_COMMIT_FAILED", "Acquisition session identity is invalid.");
+  }
+  const sessionRoot = path.resolve(acquisitionRoot, acquisition.sessionId);
+  const artifactPath = path.resolve(acquisition.artifactPath);
+  const stagedRoot = path.resolve(acquisition.stagedRoot);
+  if (
+    artifactPath !== path.join(sessionRoot, "artifact.crx")
+    || !isPathInsideDir(stagedRoot, sessionRoot)
+    || stagedRoot === sessionRoot
+  ) {
+    throw acquisitionError("ACQUISITION_COMMIT_FAILED", "Acquisition paths escaped their disposable session root.");
+  }
+  const [sessionStats, artifactStats, stagedStats] = await Promise.all([
+    fs.lstat(sessionRoot).catch(() => undefined),
+    fs.lstat(artifactPath).catch(() => undefined),
+    fs.lstat(stagedRoot).catch(() => undefined),
+  ]);
+  if (
+    !sessionStats?.isDirectory() || sessionStats.isSymbolicLink()
+    || !artifactStats?.isFile() || artifactStats.isSymbolicLink() || artifactStats.nlink !== 1
+    || !stagedStats?.isDirectory() || stagedStats.isSymbolicLink()
+  ) {
+    throw acquisitionError("ACQUISITION_COMMIT_FAILED", "Acquisition files are missing or linked outside the managed session root.");
+  }
+  const [canonicalSession, canonicalArtifact, canonicalStaged] = await Promise.all([
+    fs.realpath(sessionRoot),
+    fs.realpath(artifactPath),
+    fs.realpath(stagedRoot),
+  ]);
+  if (
+    canonicalSession !== sessionRoot
+    || canonicalArtifact !== artifactPath
+    || canonicalStaged !== stagedRoot
+    || !isPathInsideDir(canonicalArtifact, canonicalSession)
+    || !isPathInsideDir(canonicalStaged, canonicalSession)
+  ) {
+    throw acquisitionError("ACQUISITION_COMMIT_FAILED", "Acquisition files traverse a linked filesystem component.");
+  }
+}
+
+function assertSameVerificationFacts(
+  expected: PreparedExtensionAcquisition["verification"],
+  actual: PreparedExtensionAcquisition["verification"],
+): void {
+  for (const key of [
+    "requestedId",
+    "declaredId",
+    "developerDerivedId",
+    "developerSpkiBase64",
+    "developerSpkiSha256",
+    "publisherSpkiSha256",
+    "publisherTrustRootId",
+    "publisherTrustRootVersion",
+    "zipOffset",
+    "zipSize",
+    "crxSize",
+    "crxSha256",
+  ] as const) {
+    if (expected[key] !== actual[key]) {
+      throw acquisitionError("ACQUISITION_COMMIT_FAILED", "CRX3 verification evidence changed after preflight.");
+    }
+  }
+}
+
+function persistedDeveloperFingerprint(extension: ExtensionEntity): string | undefined {
+  return extension.provenance?.verification.developerKeySha256
+    ?? manifestKeyFingerprint(extension.manifestKey);
+}
+
+function manifestKeyFingerprint(manifestKey: string | undefined): string | undefined {
+  if (!manifestKey) return undefined;
+  try {
+    const key = createPublicKey({ key: Buffer.from(manifestKey, "base64"), format: "der", type: "spki" });
+    return createHash("sha256")
+      .update(key.export({ format: "der", type: "spki" }))
+      .digest("hex");
+  } catch {
+    return undefined;
+  }
+}
+
+function extensionDatabaseProjectionFingerprint(
+  extension: ExtensionEntity,
+  bindings: Array<{ environmentId: string; extensionId: string; lifecycleRevision?: string }>,
+): string {
+  return createHash("sha256")
+    .update(stableJson({
+      extension,
+      bindings: [...bindings]
+        .map((binding) => ({
+          environmentId: binding.environmentId,
+          extensionId: binding.extensionId,
+          lifecycleRevision: binding.lifecycleRevision,
+        }))
+        .sort((left, right) => (
+          left.environmentId.localeCompare(right.environmentId)
+          || left.extensionId.localeCompare(right.extensionId)
+        )),
+    }), "utf8")
+    .digest("hex");
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(sortJsonValue(value));
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== undefined)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([key, item]) => [key, sortJsonValue(item)]));
+}
+
+async function fingerprintPublishedPath(
+  kind: ExtensionCommitPublication["kind"],
+  candidate: string,
+): Promise<string | undefined> {
+  const stats = await fs.lstat(candidate).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!stats) return undefined;
+  if (kind === "tree") {
+    if (!stats.isDirectory() || stats.isSymbolicLink()) throw new Error("Extension tree publication is not an ordinary directory.");
+    return (await fingerprintStagedExtensionTree(candidate, {
+      maxFiles: 20_000,
+      maxExpandedBytes: 512 * 1024 * 1024,
+    })).sha256;
+  }
+  if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1) {
+    throw new Error("Extension artifact publication is not an ordinary file.");
+  }
+  const handle = await fs.open(candidate, "r");
+  const hash = createHash("sha256");
+  try {
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let position = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, position);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    return hash.digest("hex");
+  } finally {
+    await handle.close();
+  }
+}
+
+async function syncManagedDirectory(directory: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(directory, "r");
+    await handle.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (process.platform !== "win32" || (code !== "EISDIR" && code !== "EPERM" && code !== "EINVAL")) throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function syncFile(filePath: string): Promise<void> {
+  const handle = await fs.open(filePath, "r");
+  try {
+    try {
+      await handle.sync();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== "win32" || (code !== "EPERM" && code !== "EINVAL" && code !== "ENOTSUP")) throw error;
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+async function syncPublishedTree(root: string): Promise<void> {
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    const child = path.join(root, entry.name);
+    const stats = await fs.lstat(child);
+    if (stats.isSymbolicLink()) throw acquisitionError("ACQUISITION_COMMIT_FAILED", "The staged extension tree contains a linked path.");
+    if (stats.isDirectory()) {
+      await syncPublishedTree(child);
+      await syncManagedDirectory(child);
+    } else if (stats.isFile()) {
+      await syncFile(child);
+    } else {
+      throw acquisitionError("ACQUISITION_COMMIT_FAILED", "The staged extension tree contains a special path.");
+    }
+  }
+  await syncManagedDirectory(root);
+}
+
+async function syncNearestManagedDirectory(directory: string): Promise<void> {
+  let candidate = path.resolve(directory);
+  for (;;) {
+    const stats = await fs.lstat(candidate).catch(() => undefined);
+    if (stats?.isDirectory() && !stats.isSymbolicLink()) {
+      await syncManagedDirectory(candidate);
+      return;
+    }
+    const parent = path.dirname(candidate);
+    if (parent === candidate) return;
+    candidate = parent;
+  }
+}
+
+async function pathExists(candidate: string): Promise<boolean> {
+  try {
+    await fs.access(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function uniqueBoundedIds(values: readonly string[]): string[] {
+  if (values.length > 10_000) throw acquisitionError("ACQUISITION_INPUT_UNSUPPORTED", "Too many environment bindings were requested.");
+  const ids = [...new Set(values.map((value) => value.trim()))];
+  if (ids.some((value) => !value || value.length > 256 || /[\u0000-\u001f\u007f]/.test(value))) {
+    throw acquisitionError("ACQUISITION_INPUT_UNSUPPORTED", "An environment binding id is invalid.");
+  }
+  return ids;
+}
+
+function safeTokenEquals(actual: string | undefined, expected: string): boolean {
+  if (!actual) return false;
+  const left = Buffer.from(actual, "utf8");
+  const right = Buffer.from(expected, "utf8");
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const a = [...left].sort();
+  const b = [...right].sort();
+  return a.every((value, index) => value === b[index]);
+}
+
+function compareExtensionVersions(left: string, right: string): number {
+  const a = left.split(".").map((part) => Number.parseInt(part, 10));
+  const b = right.split(".").map((part) => Number.parseInt(part, 10));
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const av = Number.isFinite(a[index]) ? a[index] : 0;
+    const bv = Number.isFinite(b[index]) ? b[index] : 0;
+    if (av !== bv) return av - bv;
+  }
+  return 0;
+}
+
+function assertServerExtensionId(value: string): void {
+  if (
+    !/^[A-Za-z0-9_-]{1,256}$/.test(value)
+    || value === "."
+    || value === ".."
+    || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(value)
+  ) {
+    throw acquisitionError("ACQUISITION_CONFLICT_TARGET_INVALID", "The server extension target id is invalid.");
+  }
+}
+
+function isArtifactProviderEnabled(
+  settings: AppSettings,
+  providerId: PreparedExtensionAcquisition["selectedProviderId"],
+): boolean {
+  return providerId === "chrome-web-store"
+    ? settings.extensionAcquisition.googleArtifactEnabled
+    : settings.extensionAcquisition.crxsosoArtifactEnabled;
+}
+
+function acquisitionError(code: string, message: string, cause?: unknown): Error {
+  const status = code === "ACQUISITION_COMMIT_FAILED" ? 500 : code === "ARTIFACT_PROVIDER_DISABLED" ? 409 : 409;
+  return Object.assign(new Error(message, cause === undefined ? undefined : { cause }), { status, code });
+}
+
 function bindPackageRequiredError(detail?: string): Error {
   return Object.assign(
     new Error(detail ? `Extension cannot be bound until its local package is valid: ${detail}` : "Extension cannot be bound until it has a valid installed package"),
@@ -1876,7 +2989,11 @@ export function analyzePermissionRisks(input: PermissionRiskInput): ExtensionPer
   const risks = new Map<string, ExtensionPermissionRisk>();
   const addRisk = (risk: ExtensionPermissionRisk): void => {
     const existing = risks.get(risk.permission);
-    if (existing && (existing.level === "high" || risk.level !== "high")) return;
+    if (existing) {
+      const moreSpecificContentScriptRisk = risk.reasonKey === "content-script-all-urls"
+        && existing.reasonKey !== "content-script-all-urls";
+      if (!moreSpecificContentScriptRisk && (existing.level === "high" || risk.level !== "high")) return;
+    }
     risks.set(risk.permission, risk);
   };
 
@@ -1910,12 +3027,23 @@ function classifyPermission(
 /** The subset of an entity that is derived purely from a resolved manifest. */
 type ExtensionManifestFields = Pick<
   ExtensionEntity,
-  "name" | "description" | "version" | "manifestVersion" | "permissions" | "hostPermissions" | "permissionRisks"
+  | "name"
+  | "description"
+  | "version"
+  | "manifestVersion"
+  | "permissions"
+  | "hostPermissions"
+  | "optionalPermissions"
+  | "optionalHostPermissions"
+  | "permissionRisks"
 >;
 
 function extensionFieldsFromManifest(manifest: ExtensionManifest): ExtensionManifestFields {
   const permissions = stringArray(manifest.permissions);
-  const hostPermissions = stringArray(manifest.host_permissions);
+  const contentMatches = contentScriptMatches(manifest.content_scripts);
+  const hostPermissions = [...new Set([...stringArray(manifest.host_permissions), ...contentMatches])];
+  const optionalPermissions = stringArray(manifest.optional_permissions);
+  const optionalHostPermissions = stringArray(manifest.optional_host_permissions);
   return {
     name: typeof manifest.name === "string" && manifest.name.trim() ? manifest.name.trim() : "Extension",
     description: typeof manifest.description === "string" ? manifest.description.trim() : "",
@@ -1923,12 +3051,14 @@ function extensionFieldsFromManifest(manifest: ExtensionManifest): ExtensionMani
     manifestVersion: Number(manifest.manifest_version),
     permissions,
     hostPermissions,
+    optionalPermissions,
+    optionalHostPermissions,
     permissionRisks: analyzePermissionRisks({
       permissions,
       hostPermissions,
-      optionalPermissions: stringArray(manifest.optional_permissions),
-      optionalHostPermissions: stringArray(manifest.optional_host_permissions),
-      contentScriptMatches: contentScriptMatches(manifest.content_scripts),
+      optionalPermissions,
+      optionalHostPermissions,
+      contentScriptMatches: contentMatches,
     }),
   };
 }
@@ -2041,8 +3171,18 @@ function stringArray(value: unknown): string[] {
 }
 
 function permissionsAdded(previous: ExtensionEntity, next: ExtensionEntity): string[] {
-  const before = new Set([...previous.permissions, ...previous.hostPermissions]);
-  return [...new Set([...next.permissions, ...next.hostPermissions].filter((permission) => !before.has(permission)))];
+  const before = new Set([
+    ...previous.permissions,
+    ...previous.hostPermissions,
+    ...(previous.optionalPermissions ?? []),
+    ...(previous.optionalHostPermissions ?? []),
+  ]);
+  return [...new Set([
+    ...next.permissions,
+    ...next.hostPermissions,
+    ...(next.optionalPermissions ?? []),
+    ...(next.optionalHostPermissions ?? []),
+  ].filter((permission) => !before.has(permission)))];
 }
 
 function isPermissionConfirmationError(error: unknown): boolean {
@@ -2205,6 +3345,16 @@ async function readManifestKey(directory: string): Promise<string | undefined> {
     const manifestPath = path.join(path.resolve(directory), "manifest.json");
     const manifest = parseManifestJson(stripBom(await fs.readFile(manifestPath, "utf8"))) as { key?: unknown };
     return typeof manifest.key === "string" && manifest.key.trim() ? manifest.key.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readManifestKeyExact(directory: string): Promise<string | undefined> {
+  try {
+    const manifestPath = path.join(path.resolve(directory), "manifest.json");
+    const manifest = parseManifestJson(stripBom(await fs.readFile(manifestPath, "utf8"))) as { key?: unknown };
+    return typeof manifest.key === "string" && manifest.key ? manifest.key : undefined;
   } catch {
     return undefined;
   }

@@ -9,8 +9,33 @@ export type ArchiveEntry = {
   bytes?: Uint8Array;
 };
 
+export type ArchiveExtractionLimits = {
+  maxArchiveBytes?: number;
+  maxEntries?: number;
+  maxFileExpandedBytes?: number;
+  maxTotalExpandedBytes?: number;
+  maxTemporaryDiskBytes?: number;
+  temporaryEntryOverheadBytes?: number;
+  maxPathBytes?: number;
+  maxPathDepth?: number;
+  maxTotalPathBytes?: number;
+  maxFilesystemNodes?: number;
+};
+
+const DEFAULT_EXTRACTION_LIMITS: Required<ArchiveExtractionLimits> = Object.freeze({
+  maxArchiveBytes: 256 * 1024 * 1024,
+  maxEntries: 50_000,
+  maxFileExpandedBytes: 128 * 1024 * 1024,
+  maxTotalExpandedBytes: 640 * 1024 * 1024,
+  maxTemporaryDiskBytes: 768 * 1024 * 1024,
+  temporaryEntryOverheadBytes: 4096,
+  maxPathBytes: 1024,
+  maxPathDepth: 32,
+  maxTotalPathBytes: 32 * 1024 * 1024,
+  maxFilesystemNodes: 50_000,
+});
+
 const TEXT_ENCODER = new TextEncoder();
-const TEXT_DECODER = new TextDecoder();
 
 export function jsonArchiveEntry(archivePath: string, value: unknown): ArchiveEntry {
   return {
@@ -65,15 +90,51 @@ export async function writeZipArchive(
   }
 }
 
-export async function extractZipArchive(inputPath: string, outputDir: string, unsafeMessage: string): Promise<void> {
+export async function extractZipArchive(
+  inputPath: string,
+  outputDir: string,
+  unsafeMessage: string,
+  options: { limits?: ArchiveExtractionLimits } = {},
+): Promise<void> {
+  const limits = { ...DEFAULT_EXTRACTION_LIMITS, ...(options.limits ?? {}) };
+  await assertOrdinaryExtractionRoot(outputDir);
   const writes: Promise<void>[] = [];
+  const budget = { compressedBytes: 0, entries: 0, expandedBytes: 0, nodes: 0, totalPathBytes: 0 };
+  let firstFailure: Error | undefined;
+  const pathKinds = new Map<string, "file" | "directory">();
+  const portablePaths = new Map<string, string>();
   const unzip = new Unzip((file) => {
+    if (firstFailure) throw firstFailure;
+    budget.entries += 1;
+    if (budget.entries > limits.maxEntries) {
+      firstFailure = archiveLimitError("Archive contains too many entries.");
+      throw firstFailure;
+    }
     if (!isSafeArchivePath(file.name)) {
       throw Object.assign(new Error(unsafeMessage), { status: 400 });
     }
-    const normalizedName = normalizeArchivePath(file.name);
+    const normalizedName = normalizeArchivePath(file.name).normalize("NFC");
+    budget.nodes += registerArchivePath(normalizedName, pathKinds, portablePaths, unsafeMessage, limits, budget);
+    if (budget.nodes > limits.maxFilesystemNodes) {
+      firstFailure = archiveLimitError("Archive expands to too many filesystem nodes.");
+      throw firstFailure;
+    }
     if (!normalizedName || normalizedName.endsWith("/")) return;
-    const write = writeUnzipFile(file, safeJoin(outputDir, normalizedName, unsafeMessage));
+    const write = writeUnzipFile(
+      file,
+      safeJoin(outputDir, normalizedName, unsafeMessage),
+      (bytes, fileBytes) => {
+        budget.expandedBytes += bytes;
+        if (
+          fileBytes > limits.maxFileExpandedBytes
+          || budget.expandedBytes > limits.maxTotalExpandedBytes
+          || budget.expandedBytes + (budget.nodes * limits.temporaryEntryOverheadBytes) > limits.maxTemporaryDiskBytes
+        ) {
+          firstFailure = archiveLimitError("Archive exceeds the bounded extraction budget.");
+          throw firstFailure;
+        }
+      },
+    );
     writes.push(write);
   });
   unzip.register(UnzipInflate);
@@ -81,8 +142,16 @@ export async function extractZipArchive(inputPath: string, outputDir: string, un
     const input = createReadStream(inputPath);
     input.on("data", (chunk) => {
       try {
-        unzip.push(chunk instanceof Uint8Array ? chunk : Buffer.from(chunk), false);
+        const bytes = chunk instanceof Uint8Array ? chunk : Buffer.from(chunk);
+        budget.compressedBytes += bytes.byteLength;
+        if (budget.compressedBytes > limits.maxArchiveBytes) {
+          firstFailure = archiveLimitError("Archive exceeds the compressed-byte limit.");
+          input.destroy(firstFailure);
+          return;
+        }
+        unzip.push(bytes, false);
       } catch (error) {
+        firstFailure = error as Error;
         input.destroy(error as Error);
       }
     });
@@ -96,12 +165,78 @@ export async function extractZipArchive(inputPath: string, outputDir: string, un
     });
     input.once("error", reject);
   });
-  await Promise.all(writes);
+  try {
+    await Promise.all(writes);
+  } catch (error) {
+    throw firstFailure ?? error;
+  }
 }
 
-export async function readJsonArchiveFile(filePath: string): Promise<unknown> {
+function archiveLimitError(message: string): Error {
+  return Object.assign(new Error(message), { status: 400, code: "ARCHIVE_RESOURCE_LIMIT" });
+}
+
+async function assertOrdinaryExtractionRoot(root: string): Promise<void> {
+  const absolute = path.resolve(root);
+  await fs.mkdir(absolute, { recursive: true });
+  const stats = await fs.lstat(absolute);
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw Object.assign(new Error("Archive extraction root must be an ordinary directory."), { status: 400 });
+  }
+  if (await fs.realpath(absolute) !== absolute) {
+    throw Object.assign(new Error("Archive extraction root must not traverse a linked directory."), { status: 400 });
+  }
+}
+
+function registerArchivePath(
+  archivePath: string,
+  pathKinds: Map<string, "file" | "directory">,
+  portablePaths: Map<string, string>,
+  unsafeMessage: string,
+  limits: Required<ArchiveExtractionLimits>,
+  budget: { totalPathBytes: number },
+): number {
+  const isDirectory = archivePath.endsWith("/");
+  const segments = archivePath.replace(/\/$/, "").split("/");
+  let added = 0;
+  if (segments.length > limits.maxPathDepth) throw archiveLimitError("Archive path is too deep.");
+  let cumulativeBytes = 0;
+  for (let index = 1; index <= segments.length; index += 1) {
+    cumulativeBytes += Buffer.byteLength(segments[index - 1] ?? "", "utf8") + (index > 1 ? 1 : 0);
+    if (cumulativeBytes > limits.maxPathBytes || budget.totalPathBytes + cumulativeBytes > limits.maxTotalPathBytes) {
+      throw archiveLimitError("Archive paths exceed the bounded path budget.");
+    }
+    const candidate = segments.slice(0, index).join("/");
+    const kind = index === segments.length && !isDirectory ? "file" : "directory";
+    const existing = pathKinds.get(candidate);
+    if (existing && (existing !== kind || index === segments.length)) {
+      throw Object.assign(new Error(unsafeMessage), { status: 400 });
+    }
+    const portableKey = candidate.toLowerCase();
+    const portableExisting = portablePaths.get(portableKey);
+    if (portableExisting && portableExisting !== candidate) {
+      throw Object.assign(new Error(unsafeMessage), { status: 400 });
+    }
+    if (!existing) {
+      pathKinds.set(candidate, kind);
+      portablePaths.set(portableKey, candidate);
+      added += 1;
+    }
+  }
+  budget.totalPathBytes += cumulativeBytes;
+  return added;
+}
+
+export async function readJsonArchiveFile(filePath: string, maxBytes = 16 * 1024 * 1024): Promise<unknown> {
   try {
-    return JSON.parse(TEXT_DECODER.decode(await fs.readFile(filePath)));
+    const stats = await fs.lstat(filePath);
+    if (!stats.isFile() || stats.isSymbolicLink() || stats.size > maxBytes) {
+      throw new Error("JSON archive entry exceeds its bounded size or is not a regular file");
+    }
+    const bytes = await fs.readFile(filePath);
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const text = decoder.decode(bytes);
+    return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
   } catch (error) {
     throw Object.assign(new Error(`Invalid package JSON ${path.basename(filePath)}: ${(error as Error).message}`), { status: 400 });
   }
@@ -149,9 +284,21 @@ export function isSafeArchivePath(relativePath: string): boolean {
   if (rawPath.startsWith("/") || path.isAbsolute(relativePath) || /^[a-z]:/i.test(rawPath)) return false;
   const normalizedPath = normalizeArchivePath(relativePath);
   if (!normalizedPath || normalizedPath.startsWith("/") || path.isAbsolute(normalizedPath)) return false;
+  if (/[\u0000-\u001f\u007f]/.test(normalizedPath)) return false;
+  // A leading `./` (or the root marker `.`) is a conventional ZIP spelling and
+  // remains contained after path.resolve. Interior dot segments are rejected.
+  if (normalizedPath === ".") return true;
+  const withoutLeadingDot = normalizedPath.startsWith("./") ? normalizedPath.slice(2) : normalizedPath;
   // A single trailing slash marks a directory entry and denotes the same path as the name without it.
   // Interior empty segments stay rejected: `a//b` is a malformed name, not a directory marker.
-  return !normalizedPath.replace(/\/$/, "").split("/").some((part) => part === ".." || part === "");
+  return !withoutLeadingDot.replace(/\/$/, "").split("/").some((part) => (
+    part === ".."
+    || part === "."
+    || part === ""
+    || part.includes(":")
+    || /[. ]$/.test(part)
+    || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)
+  ));
 }
 
 /**
@@ -209,7 +356,8 @@ async function addZipEntry(zip: Zip, entry: ArchiveEntry): Promise<void> {
   });
 }
 
-function writeUnzipFile(file: UnzipFile, targetPath: string): Promise<void> {
+function writeUnzipFile(file: UnzipFile, targetPath: string, onBytes?: (bytes: number, fileBytes: number) => void): Promise<void> {
+  let fileBytes = 0;
   mkdirSync(path.dirname(targetPath), { recursive: true });
   const output = createWriteStream(targetPath);
   const done = new Promise<void>((resolve, reject) => {
@@ -219,6 +367,13 @@ function writeUnzipFile(file: UnzipFile, targetPath: string): Promise<void> {
   file.ondata = (error, chunk, final) => {
     if (error) {
       output.destroy(error);
+      return;
+    }
+    try {
+      fileBytes += chunk.byteLength;
+      onBytes?.(chunk.byteLength, fileBytes);
+    } catch (budgetError) {
+      output.destroy(budgetError as Error);
       return;
     }
     output.write(chunk, () => {

@@ -16,6 +16,8 @@ import {
   createExtensionAcquisitionRouter,
   decodeExtensionCatalogSearchRequest,
   decodeExtensionReferenceResolveRequest,
+  decodeSessionConfirmRequest,
+  decodeSessionCreateRequest,
   type ExtensionAcquisitionRouteService,
 } from "./extensionAcquisitionRoutes";
 
@@ -38,6 +40,37 @@ test("route request decoders accept only bounded explicit fields", () => {
     () => decodeExtensionCatalogSearchRequest({ query: "valid", provider: "crxsoso" }),
     "ACQUISITION_INPUT_UNSUPPORTED",
   );
+  assert.deepEqual(decodeSessionCreateRequest({
+    namespace: "chrome-web-store",
+    storeId: STORE_ID,
+    artifactProviderId: "chrome-web-store",
+    purpose: "install",
+  }), {
+    namespace: "chrome-web-store",
+    storeId: STORE_ID,
+    artifactProviderId: "chrome-web-store",
+    purpose: "install",
+  });
+  assert.deepEqual(decodeSessionConfirmRequest({
+    disposition: "upgrade",
+    targetExtensionId: "extension-1",
+    environmentIds: ["environment-1", "environment-1"],
+    permissionApprovalToken: "abcdefghijklmnopqrstuvwxyzABCDEJ",
+  }), {
+    disposition: "upgrade",
+    targetExtensionId: "extension-1",
+    environmentIds: ["environment-1"],
+    permissionApprovalToken: "abcdefghijklmnopqrstuvwxyzABCDEJ",
+  });
+  for (const forbidden of ["artifactUrl", "artifactPath", "developerProof", "conflictCandidates"]) {
+    assertDecoderCode(() => decodeSessionCreateRequest({
+      namespace: "chrome-web-store",
+      storeId: STORE_ID,
+      artifactProviderId: "chrome-web-store",
+      purpose: "install",
+      [forbidden]: "client-forged",
+    }), "ACQUISITION_INPUT_UNSUPPORTED");
+  }
   assertDecoderCode(
     () => decodeExtensionCatalogSearchRequest({ query: "x".repeat(257) }),
     "ACQUISITION_INPUT_UNSUPPORTED",
@@ -72,6 +105,7 @@ test("feature router exposes only capabilities/search/resolve and leaves api sta
     extensionAcquisition: { crxsosoDisclosureVersionAccepted: 1 },
   });
   const service: ExtensionAcquisitionRouteService = {
+    ...unusedSessionRoutes(),
     capabilities: async () => {
       calls.capabilities += 1;
       return extensionCapabilityDescriptors(settings.extensionAcquisition);
@@ -181,6 +215,7 @@ test("disconnecting a search request propagates cancellation to the service", as
     signalAborted = resolve;
   });
   const service: ExtensionAcquisitionRouteService = {
+    ...unusedSessionRoutes(),
     capabilities: async () => [],
     search: async (_request, signal) => {
       assert.ok(signal);
@@ -224,6 +259,28 @@ function assertDecoderCode(run: () => unknown, code: string): void {
     assert.equal(error.code, code);
     return true;
   });
+}
+
+function unusedSessionRoutes(): Pick<
+  ExtensionAcquisitionRouteService,
+  | "createSession"
+  | "listSessions"
+  | "getSession"
+  | "cancelSession"
+  | "confirmSession"
+  | "transitionUpdateProvider"
+> {
+  const unused = (): never => {
+    throw new Error("not used");
+  };
+  return {
+    createSession: async () => unused(),
+    listSessions: () => [],
+    getSession: unused,
+    cancelSession: async () => unused(),
+    confirmSession: async () => unused(),
+    transitionUpdateProvider: async () => unused(),
+  };
 }
 
 async function startServer(app: express.Express): Promise<{ baseUrl: string; dispose: () => Promise<void> }> {
