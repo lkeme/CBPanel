@@ -65,6 +65,8 @@ export function RegistryListShell<T>({
   searchPlaceholder,
   summaryText,
   title,
+  query: controlledQuery,
+  onQueryChange,
 }: {
   action: ReactNode;
   body: string;
@@ -85,8 +87,12 @@ export function RegistryListShell<T>({
   searchPlaceholder: string;
   summaryText: (shown: number, total: number, filtered: boolean) => string;
   title: string;
+  query?: string;
+  onQueryChange?: (query: string) => void;
 }) {
-  const [query, setQuery] = useState("");
+  const [localQuery, setLocalQuery] = useState("");
+  const query = controlledQuery ?? localQuery;
+  const setQuery = onQueryChange ?? setLocalQuery;
   const filtered = Boolean(query.trim());
   const visibleItems = filtered ? items.filter((item) => matchesQuery(haystack(item), query)) : items;
 

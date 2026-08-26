@@ -49,7 +49,6 @@ import {
 } from "./shared/profile";
 import {
   type BrowserEnvironment,
-  type ExtensionSourceEntity,
   type GroupEntity,
   type ProxyEntity,
   type SystemDiagnostics,
@@ -287,11 +286,6 @@ type RegistryMergeState =
   | { kind: "tag"; entity: TagEntity }
   | null;
 
-type ExtensionSourceEditorState =
-  | { mode: "create"; source?: undefined }
-  | { mode: "edit"; source: ExtensionSourceEntity }
-  | null;
-
 function App() {
   const [state, setState] = useState<PanelState | null>(null);
   const [selectedId, setSelectedId] = useState("");
@@ -344,10 +338,6 @@ function App() {
     ensureReady: ensureRegistryDialogsReady,
   });
   const [extensionImport, setExtensionImport] = useDeferredOpenState<ExtensionImportDialogState>(null, {
-    shouldWait: (nextState) => Boolean(nextState),
-    ensureReady: ensureRegistryDialogsReady,
-  });
-  const [extensionSourceEditor, setExtensionSourceEditor] = useDeferredOpenState<ExtensionSourceEditorState>(null, {
     shouldWait: (nextState) => Boolean(nextState),
     ensureReady: ensureRegistryDialogsReady,
   });
@@ -598,7 +588,6 @@ function App() {
   const RegistryEntityDialogRenderer = RegistryDialogsRenderer?.RegistryEntityDialog;
   const RegistryMergeDialogRenderer = RegistryDialogsRenderer?.RegistryMergeDialog;
   const ExtensionImportDialogRenderer = RegistryDialogsRenderer?.ExtensionImportDialog;
-  const ExtensionSourceDialogRenderer = RegistryDialogsRenderer?.ExtensionSourceDialog;
   const ProxyReferenceDialogRenderer = RegistryDialogsRenderer?.ProxyReferenceDialog;
   const TextInputDialogRenderer = RegistryDialogsRenderer?.TextInputDialog;
 
@@ -1126,25 +1115,19 @@ function App() {
     toast,
   });
   const {
-    addRemoteExtension,
     checkExtension,
     checkExtensionUpdate,
     deleteExtension,
-    deleteExtensionSource,
     importExtensionArchivePath,
     importExtensionDirectoryPaths,
     importExtensionDirectoryPath,
     installExtension,
     migrateExtensionIdentity,
     previewExtensionDirectoryPath,
-    refreshExtensionSource,
     reinstallExtension,
     runExtensionAutoChecks,
-    saveExtensionSourceDraft,
     setDraftExtensionBinding,
     setExtensionUpdatePolicy,
-    toggleExtensionSourceStatus,
-    toggleExtensionSourceUnsigned,
     toggleExtensionStatus,
     updateExtension,
     uploadExtensionArchive,
@@ -1156,7 +1139,6 @@ function App() {
     setBusy,
     setConfirmDialog,
     setExtensionImport,
-    setExtensionSourceEditor,
     t,
     toast,
   });
@@ -1553,14 +1535,10 @@ function App() {
                       checkManagedProxy={checkManagedProxy}
                       clearTrashEnvironments={clearTrashEnvironments}
                       deleteExtension={deleteExtension}
-                      deleteExtensionSource={deleteExtensionSource}
                       duplicateProxy={duplicateProxy}
                       editGroup={(group) => setRegistryEditor({ kind: "group", mode: "edit", entity: group })}
                       editProxy={(proxy) => openProxyEditor("edit", proxy)}
                       editTag={(tag) => setRegistryEditor({ kind: "tag", mode: "edit", entity: tag })}
-                      editExtensionSource={(source) => setExtensionSourceEditor({ mode: "edit", source })}
-                      addExtensionSource={() => setExtensionSourceEditor({ mode: "create" })}
-                      addRemoteExtension={() => setExtensionImport({ kind: "remote" })}
                       checkExtension={checkExtension}
                       checkExtensionUpdate={checkExtensionUpdate}
                       showProfiles={showProfileView}
@@ -1576,7 +1554,7 @@ function App() {
                       reinstallExtension={reinstallExtension}
                       permanentlyDeleteTrashEnvironment={permanentlyDeleteTrashEnvironment}
                       pruneBrowserData={pruneBrowserData}
-                      refreshExtensionSource={refreshExtensionSource}
+                      reloadState={loadState}
                       requestProxyDelete={requestProxyDelete}
                       requestProxyReference={(action, proxy) => setProxyReference({ action, proxy })}
                       requestGroupDelete={requestGroupDelete}
@@ -1584,8 +1562,6 @@ function App() {
                       restoreTrashEnvironment={restoreTrashEnvironment}
                       runExtensionAutoChecks={runExtensionAutoChecks}
                       setExtensionUpdatePolicy={setExtensionUpdatePolicy}
-                      toggleExtensionSourceStatus={toggleExtensionSourceStatus}
-                      toggleExtensionSourceUnsigned={toggleExtensionSourceUnsigned}
                       toggleExtensionStatus={toggleExtensionStatus}
                       updateExtension={updateExtension}
                       updateGroup={updateGroup}
@@ -1764,7 +1740,6 @@ function App() {
 
       {extensionImport && ExtensionImportDialogRenderer && (
         <ExtensionImportDialogRenderer
-          addRemoteExtension={addRemoteExtension}
           busy={busy}
           close={() => setExtensionImport(null)}
           importArchive={importExtensionArchivePath}
@@ -1774,17 +1749,6 @@ function App() {
           state={extensionImport}
           t={t}
           uploadArchive={uploadExtensionArchive}
-        />
-      )}
-
-      {extensionSourceEditor && ExtensionSourceDialogRenderer && (
-        <ExtensionSourceDialogRenderer
-          busy={busy}
-          close={() => setExtensionSourceEditor(null)}
-          mode={extensionSourceEditor.mode}
-          saveSource={saveExtensionSourceDraft}
-          source={extensionSourceEditor.mode === "edit" ? extensionSourceEditor.source : undefined}
-          t={t}
         />
       )}
 

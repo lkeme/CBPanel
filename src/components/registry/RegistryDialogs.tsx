@@ -7,7 +7,6 @@ import type {
   ExtensionDirectoryImportResult,
   ExtensionDirectoryMode,
   ExtensionDirectoryPreviewResult,
-  ExtensionSourceEntity,
   GroupEntity,
   ProxyEntity,
   TagEntity,
@@ -35,7 +34,6 @@ export type TextInputDialogState = {
 
 export type ExtensionImportDialogState =
   | { kind: "directory" | "zip" | "crx" }
-  | { kind: "remote" }
   | null;
 
 function proxyEditorInitialDraft(proxy?: ProxyEntity): ProxyEntity {
@@ -334,7 +332,6 @@ export function RegistryMergeDialog({
 }
 
 export function ExtensionImportDialog({
-  addRemoteExtension,
   busy,
   close,
   importArchive,
@@ -345,7 +342,6 @@ export function ExtensionImportDialog({
   t,
   uploadArchive,
 }: {
-  addRemoteExtension: (input: { sourceUrl: string; sha256: string }) => Promise<void>;
   busy: string;
   close: () => void;
   importArchive: (kind: "zip" | "crx", filePath: string) => Promise<void>;
@@ -363,30 +359,22 @@ export function ExtensionImportDialog({
   const [directoryPreview, setDirectoryPreview] = useState<ExtensionDirectoryPreviewResult | null>(null);
   const [directoryImportResult, setDirectoryImportResult] = useState<ExtensionDirectoryImportResult | null>(null);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string>>(() => new Set());
-  const [sourceUrl, setSourceUrl] = useState("");
-  const [sha256, setSha256] = useState("");
   const title =
-    state.kind === "remote"
-      ? t("extension.import.remoteTitle")
-      : state.kind === "directory"
-        ? t("extension.import.directoryTitle")
-        : t(state.kind === "zip" ? "extension.import.zipTitle" : "extension.import.crxTitle");
+    state.kind === "directory"
+      ? t("extension.import.directoryTitle")
+      : t(state.kind === "zip" ? "extension.import.zipTitle" : "extension.import.crxTitle");
   const busyKey =
-    state.kind === "remote"
-      ? "extension-remote-create"
-      : state.kind === "directory"
-        ? "extension-import-directory"
-        : `extension-import-${state.kind}`;
+    state.kind === "directory"
+      ? "extension-import-directory"
+      : `extension-import-${state.kind}`;
   const isBusy = busy === busyKey;
   const archiveKind = state.kind === "zip" || state.kind === "crx" ? state.kind : null;
   const selectedCandidates = directoryPreview?.candidates.filter((candidate) => selectedCandidateIds.has(candidate.id)) ?? [];
   const hasDirectoryPreview = state.kind === "directory" && Boolean(directoryPreview?.candidates.length);
   const canSubmit =
-    state.kind === "remote"
-      ? Boolean(sourceUrl.trim() && sha256.trim())
-      : hasDirectoryPreview
-        ? selectedCandidates.length > 0
-        : Boolean(pathValue.trim() || selectedFile);
+    hasDirectoryPreview
+      ? selectedCandidates.length > 0
+      : Boolean(pathValue.trim() || selectedFile);
 
   async function pickDirectory() {
     if (!isTauri()) return;
@@ -418,10 +406,6 @@ export function ExtensionImportDialog({
   }
 
   async function submit() {
-    if (state.kind === "remote") {
-      await addRemoteExtension({ sourceUrl, sha256 });
-      return;
-    }
     if (state.kind !== "directory") {
       // A picked file is uploaded as bytes; the path box stays the advanced server-path channel.
       if (selectedFile) await uploadArchive(state.kind, selectedFile);
@@ -484,11 +468,7 @@ export function ExtensionImportDialog({
             }}
             type="button"
           >
-            {state.kind === "remote"
-              ? t("actions.addRemoteExtension")
-              : hasDirectoryPreview
-                ? t("extension.import.importSelected")
-                : t("actions.import")}
+            {hasDirectoryPreview ? t("extension.import.importSelected") : t("actions.import")}
           </button>
         </>
       }
@@ -500,17 +480,7 @@ export function ExtensionImportDialog({
       t={t}
       title={title}
     >
-      {state.kind === "remote" ? (
-        <div className="form-grid two compact-section">
-          <Field label={t("extension.import.sourceUrl")} wide>
-            <input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder={t("extension.import.remotePlaceholder")} />
-          </Field>
-          <Field label={t("module.extensionSha256")} wide>
-            <input className="mono-cell" value={sha256} onChange={(event) => setSha256(event.target.value)} placeholder={t("extension.import.sha256Placeholder")} />
-          </Field>
-        </div>
-      ) : (
-        <div className="form-grid two compact-section">
+      <div className="form-grid two compact-section">
           <Field label={t("form.path")} wide>
             <div className="path-picker-row">
               <input
@@ -573,8 +543,7 @@ export function ExtensionImportDialog({
               />
             </div>
           )}
-        </div>
-      )}
+      </div>
       {state.kind === "directory" && directoryPreview && directoryPreview.candidates.length > 0 && (
         <ExtensionDirectoryCandidatePreview
           candidates={directoryPreview.candidates}
@@ -666,76 +635,6 @@ function ExtensionDirectoryImportFailures({
         ))}
       </div>
     </div>
-  );
-}
-
-export function ExtensionSourceDialog({
-  busy,
-  close,
-  mode,
-  saveSource,
-  source,
-  t,
-}: {
-  busy: string;
-  close: () => void;
-  mode: "create" | "edit";
-  saveSource: (mode: "create" | "edit", input: Partial<ExtensionSourceEntity>, source?: ExtensionSourceEntity) => Promise<void>;
-  source?: ExtensionSourceEntity;
-  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
-}) {
-  const [draft, setDraft] = useState(() => ({
-    name: source?.name ?? "",
-    url: source?.url ?? "",
-    status: source?.status ?? "enabled",
-    allowUnsignedAssets: source?.allowUnsignedAssets ?? false,
-  }));
-  const nameError = draft.name.trim() ? "" : t("extension.source.nameRequired");
-  const urlError = draft.url.trim() ? "" : t("extension.source.urlRequired");
-  const busyKey = mode === "create" ? "extension-source-create" : source ? `extension-source-update:${source.id}` : "extension-source-update";
-  const isBusy = busy === busyKey;
-  const canSave = !nameError && !urlError;
-
-  return (
-    <DialogShell
-      actions={
-        <>
-          <button className="command subtle" disabled={isBusy} onClick={close} type="button">
-            {t("actions.cancel")}
-          </button>
-          <button className="command primary" disabled={!canSave || isBusy} onClick={() => void saveSource(mode, draft, source)} type="button">
-            {t("actions.save")}
-          </button>
-        </>
-      }
-      close={close}
-      closeDisabled={isBusy}
-      description={t("extension.source.description")}
-      labelledBy="extension-source-title"
-      panelClassName="registry-editor-panel"
-      t={t}
-      title={t(mode === "create" ? "extension.source.createTitle" : "extension.source.editTitle")}
-    >
-      <div className="form-grid two compact-section">
-        <Field label={t("extension.source.name")} wide error={nameError}>
-          <input value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} placeholder={t("extension.source.namePlaceholder")} />
-        </Field>
-        <Field label={t("extension.source.url")} wide error={urlError}>
-          <input value={draft.url} onChange={(event) => setDraft((current) => ({ ...current, url: event.target.value }))} placeholder={t("extension.source.urlPlaceholder")} />
-        </Field>
-        <ToggleField
-          checked={draft.status !== "disabled"}
-          label={t("proxy.editor.status")}
-          onChange={(enabled) => setDraft((current) => ({ ...current, status: enabled ? "enabled" : "disabled" }))}
-        />
-        <ToggleField
-          checked={draft.allowUnsignedAssets}
-          help={t("extension.source.unsignedHelp")}
-          label={t("actions.allowUnsigned")}
-          onChange={(allowUnsignedAssets) => setDraft((current) => ({ ...current, allowUnsignedAssets }))}
-        />
-      </div>
-    </DialogShell>
   );
 }
 

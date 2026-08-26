@@ -5,7 +5,6 @@ import type { Locale, TranslationKey } from "../../i18n";
 import type { BinaryInfo } from "../../shared/browserCore";
 import type {
   ExtensionEntity,
-  ExtensionSourceEntity,
   ExtensionUpdatePolicy,
   GroupEntity,
   ProxyEntity,
@@ -64,14 +63,10 @@ type RegistryModuleViewProps = {
   checkManagedProxy: (proxy: ProxyEntity) => Promise<void>;
   clearTrashEnvironments: () => Promise<void>;
   deleteExtension: (extension: ExtensionEntity) => Promise<void>;
-  deleteExtensionSource: (source: ExtensionSourceEntity) => Promise<void>;
   duplicateProxy: (proxy: ProxyEntity) => Promise<void>;
   editGroup: (group: GroupEntity) => void;
   editProxy: (proxy: ProxyEntity) => Promise<void>;
   editTag: (tag: TagEntity) => void;
-  editExtensionSource: (source: ExtensionSourceEntity) => void | Promise<void>;
-  addExtensionSource: () => void | Promise<void>;
-  addRemoteExtension: () => void | Promise<void>;
   checkExtension: (extension: ExtensionEntity) => Promise<void>;
   checkExtensionUpdate: (extension: ExtensionEntity) => Promise<void>;
   showProfiles: (patch?: ShowProfilePatch) => void;
@@ -87,7 +82,7 @@ type RegistryModuleViewProps = {
   reinstallExtension: (extension: ExtensionEntity) => Promise<void>;
   permanentlyDeleteTrashEnvironment: (id: string, name: string) => Promise<void>;
   pruneBrowserData: () => Promise<void>;
-  refreshExtensionSource: (source: ExtensionSourceEntity) => Promise<void>;
+  reloadState: () => Promise<unknown>;
   requestGroupDelete: (group: GroupEntity) => void;
   requestProxyDelete: (proxy: ProxyEntity) => void;
   requestProxyReference: (action: "replace" | "unbind", proxy: ProxyEntity) => void;
@@ -95,8 +90,6 @@ type RegistryModuleViewProps = {
   restoreTrashEnvironment: (id: string) => Promise<void>;
   runExtensionAutoChecks?: (extensions: ExtensionEntity[]) => Promise<void>;
   setExtensionUpdatePolicy: (extension: ExtensionEntity, updatePolicy: ExtensionUpdatePolicy) => Promise<void>;
-  toggleExtensionSourceStatus: (source: ExtensionSourceEntity) => Promise<void>;
-  toggleExtensionSourceUnsigned: (source: ExtensionSourceEntity) => Promise<void>;
   toggleExtensionStatus: (extension: ExtensionEntity) => Promise<void>;
   updateExtension: (extension: ExtensionEntity) => Promise<void>;
   updateGroup: (group: GroupEntity, patch: Partial<GroupEntity>) => Promise<void>;
@@ -126,14 +119,10 @@ export function RegistryModuleView({
   checkManagedProxy,
   clearTrashEnvironments,
   deleteExtension,
-  deleteExtensionSource,
   duplicateProxy,
   editGroup,
   editProxy,
   editTag,
-  editExtensionSource,
-  addExtensionSource,
-  addRemoteExtension,
   checkExtension,
   checkExtensionUpdate,
   showProfiles,
@@ -149,7 +138,7 @@ export function RegistryModuleView({
   reinstallExtension,
   permanentlyDeleteTrashEnvironment,
   pruneBrowserData,
-  refreshExtensionSource,
+  reloadState,
   requestGroupDelete,
   requestProxyDelete,
   requestProxyReference,
@@ -157,8 +146,6 @@ export function RegistryModuleView({
   restoreTrashEnvironment,
   runExtensionAutoChecks,
   setExtensionUpdatePolicy,
-  toggleExtensionSourceStatus,
-  toggleExtensionSourceUnsigned,
   toggleExtensionStatus,
   updateExtension,
   updateGroup,
@@ -451,27 +438,22 @@ export function RegistryModuleView({
       <ExtensionRegistryPanel
         busy={busy}
         extensions={state?.extensions ?? []}
-        extensionSources={state?.extensionSources ?? []}
         extensionStats={stats.extensions}
+        settings={state?.settings}
         locale={locale}
         t={t}
         toast={toast}
-        addExtensionSource={addExtensionSource}
-        addRemoteExtension={addRemoteExtension}
         checkExtension={checkExtension}
         checkExtensionUpdate={checkExtensionUpdate}
         deleteExtension={deleteExtension}
-        deleteExtensionSource={deleteExtensionSource}
-        editExtensionSource={editExtensionSource}
         importExtensionArchive={importExtensionArchive}
         importExtensionDirectory={importExtensionDirectory}
         installExtension={installExtension}
         migrateExtensionIdentity={migrateExtensionIdentity}
-        refreshExtensionSource={refreshExtensionSource}
+        reloadState={reloadState}
         reinstallExtension={reinstallExtension}
         setExtensionUpdatePolicy={setExtensionUpdatePolicy}
-        toggleExtensionSourceStatus={toggleExtensionSourceStatus}
-        toggleExtensionSourceUnsigned={toggleExtensionSourceUnsigned}
+        showProfiles={() => showProfiles()}
         toggleExtensionStatus={toggleExtensionStatus}
         updateExtension={updateExtension}
       />

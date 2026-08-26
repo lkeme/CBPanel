@@ -10,16 +10,9 @@ import type {
   ExtensionDirectoryMode,
   ExtensionDirectoryPreviewResult,
   ExtensionEntity,
-  ExtensionSourceEntity,
-  ExtensionSourceRefreshResult,
   ExtensionUpdatePolicy,
 } from "../shared/entities";
 import type { BrowserProfile } from "../shared/profile";
-
-type ExtensionSourceEditorState =
-  | { mode: "create"; source?: undefined }
-  | { mode: "edit"; source: ExtensionSourceEntity }
-  | null;
 
 type ExtensionImportConflictDisposition = "reuse" | "overwrite" | "create";
 
@@ -48,6 +41,9 @@ function isPermissionGateError(error: unknown): error is ApiError & { permission
 
 function canAutoCheckExtension(extension: ExtensionEntity): boolean {
   if (extension.updatePolicy === "pinned") return false;
+  // Verified store updates use acquisition sessions and explicit preflight/permission confirmation.
+  // The legacy auto-check contract expects an ExtensionEntity response and must not consume a session view.
+  if (extension.updateProviderId || extension.storeIdentity) return false;
   if (extension.sourceId) return true;
   if (extension.sourceKind === "local-zip" || extension.sourceKind === "local-crx") return Boolean(extension.sourceUrl);
   if (extension.sourceKind === "local-directory") return Boolean(extension.sourceUrl || extension.localPath);
@@ -62,7 +58,6 @@ export function useExtensionActions({
   setBusy,
   setConfirmDialog,
   setExtensionImport,
-  setExtensionSourceEditor,
   t,
   toast,
 }: {
@@ -73,7 +68,6 @@ export function useExtensionActions({
   setBusy: Dispatch<SetStateAction<string>>;
   setConfirmDialog: Dispatch<SetStateAction<ConfirmDialogState>>;
   setExtensionImport: Dispatch<SetStateAction<ExtensionImportDialogState>>;
-  setExtensionSourceEditor: Dispatch<SetStateAction<ExtensionSourceEditorState>>;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
   toast: (kind: "success" | "error" | "info", text: string) => void;
 }) {
@@ -277,130 +271,6 @@ export function useExtensionActions({
         });
         return;
       }
-      toast("error", extensionErrorMessage(error, t));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function addRemoteExtension(input: { sourceUrl: string; sha256: string }) {
-    const sourceUrl = input.sourceUrl.trim();
-    const sha256 = input.sha256.trim();
-    if (!sourceUrl || !sha256) return;
-    const sourceKind = sourceUrl.toLowerCase().includes(".crx") ? "remote-crx" : "remote-zip";
-    setBusy("extension-remote-create");
-    try {
-      await api<ExtensionEntity>("/api/extensions", {
-        method: "POST",
-        body: JSON.stringify({ sourceKind, sourceUrl, sha256 }),
-      });
-      setExtensionImport(null);
-      await loadState();
-      toast("success", t("toast.extensionAdded"));
-    } catch (error) {
-      toast("error", extensionErrorMessage(error, t));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function updateExtensionSource(source: ExtensionSourceEntity, patch: Partial<ExtensionSourceEntity>) {
-    setBusy(`extension-source-update:${source.id}`);
-    try {
-      await api<ExtensionSourceEntity>(`/api/extension-sources/${source.id}`, {
-        method: "PUT",
-        body: JSON.stringify(patch),
-      });
-      await loadState();
-      toast("success", t("toast.extensionSourceUpdated"));
-    } catch (error) {
-      toast("error", extensionErrorMessage(error, t));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function saveExtensionSourceDraft(mode: "create" | "edit", input: Partial<ExtensionSourceEntity>, source?: ExtensionSourceEntity) {
-    const busyKey = mode === "create" ? "extension-source-create" : source ? `extension-source-update:${source.id}` : "extension-source-update";
-    setBusy(busyKey);
-    try {
-      if (mode === "create") {
-        await api<ExtensionSourceEntity>("/api/extension-sources", {
-          method: "POST",
-          body: JSON.stringify(input),
-        });
-        toast("success", t("toast.extensionSourceAdded"));
-      } else if (source) {
-        await api<ExtensionSourceEntity>(`/api/extension-sources/${source.id}`, {
-          method: "PUT",
-          body: JSON.stringify(input),
-        });
-        toast("success", t("toast.extensionSourceUpdated"));
-      }
-      setExtensionSourceEditor(null);
-      await loadState();
-    } catch (error) {
-      toast("error", extensionErrorMessage(error, t));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function toggleExtensionSourceStatus(source: ExtensionSourceEntity) {
-    await updateExtensionSource(source, { status: source.status === "disabled" ? "enabled" : "disabled" });
-  }
-
-  async function toggleExtensionSourceUnsigned(source: ExtensionSourceEntity) {
-    if (!source.allowUnsignedAssets) {
-      setConfirmDialog({
-        title: t("extension.source.allowUnsignedTitle", { name: source.name }),
-        body: t("extension.source.allowUnsignedBody"),
-        confirmLabel: t("actions.allowUnsigned"),
-        tone: "warning",
-        busyKey: `extension-source-update:${source.id}`,
-        onConfirm: async () => {
-          await updateExtensionSource(source, { allowUnsignedAssets: true });
-          setConfirmDialog(null);
-        },
-      });
-      return;
-    }
-    await updateExtensionSource(source, { allowUnsignedAssets: !source.allowUnsignedAssets });
-  }
-
-  async function refreshExtensionSource(source: ExtensionSourceEntity) {
-    setBusy(`extension-source-refresh:${source.id}`);
-    try {
-      const result = await api<ExtensionSourceRefreshResult>(`/api/extension-sources/${source.id}/refresh`, { method: "POST" });
-      await loadState();
-      toast("success", t("toast.extensionSourceRefreshed", { imported: result.imported, updated: result.updated }));
-    } catch (error) {
-      await loadState();
-      toast("error", extensionErrorMessage(error, t));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function deleteExtensionSource(source: ExtensionSourceEntity) {
-    setConfirmDialog({
-      title: t("extension.source.deleteTitle", { name: source.name }),
-      body: t("extension.source.deleteBody"),
-      confirmLabel: t("actions.delete"),
-      tone: "danger",
-      busyKey: `extension-source-delete:${source.id}`,
-      onConfirm: () => deleteExtensionSourceNow(source),
-    });
-  }
-
-  async function deleteExtensionSourceNow(source: ExtensionSourceEntity) {
-    setBusy(`extension-source-delete:${source.id}`);
-    try {
-      await api(`/api/extension-sources/${source.id}`, { method: "DELETE" });
-      setConfirmDialog(null);
-      await loadState();
-      toast("success", t("toast.extensionSourceDeleted"));
-    } catch (error) {
       toast("error", extensionErrorMessage(error, t));
     } finally {
       setBusy("");
@@ -650,28 +520,21 @@ export function useExtensionActions({
   }
 
   return {
-    addRemoteExtension,
     checkExtension,
     checkExtensionUpdate,
     deleteExtension,
-    deleteExtensionSource,
     importExtensionArchivePath,
     importExtensionDirectoryPaths,
     importExtensionDirectoryPath,
     installExtension,
     migrateExtensionIdentity,
     previewExtensionDirectoryPath,
-    refreshExtensionSource,
     reinstallExtension,
     runExtensionAutoChecks,
-    saveExtensionSourceDraft,
     setDraftExtensionBinding,
     setExtensionUpdatePolicy,
-    toggleExtensionSourceStatus,
-    toggleExtensionSourceUnsigned,
     toggleExtensionStatus,
     updateExtension,
-    updateExtensionSource,
     uploadExtensionArchive,
   };
 }
