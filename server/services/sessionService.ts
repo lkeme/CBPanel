@@ -32,6 +32,8 @@ type RuntimeHandle = {
 export type ExtensionRegistrationPreflightProcess = RuntimeHandle & {
   clearServiceWorkers: (origins: string[]) => Promise<void>;
   loadUnpackedExtensions: (registrations: ExtensionLaunchRegistration[]) => Promise<void>;
+  /** Completes a successful migration only after Browser.close and a natural Chromium exit. */
+  finish: () => Promise<void>;
 };
 
 type RegistrationPreflightRuntimeHandle = ExtensionRegistrationPreflightProcess;
@@ -696,6 +698,7 @@ export class SessionService {
     }
     session.registrationPreflightRuntime = preflight;
 
+    let migrationCommandsCompleted = false;
     try {
       if (session.status !== "launching") return;
       await boundedRegistrationPreflightOperation(
@@ -711,10 +714,20 @@ export class SessionService {
         timeoutMs,
         "unpacked extension registration",
       );
+      migrationCommandsCompleted = session.status === "launching";
     } finally {
-      const closeWork = preflight.close();
+      // Successful clear/load work needs Chromium's own graceful shutdown so its extension registration
+      // database and ScriptCache changes are durably flushed. close() is deliberately a different path:
+      // it is cancellation/cleanup and may kill the child, which proves the profile is free but never
+      // proves the registration write reached disk.
+      const finishing = migrationCommandsCompleted && session.status === "launching";
+      const shutdownWork = finishing ? preflight.finish() : preflight.close();
       try {
-        await boundedRegistrationPreflightOperation(closeWork, timeoutMs, "close");
+        await boundedRegistrationPreflightOperation(
+          shutdownWork,
+          finishing ? registrationPreflightFinishBudgetMs(timeoutMs) : timeoutMs,
+          finishing ? "graceful finish" : "close",
+        );
         if (session.registrationPreflightRuntime === preflight) {
           delete session.registrationPreflightRuntime;
         }
@@ -722,19 +735,38 @@ export class SessionService {
           this.markSessionStopped(profile.id, "Extension registration preflight has stopped", session);
         }
       } catch (error) {
-        this.markCloseUnconfirmed(
-          profile.id,
-          `Extension registration preflight close was not confirmed: ${(error as Error).message}`,
-          "Extension registration preflight close failed",
-          session,
-        );
-        void closeWork.then(
-          () => this.markSessionStopped(profile.id, "Extension registration preflight has stopped", session),
-          (lateError) => this.recordLateCloseFailure(profile.id, lateError, session),
-        );
+        // A failed graceful finish must still terminate the maintenance browser, but a confirmed forced
+        // exit is cleanup only: it blocks the formal launch while releasing the profile hold. Retain an
+        // unconfirmed generation only when even that cancellation cannot confirm process exit.
+        const cleanupWork = finishing ? preflight.close() : shutdownWork;
+        try {
+          await boundedRegistrationPreflightOperation(
+            cleanupWork,
+            registrationPreflightCleanupBudgetMs(timeoutMs),
+            "forced cleanup",
+          );
+          if (session.registrationPreflightRuntime === preflight) {
+            delete session.registrationPreflightRuntime;
+          }
+          if (session.closeUnconfirmed && session.status !== "launching") {
+            this.markSessionStopped(profile.id, "Extension registration preflight has stopped", session);
+          }
+        } catch (cleanupError) {
+          this.markCloseUnconfirmed(
+            profile.id,
+            `Extension registration preflight close was not confirmed: ${(cleanupError as Error).message}`,
+            "Extension registration preflight close failed",
+            session,
+          );
+          void cleanupWork.then(
+            () => this.markSessionStopped(profile.id, "Extension registration preflight has stopped", session),
+            (lateError) => this.recordLateCloseFailure(profile.id, lateError, session),
+          );
+        }
         throw error;
       }
     }
+    if (!migrationCommandsCompleted || session.status !== "launching") return;
     pushSessionEvent(session, "info", "扩展注册预迁移完成");
   }
 
@@ -999,18 +1031,42 @@ export function rawCdpRegistrationPreflightProcess(
   });
 
   let exited: ChildExit | undefined;
+  let childError: Error | undefined;
+  let confirmExit!: (result: ChildExit) => void;
+  const confirmedExitPromise = new Promise<ChildExit>((resolve) => {
+    confirmExit = resolve;
+  });
   const exitPromise = new Promise<ChildExit>((resolve) => {
     let settled = false;
-    const finish = (result: ChildExit) => {
+    const finishOutcome = (result: ChildExit) => {
       if (settled) return;
       settled = true;
-      exited = result;
       resolve(result);
     };
-    child.once("error", (error) => finish({ code: null, signal: null, error }));
-    child.once("exit", (code, signal) => finish({ code, signal }));
+    child.once("error", (error) => {
+      childError = error;
+      const result = { code: null, signal: null, error };
+      finishOutcome(result);
+      // Node does not emit `exit` when spawn itself fails. In that one unambiguous case `pid` was never
+      // assigned, so no Chromium process can own the profile and cancellation must not retain a false
+      // generation hold. Errors from an already-started child keep its numeric pid and still require the
+      // real exit event below before the profile is released.
+      if (child.pid === undefined) {
+        exited = result;
+        confirmExit(result);
+      }
+    });
+    child.once("exit", (code, signal) => {
+      const result = { code, signal };
+      exited = result;
+      finishOutcome(result);
+      confirmExit(result);
+    });
     if (child.exitCode !== null || child.signalCode !== null) {
-      finish({ code: child.exitCode, signal: child.signalCode });
+      const result = { code: child.exitCode, signal: child.signalCode };
+      exited = result;
+      finishOutcome(result);
+      confirmExit(result);
     }
   });
 
@@ -1029,53 +1085,90 @@ export function rawCdpRegistrationPreflightProcess(
     return endpointPromise;
   };
 
+  const cleanupBudgetMs = registrationPreflightCleanupBudgetMs(timeoutMs);
+  let cancellationRequested = false;
   let closePromise: Promise<void> | undefined;
   const close = () => {
+    cancellationRequested = true;
     closePromise ??= (async () => {
-      const closeStartedAt = Date.now();
-      let gracefulCloseRequested = false;
-      if (!exited && endpoint) {
-        try {
-          const commandBudget = Math.max(
-            1,
-            Math.min(EXTENSION_REGISTRATION_PREFLIGHT_CLOSE_GRACE_MS, timeoutMs),
-          );
-          await boundedRegistrationPreflightOperation(
-            withRawCdpConnection(endpoint.browserWebSocketUrl, commandBudget, async (connection) => {
-              await connection.send("Browser.close", {});
-            }),
-            commandBudget,
-            "Browser close",
-          );
-          gracefulCloseRequested = true;
-        } catch {
-          // A failed close command is followed by a process-level termination. The only condition that
-          // releases the profile is a confirmed child exit, never a successful WebSocket write alone.
-        }
-      }
-      if (!exited && gracefulCloseRequested) {
-        const remaining = Math.max(1, timeoutMs - (Date.now() - closeStartedAt));
-        await raceTimeout(
-          exitPromise,
-          Math.min(EXTENSION_REGISTRATION_PREFLIGHT_CLOSE_GRACE_MS, remaining),
-        );
-      }
       if (!exited) child.kill();
-      try {
-        const remaining = Math.max(1, timeoutMs - (Date.now() - closeStartedAt));
-        await boundedRegistrationPreflightOperation(exitPromise, remaining, "process exit");
-      } catch (error) {
-        if (!exited) child.kill();
-        throw Object.assign(new Error(
-          `Extension registration preflight process did not exit${stderrTail ? `: ${stderrTail.trim()}` : ""}`,
-          { cause: error },
-        ), {
-          status: 409,
-          code: "EXTENSION_REGISTRATION_PREFLIGHT_PROCESS_EXIT_TIMEOUT",
-        });
-      }
+      // The owning SessionService bounds this promise and retains the generation hold when needed. Keep
+      // observing the exact exit event after that bound so a late-but-confirmed forced exit can release the
+      // hold instead of leaving the profile falsely busy for the rest of the sidecar process.
+      await confirmedExitPromise;
     })();
     return closePromise;
+  };
+
+  let finishPromise: Promise<void> | undefined;
+  const finish = () => {
+    finishPromise ??= (async () => {
+      const finishStartedAt = Date.now();
+      const failAfterCleanup = async (error: Error): Promise<never> => {
+        // close() may force termination. Await it so callers can distinguish a failed flush with a free
+        // profile from an unconfirmed process that must retain its generation hold.
+        await close();
+        throw error;
+      };
+      if (exited) {
+        return failAfterCleanup(registrationPreflightGracefulCloseError(
+          "Chromium exited before Browser.close could confirm a registration flush",
+          "EXTENSION_REGISTRATION_PREFLIGHT_GRACEFUL_CLOSE_FAILED",
+        ));
+      }
+      if (cancellationRequested) {
+        return failAfterCleanup(registrationPreflightGracefulCloseError(
+          "Extension registration preflight was cancelled before graceful completion",
+          "EXTENSION_REGISTRATION_PREFLIGHT_GRACEFUL_CLOSE_CANCELLED",
+        ));
+      }
+      if (childError) {
+        return failAfterCleanup(registrationPreflightGracefulCloseError(
+          `Chromium process error: ${childError.message}`,
+          "EXTENSION_REGISTRATION_PREFLIGHT_GRACEFUL_CLOSE_FAILED",
+          childError,
+        ));
+      }
+
+      const currentEndpoint = endpoint ?? await resolveEndpoint();
+      const commandBudget = cleanupBudgetMs;
+      try {
+        await boundedRegistrationPreflightOperation(
+          withRawCdpConnection(currentEndpoint.browserWebSocketUrl, commandBudget, async (connection) => {
+            await connection.send("Browser.close", {});
+          }),
+          commandBudget,
+          "Browser close",
+        );
+      } catch (error) {
+        return failAfterCleanup(registrationPreflightGracefulCloseError(
+          `Browser.close failed: ${error instanceof Error ? error.message : String(error)}`,
+          "EXTENSION_REGISTRATION_PREFLIGHT_GRACEFUL_CLOSE_FAILED",
+          error,
+        ));
+      }
+
+      const remaining = Math.max(1, timeoutMs - (Date.now() - finishStartedAt));
+      const naturallyExited = await raceTimeout(exitPromise, remaining);
+      if (naturallyExited && !cancellationRequested) {
+        const exit = await exitPromise;
+        if (!exit.error && exit.signal === null && exit.code === 0) return;
+        return failAfterCleanup(registrationPreflightGracefulCloseError(
+          `Chromium exited abnormally after Browser.close: ${childExitDetail(exit)}`,
+          "EXTENSION_REGISTRATION_PREFLIGHT_GRACEFUL_CLOSE_FAILED",
+          exit.error,
+        ));
+      }
+      return failAfterCleanup(registrationPreflightGracefulCloseError(
+        cancellationRequested
+          ? "Extension registration preflight was cancelled before graceful completion"
+          : "Chromium did not exit naturally after Browser.close within the graceful flush budget",
+        cancellationRequested
+          ? "EXTENSION_REGISTRATION_PREFLIGHT_GRACEFUL_CLOSE_CANCELLED"
+          : "EXTENSION_REGISTRATION_PREFLIGHT_GRACEFUL_CLOSE_TIMEOUT",
+      ));
+    })();
+    return finishPromise;
   };
 
   return {
@@ -1097,9 +1190,33 @@ export function rawCdpRegistrationPreflightProcess(
         await loadUnpackedExtensionRegistrations(connection, registrations);
       });
     },
+    finish,
     close,
     pageUrl: () => "about:blank",
   };
+}
+
+function registrationPreflightCleanupBudgetMs(timeoutMs: number): number {
+  return Math.max(1, Math.min(EXTENSION_REGISTRATION_PREFLIGHT_CLOSE_GRACE_MS, timeoutMs));
+}
+
+function registrationPreflightFinishBudgetMs(timeoutMs: number): number {
+  return Math.max(1, timeoutMs) + registrationPreflightCleanupBudgetMs(timeoutMs);
+}
+
+function registrationPreflightGracefulCloseError(
+  message: string,
+  code: string,
+  cause?: unknown,
+): Error {
+  return Object.assign(new Error(`Extension registration preflight did not flush registration state: ${message}`, {
+    cause,
+  }), { status: 409, code });
+}
+
+function childExitDetail(exit: ChildExit): string {
+  return exit.error?.message
+    ?? `exit code ${exit.code ?? "null"}${exit.signal ? `, signal ${exit.signal}` : ""}`;
 }
 
 async function waitForRawCdpEndpoint(
@@ -1352,8 +1469,7 @@ async function promiseState<Value>(promise: Promise<Value>): Promise<
 }
 
 function childExitedBeforeCdp(exit: ChildExit, stderr: string): Error {
-  const detail = exit.error?.message
-    ?? `exit code ${exit.code ?? "null"}${exit.signal ? `, signal ${exit.signal}` : ""}`;
+  const detail = childExitDetail(exit);
   return Object.assign(new Error(
     `Extension registration preflight Chromium exited before DevTools was ready: ${detail}${
       stderr ? `; chromium=${stderr.trim()}` : ""

@@ -510,11 +510,14 @@ class RegistrationPreflightSessionService extends SessionService {
 
 function registrationPreflightProcess(options: {
   onSend?: (command: string, params: Record<string, unknown>) => Promise<unknown>;
+  onFinish?: () => Promise<void>;
   onClose?: () => Promise<void>;
   order?: string[];
 } = {}) {
   const commands: Array<{ command: string; params: Record<string, unknown> }> = [];
+  let finishCalls = 0;
   let closeCalls = 0;
+  let finishPromise: Promise<void> | undefined;
   let closePromise: Promise<void> | undefined;
   const process: ExtensionRegistrationPreflightProcess = {
     clearServiceWorkers: async (origins) => {
@@ -539,6 +542,14 @@ function registrationPreflightProcess(options: {
         },
       }, registrations);
     },
+    finish: () => {
+      finishPromise ??= (async () => {
+        finishCalls += 1;
+        options.order?.push("preflight-finish");
+        await options.onFinish?.();
+      })();
+      return finishPromise;
+    },
     close: () => {
       closePromise ??= (async () => {
         closeCalls += 1;
@@ -549,7 +560,7 @@ function registrationPreflightProcess(options: {
     },
     pageUrl: () => "about:blank",
   };
-  return { process, commands, closeCalls: () => closeCalls };
+  return { process, commands, finishCalls: () => finishCalls, closeCalls: () => closeCalls };
 }
 
 function extensionServiceWithRegistrations(
@@ -1045,6 +1056,77 @@ test("raw registration preflight reports a Chromium child that exits before CDP 
   await process.close();
 });
 
+test("raw registration preflight releases only child errors that prove spawn never created a process", async (context) => {
+  const createChild = (pid: number | undefined) => {
+    let killCalls = 0;
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: undefined;
+      stderr: undefined;
+      pid: number | undefined;
+      exitCode: number | null;
+      signalCode: NodeJS.Signals | null;
+      kill: () => boolean;
+    };
+    child.stdout = undefined;
+    child.stderr = undefined;
+    child.pid = pid;
+    child.exitCode = null;
+    child.signalCode = null;
+    child.kill = () => {
+      killCalls += 1;
+      return true;
+    };
+    return { child, killCalls: () => killCalls };
+  };
+
+  await context.test("spawn failure has no process or false profile hold", async () => {
+    const fixture = createChild(undefined);
+    const process = rawCdpRegistrationPreflightProcess(
+      fixture.child as unknown as ChildProcess,
+      path.resolve("data/nonexistent-preflight/DevToolsActivePort"),
+      50,
+    );
+    fixture.child.emit("error", new Error("spawn EACCES"));
+
+    await assert.rejects(
+      process.clearServiceWorkers(["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]),
+      (error) => {
+        assert.equal((error as { code?: string }).code, "EXTENSION_REGISTRATION_PREFLIGHT_EARLY_EXIT");
+        assert.match((error as Error).message, /spawn EACCES/);
+        return true;
+      },
+    );
+    await process.close();
+    assert.equal(fixture.killCalls(), 0, "a child that never received a pid cannot own the profile");
+  });
+
+  await context.test("an error from a started child still requires its real exit", async () => {
+    const fixture = createChild(42_424);
+    const process = rawCdpRegistrationPreflightProcess(
+      fixture.child as unknown as ChildProcess,
+      path.resolve("data/nonexistent-preflight/DevToolsActivePort"),
+      50,
+    );
+    fixture.child.emit("error", new Error("started child process error"));
+    await assert.rejects(
+      process.clearServiceWorkers(["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]),
+      { code: "EXTENSION_REGISTRATION_PREFLIGHT_EARLY_EXIT" },
+    );
+
+    let closed = false;
+    const closing = process.close().then(() => {
+      closed = true;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(fixture.killCalls(), 1);
+    assert.equal(closed, false, "a numeric pid means an error alone cannot confirm process exit");
+    fixture.child.exitCode = 1;
+    fixture.child.emit("exit", 1, null);
+    await closing;
+    assert.equal(closed, true);
+  });
+});
+
 test("raw registration preflight clears on the page target and loads unpacked runtimes on the browser target", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-preflight-cdp-targets-"));
   const activePortPath = path.join(root, "DevToolsActivePort");
@@ -1142,7 +1224,7 @@ test("raw registration preflight clears on the page target and loads unpacked ru
     );
     await process.clearServiceWorkers([`chrome-extension://${registration.browserExtensionId}`]);
     await process.loadUnpackedExtensions([registration]);
-    await process.close();
+    await process.finish();
 
     assert.deepEqual(commands, [
       {
@@ -1174,6 +1256,295 @@ test("raw registration preflight clears on the page target and loads unpacked ru
     });
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+type RawPreflightCloseMode =
+  | "spawn-error"
+  | "command-error"
+  | "natural-timeout"
+  | "delayed-natural-exit"
+  | "signaled-exit"
+  | "forced-exit-unconfirmed";
+
+async function withRawPreflightCloseHarness<Result>(
+  mode: RawPreflightCloseMode,
+  timeoutMs: number,
+  work: (harness: {
+    process: ExtensionRegistrationPreflightProcess;
+    killCalls: () => number;
+    confirmExit: (signal?: NodeJS.Signals | null) => void;
+  }) => Promise<Result>,
+): Promise<Result> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-preflight-close-"));
+  const activePortPath = path.join(root, "DevToolsActivePort");
+  const originalFetch = globalThis.fetch;
+  const originalWebSocket = globalThis.WebSocket;
+  const port = 43128;
+  const registration = extensionRegistration();
+  let killCalls = 0;
+  let exitEmitted = false;
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: undefined;
+    stderr: undefined;
+    pid: number | undefined;
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    kill: () => boolean;
+  };
+  child.stdout = undefined;
+  child.stderr = undefined;
+  child.pid = mode === "spawn-error" ? undefined : 42_428;
+  child.exitCode = null;
+  child.signalCode = null;
+  const confirmExit = (signal: NodeJS.Signals | null = null) => {
+    if (exitEmitted) return;
+    exitEmitted = true;
+    child.exitCode = signal ? null : 0;
+    child.signalCode = signal;
+    child.emit("exit", child.exitCode, signal);
+  };
+  child.kill = () => {
+    killCalls += 1;
+    if (mode !== "forced-exit-unconfirmed") queueMicrotask(() => confirmExit("SIGTERM"));
+    return true;
+  };
+
+  class CloseWebSocket extends EventTarget {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSING = 2;
+    static readonly CLOSED = 3;
+    readyState = CloseWebSocket.CONNECTING;
+
+    constructor(_url: string | URL) {
+      super();
+      queueMicrotask(() => {
+        this.readyState = CloseWebSocket.OPEN;
+        this.dispatchEvent(new Event("open"));
+      });
+    }
+
+    send(value: string): void {
+      const payload = JSON.parse(value) as { id: number; method: string };
+      const response = payload.method === "Browser.close" && mode === "command-error"
+        ? { id: payload.id, error: { message: "Browser.close rejected" } }
+        : {
+            id: payload.id,
+            result: payload.method === "Extensions.loadUnpacked"
+              ? { id: registration.browserExtensionId }
+              : {},
+          };
+      queueMicrotask(() => {
+        this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(response) }));
+        if (payload.method === "Browser.close" && mode === "delayed-natural-exit") {
+          setTimeout(() => confirmExit(), 30);
+        }
+        if (payload.method === "Browser.close" && mode === "signaled-exit") {
+          setTimeout(() => confirmExit("SIGTERM"), 10);
+        }
+      });
+    }
+
+    close(): void {
+      this.readyState = CloseWebSocket.CLOSED;
+    }
+  }
+
+  try {
+    await fs.writeFile(activePortPath, `${port}\n/devtools/browser/browser-id\n`, "utf8");
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      return {
+        ok: true,
+        json: async () => url.endsWith("/json/version")
+          ? { webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/browser/browser-id` }
+          : [{
+              type: "page",
+              webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/page-id`,
+            }],
+      } as Response;
+    }) as typeof fetch;
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: CloseWebSocket,
+    });
+    const process = rawCdpRegistrationPreflightProcess(
+      child as unknown as ChildProcess,
+      activePortPath,
+      timeoutMs,
+    );
+    if (mode === "spawn-error") queueMicrotask(() => child.emit("error", new Error("spawn ENOENT")));
+    return await work({ process, killCalls: () => killCalls, confirmExit });
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: originalWebSocket,
+    });
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+test("registration preflight requires Browser.close plus natural exit before formal launch", async (context) => {
+  await context.test("spawn failure releases the profile without starting or marking", async () => withRawPreflightCloseHarness(
+    "spawn-error",
+    50,
+    async (raw) => {
+      const profile = defaultProfile({ id: "raw-preflight-spawn-failure" });
+      const registration = extensionRegistration();
+      const marked: ExtensionLaunchRegistration[] = [];
+      const service = new RegistrationPreflightSessionService({
+        browserDataDir: "data/browser-data-test",
+        readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+        extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+      }, async () => raw.process, undefined, 100);
+
+      await assert.rejects(service.launchProfile(profile), (error) => {
+        assert.equal((error as { code?: string }).code, "EXTENSION_REGISTRATION_PREFLIGHT_EARLY_EXIT");
+        assert.match((error as Error).message, /spawn ENOENT/);
+        return true;
+      });
+
+      assert.equal(raw.killCalls(), 0, "spawn failure has no process to terminate");
+      assert.equal(service.formalStarts, 0);
+      assert.deepEqual(marked, []);
+      assert.equal(registration.migrationRequired, true);
+      assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
+      assert.equal(service.listSessions()[0]?.closeUnconfirmed, undefined);
+    },
+  ));
+
+  const cases = [
+    {
+      name: "Browser.close command error",
+      mode: "command-error",
+      rawTimeoutMs: 60,
+      expectedCode: "EXTENSION_REGISTRATION_PREFLIGHT_GRACEFUL_CLOSE_FAILED",
+    },
+    {
+      name: "natural exit timeout",
+      mode: "natural-timeout",
+      rawTimeoutMs: 40,
+      expectedCode: "EXTENSION_REGISTRATION_PREFLIGHT_GRACEFUL_CLOSE_TIMEOUT",
+    },
+  ] as const;
+  for (const [index, candidate] of cases.entries()) {
+    await context.test(candidate.name, async () => withRawPreflightCloseHarness(
+      candidate.mode,
+      candidate.rawTimeoutMs,
+      async (raw) => {
+        const profile = defaultProfile({ id: `raw-preflight-fail-closed-${index}` });
+        const registration = extensionRegistration();
+        const marked: ExtensionLaunchRegistration[] = [];
+        const service = new RegistrationPreflightSessionService({
+          browserDataDir: "data/browser-data-test",
+          readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+          extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+        }, async () => raw.process, undefined, 120);
+
+        await assert.rejects(service.launchProfile(profile), (error) => {
+          assert.equal((error as { code?: string }).code, candidate.expectedCode);
+          return true;
+        });
+
+        assert.equal(raw.killCalls(), 1, "failed graceful completion must force cleanup");
+        assert.equal(service.formalStarts, 0);
+        assert.deepEqual(marked, [], "registration completion marker must stay pending");
+        assert.equal(registration.migrationRequired, true);
+        assert.deepEqual([...service.profileIdsHoldingRuntime()], [], "confirmed forced exit must release the profile");
+      },
+    ));
+  }
+
+  await context.test("forced exit remains unconfirmed", async () => withRawPreflightCloseHarness(
+    "forced-exit-unconfirmed",
+    30,
+    async (raw) => {
+      const profile = defaultProfile({ id: "raw-preflight-forced-exit-unconfirmed" });
+      const registration = extensionRegistration();
+      const marked: ExtensionLaunchRegistration[] = [];
+      const service = new RegistrationPreflightSessionService({
+        browserDataDir: "data/browser-data-test",
+        readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+        extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+      }, async () => raw.process, undefined, 100);
+
+      await assert.rejects(service.launchProfile(profile), (error) => {
+        assert.equal((error as { code?: string }).code, "EXTENSION_REGISTRATION_PREFLIGHT_TIMEOUT");
+        assert.equal((error as { operation?: string }).operation, "graceful finish");
+        return true;
+      });
+
+      assert.ok(raw.killCalls() >= 1);
+      assert.equal(service.formalStarts, 0);
+      assert.deepEqual(marked, []);
+      assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+      assert.equal(service.listSessions()[0]?.closeUnconfirmed, true);
+      raw.confirmExit("SIGTERM");
+      await waitFor(() => service.profileIdsHoldingRuntime().size === 0);
+      assert.equal(service.listSessions()[0]?.closeUnconfirmed, undefined);
+    },
+  ));
+
+  await context.test("Browser.close followed by a signaled exit", async () => withRawPreflightCloseHarness(
+    "signaled-exit",
+    80,
+    async (raw) => {
+      const profile = defaultProfile({ id: "raw-preflight-signaled-exit" });
+      const registration = extensionRegistration();
+      const marked: ExtensionLaunchRegistration[] = [];
+      const service = new RegistrationPreflightSessionService({
+        browserDataDir: "data/browser-data-test",
+        readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+        extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+      }, async () => raw.process, undefined, 140);
+
+      await assert.rejects(service.launchProfile(profile), (error) => {
+        assert.equal((error as { code?: string }).code, "EXTENSION_REGISTRATION_PREFLIGHT_GRACEFUL_CLOSE_FAILED");
+        assert.match((error as Error).message, /signal SIGTERM/);
+        return true;
+      });
+
+      assert.equal(raw.killCalls(), 0, "an already-confirmed abnormal exit needs no second termination");
+      assert.equal(service.formalStarts, 0);
+      assert.deepEqual(marked, []);
+      assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
+    },
+  ));
+
+  await context.test("delayed natural exit", async () => withRawPreflightCloseHarness(
+    "delayed-natural-exit",
+    120,
+    async (raw) => {
+      const profile = defaultProfile({ id: "raw-preflight-delayed-natural-exit" });
+      const registration = extensionRegistration();
+      const marked: ExtensionLaunchRegistration[] = [];
+      const formalBrowser: ExtensionRegistrationMigrationBrowser = {
+        listWorkers: async () => [{
+          url: registrationWorkerUrl(registration),
+          readRuntimeRevision: async () => registration.runtimeRevision,
+        }],
+        openManagementPage: async () => {
+          throw new Error("the current worker must not be toggled");
+        },
+      };
+      const service = new RegistrationPreflightSessionService({
+        browserDataDir: "data/browser-data-test",
+        readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+        extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+      }, async () => raw.process, formalBrowser, 200);
+
+      const launched = await service.launchProfile(profile);
+
+      assert.equal(launched.status, "running");
+      assert.equal(raw.killCalls(), 0, "a natural exit inside the full budget must never be killed");
+      assert.equal(service.formalStarts, 1);
+      assert.deepEqual(marked, [registration]);
+      await service.stopProfile(profile.id);
+    },
+  ));
 });
 
 test("raw CDP WebSocket open errors and timeouts are bounded", async (context) => {
@@ -1333,7 +1704,7 @@ test("pending registrations are cleared in a closed preflight before formal laun
   }, async () => preflightProcess, formalBrowser);
   const harness = registrationPreflightProcess({
     order: service.order,
-    onClose: async () => {
+    onFinish: async () => {
       assert.deepEqual(marked, []);
     },
   });
@@ -1344,14 +1715,15 @@ test("pending registrations are cleared in a closed preflight before formal laun
   assert.equal(launched.status, "running");
   assert.equal(service.preflightLaunches, 1);
   assert.equal(service.formalStarts, 1);
-  assert.equal(harness.closeCalls(), 1);
+  assert.equal(harness.finishCalls(), 1);
+  assert.equal(harness.closeCalls(), 0);
   assert.deepEqual(service.order, [
     "preflight-launch",
     "preflight-clear",
     "preflight-clear",
     "preflight-load",
     "preflight-load",
-    "preflight-close",
+    "preflight-finish",
     "formal-start",
   ]);
   assert.deepEqual(harness.commands, [
@@ -1462,15 +1834,15 @@ test("preflight launch, command, and close failures never start the formal brows
       context: () => registrationPreflightProcess(),
     },
     {
-      name: "close timeout",
+      name: "graceful finish timeout",
       context: () => registrationPreflightProcess({
-        onClose: async () => new Promise<void>(() => undefined),
+        onFinish: async () => new Promise<void>(() => undefined),
       }),
     },
     {
-      name: "close error",
+      name: "graceful finish error",
       context: () => registrationPreflightProcess({
-        onClose: async () => Promise.reject(new Error("preflight close failed")),
+        onFinish: async () => Promise.reject(new Error("preflight finish failed")),
       }),
     },
   ] as const;
@@ -1496,7 +1868,11 @@ test("preflight launch, command, and close failures never start the formal brows
 
       assert.equal(service.formalStarts, 0);
       assert.deepEqual(marked, []);
-      if (harness) assert.equal(harness.closeCalls(), 1);
+      if (harness) {
+        const finishExpected = candidate.name.startsWith("graceful finish");
+        assert.equal(harness.finishCalls(), finishExpected ? 1 : 0);
+        assert.equal(harness.closeCalls(), 1);
+      }
     });
   }
 });
@@ -1526,6 +1902,7 @@ test("stopProfile during registration preflight closes that exact generation and
 
   assert.equal(launched.status, "stopped");
   assert.equal(stopped.status, "stopped");
+  assert.equal(harness.finishCalls(), 0);
   assert.equal(harness.closeCalls(), 1);
   assert.equal(service.formalStarts, 0);
   assert.deepEqual(marked, []);
@@ -1537,6 +1914,7 @@ test("a stop timeout during registration preflight retains the generation-specif
   const registration = extensionRegistration();
   const marked: ExtensionLaunchRegistration[] = [];
   const harness = registrationPreflightProcess({
+    onSend: async () => new Promise<void>(() => undefined),
     onClose: async () => new Promise<void>(() => undefined),
   });
   const service = new RegistrationPreflightSessionService({

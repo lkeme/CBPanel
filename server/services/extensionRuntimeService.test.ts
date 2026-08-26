@@ -1314,7 +1314,6 @@ test("real Chromium keeps MV3 classic and module lifecycle state across two pers
           const welcome = await waitForWelcomePage(first);
           assert.equal(firstState.installCount, 1);
           assert.equal(firstState.startupCount ?? 0, 0);
-          assert.equal(firstState.persistedValue, "kept");
           assert.equal(firstState.helperLoaded, true);
           assert.deepEqual(firstState.events, ["installed:install"]);
           assert.match(
@@ -1336,7 +1335,6 @@ test("real Chromium keeps MV3 classic and module lifecycle state across two pers
           assert.equal(secondState.installCount, 1);
           assert.equal(secondState.startupCount, 1);
           assert.equal(secondState.welcomeCount, 1);
-          assert.equal(secondState.persistedValue, "kept");
           assert.deepEqual(secondState.events, ["installed:install", "startup"]);
           assert.equal(second.pages().some((page) => page.url().endsWith("welcome.html")), false);
         } finally {
@@ -1396,9 +1394,17 @@ test("real Chromium migrates an existing canonical MV3 worker registration to th
           ));
           canonicalWorkerLocation = typeof state.workerLocation === "string" ? state.workerLocation : "";
           assert.match(canonicalWorkerLocation, /nested\/worker\.js$/);
+          assert.deepEqual(await readBrowserFixtureScripts(canonical), expectedBrowserFixtureScripts());
           await (await waitForWelcomePage(canonical)).close();
         } finally {
           await canonical?.close().catch(() => undefined);
+        }
+        if (!module) {
+          await assertBrowserFixtureDestructiveInstallBranchReachable(
+            launchFixture,
+            path.join(root, "browser-data", "destructive-install-control"),
+            legacyRuntimePath,
+          );
         }
 
         const service = runtimeService(root);
@@ -1462,6 +1468,7 @@ test("real Chromium migrates an existing canonical MV3 worker registration to th
             bindingRevision: `binding-canonical-migration-${kind}`,
             runtimeRevision: runtime.registration?.runtimeRevision,
           });
+          await assertBrowserFixtureScriptsSurviveQuietWindow(migrated);
         } finally {
           await migrated?.close().catch(() => undefined);
         }
@@ -1478,7 +1485,8 @@ test("real Chromium migrates an existing canonical MV3 worker registration to th
             && candidate.welcomeCount === 1
             && JSON.stringify(candidate.events) === JSON.stringify(["installed:install", "startup", "startup"])
           ));
-          assert.equal(state.persistedValue, "kept");
+          assert.equal(state.installCount, 1);
+          await assertBrowserFixtureScriptsSurviveQuietWindow(steady);
           assert.equal(steady.pages().some((page) => page.url().endsWith("welcome.html")), false);
         } finally {
           await steady?.close().catch(() => undefined);
@@ -1509,8 +1517,10 @@ async function runRawRegistrationPreflight(
   try {
     await preflight.clearServiceWorkers([`chrome-extension://${registration.browserExtensionId}`]);
     await preflight.loadUnpackedExtensions([registration]);
-  } finally {
+    await preflight.finish();
+  } catch (error) {
     await preflight.close();
+    throw error;
   }
 }
 
@@ -1869,18 +1879,63 @@ async function resolveBrowserFixtureLauncher(): Promise<BrowserFixtureLauncher |
 
 function browserFixtureWorker(module: boolean): string {
   return `${module ? 'import "./helper.js";\n' : 'importScripts("./helper.js");\n'}
+const fixtureBusinessDatabaseName = "tampermonkey_fixture_business_v1";
+const fixtureBusinessStoreName = "scripts";
 let fixtureQueue = Promise.resolve();
 function enqueueFixture(task) {
   fixtureQueue = fixtureQueue.then(task, task);
   return fixtureQueue;
 }
+function openFixtureBusinessDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(fixtureBusinessDatabaseName, 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(fixtureBusinessStoreName, { keyPath: "id" });
+    };
+    request.onerror = () => reject(request.error || new Error("fixture business database open failed"));
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+async function readFixtureBusinessScripts() {
+  const database = await openFixtureBusinessDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(fixtureBusinessStoreName, "readonly");
+    const request = transaction.objectStore(fixtureBusinessStoreName).getAll();
+    transaction.oncomplete = () => {
+      database.close();
+      resolve(request.result || []);
+    };
+    transaction.onerror = () => {
+      database.close();
+      reject(transaction.error || new Error("fixture business read failed"));
+    };
+    transaction.onabort = transaction.onerror;
+  });
+}
+async function writeFixtureBusinessScripts(scripts) {
+  const database = await openFixtureBusinessDatabase();
+  await new Promise((resolve, reject) => {
+    const transaction = database.transaction(fixtureBusinessStoreName, "readwrite");
+    const store = transaction.objectStore(fixtureBusinessStoreName);
+    for (const script of scripts) store.put(script);
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error || new Error("fixture business write failed"));
+    transaction.onabort = transaction.onerror;
+  });
+  database.close();
+}
+async function foistEnabledFixtureScript() {
+  const scripts = await readFixtureBusinessScripts();
+  const enabled = scripts.find((script) => script.id === "explicitly-enabled");
+  if (!enabled) return;
+  await writeFixtureBusinessScripts([{ ...enabled, enabled: false, foisted: true }]);
+}
 async function recordFixture(event) {
-  const state = await chrome.storage.local.get(["events", "installCount", "startupCount", "persistedValue", "welcomeCount"]);
+  const state = await chrome.storage.local.get(["events", "installCount", "startupCount", "welcomeCount"]);
   await chrome.storage.local.set({
     events: [...(state.events || []), event],
     installCount: (state.installCount || 0) + (event === "installed:install" ? 1 : 0),
     startupCount: (state.startupCount || 0) + (event === "startup" ? 1 : 0),
-    persistedValue: state.persistedValue || "kept",
     helperLoaded: globalThis.fixtureHelperLoaded === true,
     workerLocation: self.location.href,
   });
@@ -1889,6 +1944,15 @@ chrome.runtime.onInstalled.addListener((details) => {
   void enqueueFixture(async () => {
     await recordFixture("installed:" + details.reason);
     if (details.reason === "install") {
+      const scripts = await readFixtureBusinessScripts();
+      if (scripts.length === 0) {
+        await writeFixtureBusinessScripts([
+          { id: "explicitly-enabled", enabled: true, foisted: false },
+          { id: "user-disabled", enabled: false, foisted: false },
+        ]);
+      } else {
+        setTimeout(() => { void enqueueFixture(foistEnabledFixtureScript); }, 500);
+      }
       await chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") });
       const state = await chrome.storage.local.get("welcomeCount");
       await chrome.storage.local.set({ welcomeCount: (state.welcomeCount || 0) + 1 });
@@ -1942,6 +2006,131 @@ async function waitForBrowserFixtureState(
     lastState,
     lastError: lastError instanceof Error ? lastError.message : String(lastError ?? ""),
   })}`);
+}
+
+type BrowserFixtureScript = {
+  id: "explicitly-enabled" | "user-disabled";
+  enabled: boolean;
+  foisted: boolean;
+};
+
+function expectedBrowserFixtureScripts(): BrowserFixtureScript[] {
+  return [
+    { id: "explicitly-enabled", enabled: true, foisted: false },
+    { id: "user-disabled", enabled: false, foisted: false },
+  ];
+}
+
+async function assertBrowserFixtureScriptsSurviveQuietWindow(
+  browserContext: import("playwright-core").BrowserContext,
+): Promise<void> {
+  // The business fixture intentionally mutates the enabled record 500ms after any repeated install.
+  // Read only after that timer and its IndexedDB transaction would have completed; absence of onboarding
+  // or an early state read is not evidence that Tampermonkey-style business data stayed enabled.
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  assertBrowserFixtureScriptsPreserved(await readBrowserFixtureScripts(browserContext));
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assertBrowserFixtureScriptsPreserved(await readBrowserFixtureScripts(browserContext));
+}
+
+function assertBrowserFixtureScriptsPreserved(scripts: BrowserFixtureScript[]): void {
+  assert.deepEqual(scripts, expectedBrowserFixtureScripts());
+  assert.deepEqual(
+    scripts.find((script) => script.id === "explicitly-enabled"),
+    { id: "explicitly-enabled", enabled: true, foisted: false },
+  );
+  assert.deepEqual(
+    scripts.find((script) => script.id === "user-disabled"),
+    { id: "user-disabled", enabled: false, foisted: false },
+  );
+}
+
+async function assertBrowserFixtureDestructiveInstallBranchReachable(
+  launchFixture: BrowserFixtureLauncher,
+  userDataDir: string,
+  runtimePath: string,
+): Promise<void> {
+  let first: import("playwright-core").BrowserContext | undefined;
+  try {
+    first = await launchFixture(userDataDir, runtimePath);
+    await waitForBrowserFixtureState(first, (state) => (
+      state.installCount === 1
+      && state.welcomeCount === 1
+      && JSON.stringify(state.events) === JSON.stringify(["installed:install"])
+    ));
+    assertBrowserFixtureScriptsPreserved(await readBrowserFixtureScripts(first));
+  } finally {
+    await first?.close().catch(() => undefined);
+  }
+
+  let repeated: import("playwright-core").BrowserContext | undefined;
+  try {
+    repeated = await launchFixture(userDataDir, runtimePath);
+    await waitForBrowserFixtureState(repeated, (state) => (
+      state.installCount === 2
+      && state.welcomeCount === 2
+      && JSON.stringify(state.events) === JSON.stringify(["installed:install", "installed:install"])
+    ));
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const scripts = await readBrowserFixtureScripts(repeated);
+    assert.deepEqual(
+      scripts.find((script) => script.id === "explicitly-enabled"),
+      { id: "explicitly-enabled", enabled: false, foisted: true },
+    );
+    assert.deepEqual(
+      scripts.find((script) => script.id === "user-disabled"),
+      { id: "user-disabled", enabled: false, foisted: false },
+    );
+  } finally {
+    await repeated?.close().catch(() => undefined);
+  }
+}
+
+async function readBrowserFixtureScripts(
+  browserContext: import("playwright-core").BrowserContext,
+): Promise<BrowserFixtureScript[]> {
+  const worker = browserContext.serviceWorkers()[0];
+  if (!worker) throw new Error("Extension business-state worker is not running");
+  const scripts = await worker.evaluate(async () => new Promise<Array<{
+    id: string;
+    enabled: boolean;
+    foisted: boolean;
+  }>>((resolve, reject) => {
+    const request = indexedDB.open("tampermonkey_fixture_business_v1", 1);
+    let missingDatabase = false;
+    request.onupgradeneeded = () => {
+      missingDatabase = true;
+      request.transaction?.abort();
+    };
+    request.onerror = () => reject(new Error(
+      missingDatabase ? "Extension business database is missing" : "Extension business database could not be opened",
+    ));
+    request.onsuccess = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains("scripts")) {
+        database.close();
+        reject(new Error("Extension business scripts store is missing"));
+        return;
+      }
+      const transaction = database.transaction("scripts", "readonly");
+      const stateRequest = transaction.objectStore("scripts").getAll();
+      stateRequest.onerror = () => {
+        database.close();
+        reject(new Error("Extension business scripts could not be read"));
+      };
+      stateRequest.onsuccess = () => {
+        database.close();
+        resolve(stateRequest.result as Array<{ id: string; enabled: boolean; foisted: boolean }>);
+      };
+    };
+  }));
+  return scripts
+    .map((script) => ({
+      id: script.id,
+      enabled: script.enabled,
+      foisted: script.foisted,
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id)) as BrowserFixtureScript[];
 }
 
 async function readBrowserLifecycleState(
