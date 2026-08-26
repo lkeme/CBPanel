@@ -8,6 +8,9 @@ import { APP_BACKUP_KIND } from "../../src/shared/appBackup";
 import { defaultProfile } from "../../src/shared/profile";
 import { SqlitePanelRepository } from "../storage/sqliteStore";
 import { AppBackupService } from "./appBackupService";
+import { ExtensionAcquisitionService } from "./extensionAcquisitionService";
+import type { ExtensionProviderRegistry } from "./extensionProviders/providerRegistry";
+import type { CatalogSearchPage, CatalogSearchProvider } from "./extensionProviders/types";
 import { ExtensionService } from "./extensionService";
 
 test("app backup export and restore replaces app data, browser data, and extension files", async () => {
@@ -165,6 +168,68 @@ test("app backup restore warns that a reference-mode extension is re-homed into 
   assert.deepEqual(ensured.paths, [path.join(directory, "extensions", extension.id)]);
   assert.match(ensured.warnings[0]?.reason ?? "", /固定插件身份/);
 
+  repository.close();
+});
+
+test("app backup restore publishes replaced settings to in-flight acquisition gates", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  await repository.saveSettings({
+    extensionAcquisition: {
+      crxsosoSearchEnabled: false,
+      googleArtifactEnabled: true,
+      crxsosoArtifactEnabled: true,
+      crxsosoDisclosureVersionAccepted: 0,
+    },
+  });
+  const backupPath = path.join(directory, "disabled-search.cbpb");
+  await makeService(directory, repository).exportToBackup({ outputPath: backupPath });
+  await repository.saveSettings({
+    extensionAcquisition: {
+      crxsosoSearchEnabled: true,
+      googleArtifactEnabled: true,
+      crxsosoArtifactEnabled: true,
+      crxsosoDisclosureVersionAccepted: 1,
+    },
+  });
+  let notifySearchStarted: (() => void) | undefined;
+  const searchStarted = new Promise<void>((resolve) => {
+    notifySearchStarted = resolve;
+  });
+  const catalogProvider: CatalogSearchProvider = {
+    id: "crxsoso",
+    search: async (_input, signal): Promise<CatalogSearchPage> => {
+      notifySearchStarted?.();
+      return await new Promise<CatalogSearchPage>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    },
+  };
+  const providerRegistry: Pick<ExtensionProviderRegistry, "catalog" | "artifactOffers"> = {
+    catalog: () => catalogProvider,
+    artifactOffers: () => [],
+  };
+  const acquisition = new ExtensionAcquisitionService({
+    readSettings: () => repository.getSettings(),
+    providerRegistry,
+  });
+  const notifications: boolean[] = [];
+  const restore = makeService(directory, repository, new Set(), (settings) => {
+    notifications.push(settings.extensionAcquisition.crxsosoSearchEnabled);
+    acquisition.settingsChanged(settings);
+  });
+
+  const searchRejected = assert.rejects(
+    acquisition.search({ query: "tampermonkey" }),
+    (error: unknown) => (error as { code?: string }).code === "CATALOG_PROVIDER_DISABLED",
+  );
+  await searchStarted;
+
+  await restore.restoreFromBackup({ inputPath: backupPath });
+  await searchRejected;
+
+  assert.deepEqual(notifications, [false]);
+  assert.equal((await repository.getSettings()).extensionAcquisition.crxsosoSearchEnabled, false);
   repository.close();
 });
 
@@ -358,13 +423,19 @@ function verifiedAuthority(root: string, entityId: string) {
   };
 }
 
-function makeService(directory: string, repository: SqlitePanelRepository, activeIds = new Set<string>()): AppBackupService {
+function makeService(
+  directory: string,
+  repository: SqlitePanelRepository,
+  activeIds = new Set<string>(),
+  settingsChanged?: ConstructorParameters<typeof AppBackupService>[0]["settingsChanged"],
+): AppBackupService {
   return new AppBackupService({
     repository,
     browserDataDir: path.join(directory, "browser-data"),
     extensionCacheDir: path.join(directory, "extensions"),
     extensionRuntimeDir: path.join(directory, "extension-runtimes"),
     activeEnvironmentIds: () => activeIds,
+    settingsChanged,
   });
 }
 

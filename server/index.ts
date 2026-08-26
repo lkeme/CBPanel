@@ -26,15 +26,19 @@ import {
   readUploadedArchive,
 } from "./lib/extensionRequest";
 import { launchProfileFromRequest, stopProfileFromRequest } from "./lib/sessionRequest";
+import { createExtensionAcquisitionRouter } from "./routes/extensionAcquisitionRoutes";
 import { BinaryService } from "./services/binaryService";
 import { AppBackupService } from "./services/appBackupService";
 import { DesktopRuntimeService } from "./services/desktopRuntimeService";
 import { ExtensionService } from "./services/extensionService";
 import { EnvironmentDataService } from "./services/environmentDataService";
 import { EnvironmentPackageService } from "./services/environmentPackageService";
+import { ExtensionAcquisitionService } from "./services/extensionAcquisitionService";
+import { createExtensionProviderRegistry } from "./services/extensionProviders/providerRegistry";
 import { GithubMirrorProbeService } from "./services/githubMirrorProbeService";
 import { installPackagedInspectorShim } from "./services/packagedRuntime";
 import { ProxyService } from "./services/proxyService";
+import { ProviderHttpClient } from "./services/providerHttpClient";
 import {
   browserEvaluateCallbackSerializationHealth,
   SessionService,
@@ -125,6 +129,23 @@ const extensionService = new ExtensionService({
   activeEnvironmentIds,
 });
 void extensionService.sweepCacheArtifacts().catch(() => undefined);
+const extensionProviderHttpClient = new ProviderHttpClient();
+const extensionProviderRegistry = createExtensionProviderRegistry({
+  chromeWebStore: {
+    httpClient: extensionProviderHttpClient,
+    readBrowserCoreVersion: async () => {
+      const info = await binaryService.readInfo();
+      return info.installed && typeof info.version === "string" ? info.version : undefined;
+    },
+  },
+  crxsoso: {
+    httpClient: extensionProviderHttpClient,
+  },
+});
+const extensionAcquisitionService = new ExtensionAcquisitionService({
+  readSettings: () => repository.getSettings(),
+  providerRegistry: extensionProviderRegistry,
+});
 const sessionService = new SessionService({
   browserDataDir: BROWSER_DATA_DIR,
   readBinaryInfo: () => binaryService.readInfo(),
@@ -153,6 +174,7 @@ const appBackupService = new AppBackupService({
   extensionCacheDir: path.join(DATA_DIR, "extensions"),
   extensionRuntimeDir: EXTENSION_RUNTIME_DIR,
   activeEnvironmentIds,
+  settingsChanged: (settings) => extensionAcquisitionService.settingsChanged(settings),
 });
 const githubMirrorProbeService = new GithubMirrorProbeService();
 const desktopRuntimeService = new DesktopRuntimeService({
@@ -567,11 +589,18 @@ async function createApp(): Promise<express.Express> {
 
   app.put("/api/settings", async (request, response) => {
     try {
-      response.json(await repository.saveSettings(request.body ?? {}));
+      const settings = await repository.saveSettings(request.body ?? {});
+      extensionAcquisitionService.settingsChanged(settings);
+      response.json(settings);
     } catch (error) {
       sendError(response, error);
     }
   });
+
+  app.use(
+    "/api/extension-acquisition",
+    createExtensionAcquisitionRouter(extensionAcquisitionService),
+  );
 
   app.get("/api/storage/info", async (_request, response) => {
     try {

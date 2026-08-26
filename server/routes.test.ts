@@ -228,6 +228,65 @@ test("new extension bindings require a currently loadable local package", async 
   assert.ok(jsonBody<Array<{ extensionIds: string[] }>>(bound)[0]?.extensionIds.includes(imported.id));
 });
 
+test("extension acquisition capabilities and exact resolution stay read-only and honor settings gates", async () => {
+  const settingsBefore = jsonBody<{ extensionAcquisition: Record<string, unknown> }>(
+    await panel.request("GET", "/api/settings"),
+  );
+  const stateBefore = jsonBody<{ extensions: unknown[] }>(await panel.request("GET", "/api/state"));
+  const capabilities = await panel.request("GET", "/api/extension-acquisition/capabilities");
+  assert.equal(capabilities.status, 200);
+  assert.deepEqual(
+    jsonBody<Array<{ id: string; enabled: boolean }>>(capabilities).map(({ id, enabled }) => ({ id, enabled })),
+    [
+      { id: "crxsoso-search", enabled: true },
+      { id: "google-artifact", enabled: true },
+      { id: "crxsoso-artifact", enabled: true },
+    ],
+  );
+
+  const storeId = "dhdgffkkebhmkfjojejmpbldmpobfkfo";
+  const resolved = await panel.request("POST", "/api/extension-acquisition/resolve", { input: storeId });
+  assert.equal(resolved.status, 200);
+  assert.equal((resolved.body as { storeId?: string }).storeId, storeId);
+  assert.deepEqual(
+    (resolved.body as { offers?: Array<{ artifactProviderId: string }> }).offers?.map((offer) => offer.artifactProviderId),
+    ["chrome-web-store", "crxsoso"],
+  );
+  const unsupported = await panel.request("POST", "/api/extension-acquisition/resolve", {
+    input: `https://example.com/detail/${storeId}`,
+  });
+  assert.equal(unsupported.status, 400);
+  assert.equal((unsupported.body as { code?: string }).code, "ACQUISITION_INPUT_UNSUPPORTED");
+
+  // Default disclosure version is zero. The server rejects before the CRX搜搜 adapter can fetch.
+  const undisclosed = await panel.request("POST", "/api/extension-acquisition/search", { query: "tampermonkey" });
+  assert.equal(undisclosed.status, 428);
+  assert.equal((undisclosed.body as { code?: string }).code, "CATALOG_DISCLOSURE_REQUIRED");
+
+  const disabledSettings = await panel.request("PUT", "/api/settings", {
+    extensionAcquisition: {
+      crxsosoSearchEnabled: false,
+      googleArtifactEnabled: false,
+      crxsosoArtifactEnabled: false,
+      crxsosoDisclosureVersionAccepted: 0,
+    },
+  });
+  assert.equal(disabledSettings.status, 200);
+  const disabledSearch = await panel.request("POST", "/api/extension-acquisition/search", { query: "tampermonkey" });
+  assert.equal(disabledSearch.status, 409);
+  assert.equal((disabledSearch.body as { code?: string }).code, "CATALOG_PROVIDER_DISABLED");
+  const noOffers = await panel.request("POST", "/api/extension-acquisition/resolve", { input: storeId });
+  assert.equal(noOffers.status, 200);
+  assert.deepEqual((noOffers.body as { offers?: unknown[] }).offers, []);
+
+  const stateAfter = jsonBody<{ extensions: unknown[] }>(await panel.request("GET", "/api/state"));
+  assert.equal(stateAfter.extensions.length, stateBefore.extensions.length);
+  const restoredSettings = await panel.request("PUT", "/api/settings", {
+    extensionAcquisition: settingsBefore.extensionAcquisition,
+  });
+  assert.equal(restoredSettings.status, 200);
+});
+
 test("a prune preserves a runtime-held id after clearing the last database row that names it", async () => {
   const held = await startPanelHarness();
   let stalled: StalledDownload | undefined;

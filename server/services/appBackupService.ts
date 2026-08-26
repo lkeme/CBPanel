@@ -32,6 +32,8 @@ type AppBackupServiceOptions = {
   extensionCacheDir: string;
   extensionRuntimeDir?: string;
   activeEnvironmentIds: () => Set<string>;
+  /** Runs synchronously after a restore/rollback commits settings so in-flight derived work can abort. */
+  settingsChanged?: (settings: AppBackupData["settings"]) => void;
 };
 
 type ExportRequest = {
@@ -130,6 +132,7 @@ export class AppBackupService {
       await this.restoreFilesystem(prepared, operationId);
       this.setProgress(operationId, "restoring-database", 0, prepared.data.environments.length, "Replacing app data.");
       await this.options.repository.restoreFullBackupData(prepared.data);
+      this.options.settingsChanged?.(prepared.data.settings);
       this.setProgress(operationId, "finalizing", prepared.data.environments.length, prepared.data.environments.length, "Full backup restored.");
       return {
         inputPath,
@@ -345,6 +348,7 @@ export class AppBackupService {
     await rollbackDirectory(path.join(snapshot.directory, "browser-data"), this.options.browserDataDir, snapshot.browserDataExisted);
     await rollbackDirectory(path.join(snapshot.directory, "extensions"), this.options.extensionCacheDir, snapshot.extensionCacheExisted);
     await this.options.repository.restoreFullBackupData(snapshot.data);
+    this.options.settingsChanged?.(snapshot.data.settings);
   }
 
   private assertNoActiveEnvironment(message: string): void {

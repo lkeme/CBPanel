@@ -36,6 +36,16 @@ export interface ExtensionCapabilityDescriptor extends ExtensionCapabilityDefini
   enabled: boolean;
 }
 
+export interface ExtensionCapabilityHealth {
+  status: "healthy" | "unavailable";
+  checkedAt: string;
+  errorCode?: ExtensionAcquisitionErrorCode;
+}
+
+export interface ExtensionCapabilityView extends ExtensionCapabilityDescriptor {
+  health?: ExtensionCapabilityHealth;
+}
+
 export type ExtensionAcquisitionSettingsLike = {
   crxsosoSearchEnabled: boolean;
   googleArtifactEnabled: boolean;
@@ -149,6 +159,30 @@ export interface ExtensionArtifactOffer {
   providerLabel: string;
 }
 
+export interface ExtensionCatalogSearchRequest {
+  query: string;
+  cursor?: string;
+}
+
+export interface ExtensionCatalogSearchPage {
+  query: string;
+  items: ExtensionCatalogItem[];
+  excludedNonCanonicalCount: number;
+  cursor?: string;
+  hasMore: boolean;
+}
+
+export interface ExtensionReferenceResolveRequest {
+  input: string;
+}
+
+export interface ExtensionReferenceResolution {
+  namespace: ExtensionStoreNamespace;
+  storeId: string;
+  storeUrl: string;
+  offers: ExtensionArtifactOffer[];
+}
+
 export type ExtensionReference =
   | {
       kind: "canonical";
@@ -171,8 +205,18 @@ export type ExtensionAcquisitionErrorCode =
   | "EXTENSION_CATALOG_RATE_LIMITED"
   | "EXTENSION_CATALOG_TIMEOUT"
   | "EXTENSION_CATALOG_NETWORK"
+  | "EXTENSION_CATALOG_HTTP_ERROR"
+  | "EXTENSION_CATALOG_RESPONSE_TOO_LARGE"
+  | "EXTENSION_CATALOG_REDIRECT_REJECTED"
   | "EXTENSION_CATALOG_SCHEMA_CHANGED"
+  | "EXTENSION_CATALOG_CURSOR_INVALID"
+  | "EXTENSION_CATALOG_CURSOR_EXPIRED"
   | "ARTIFACT_PROVIDER_DISABLED"
+  | "ARTIFACT_PROVIDER_HTTP_ERROR"
+  | "ARTIFACT_UNAVAILABLE"
+  | "ARTIFACT_TIMEOUT"
+  | "ARTIFACT_NETWORK"
+  | "ARTIFACT_REDIRECT_LOOP"
   | "ARTIFACT_REDIRECT_REJECTED"
   | "ARTIFACT_TOO_LARGE"
   | "BROWSER_CORE_VERSION_REQUIRED"
