@@ -4,8 +4,8 @@ import path from "node:path";
 import type { ExtensionEntity } from "../../src/shared/entities";
 import { pathExists } from "./archiveUtils";
 
-export const EXTENSION_LIFECYCLE_INJECTOR_VERSION = 2;
-export const EXTENSION_LIFECYCLE_NAMESPACE = "__cbpanel_lifecycle__";
+export const EXTENSION_LIFECYCLE_INJECTOR_VERSION = 4;
+export const EXTENSION_LIFECYCLE_NAMESPACE = "cbpanel_lifecycle";
 
 type RuntimeManifest = {
   key?: unknown;
@@ -28,6 +28,8 @@ export type ExtensionRuntimeMaterializeInput = {
   lifecycleRevision?: string;
   /** Overrides legacy browser-state inference for restore/import rebases. */
   initialBehavior?: ExtensionRuntimeInitialBehavior;
+  /** Adopts a missing lifecycle baseline without turning later binding changes into preserve rebases. */
+  preserveMissingState?: boolean;
   /** Allows first creation but rejects replacement when a prior browser close is unconfirmed. */
   allowReplaceExisting?: boolean;
 };
@@ -36,6 +38,13 @@ export type ExtensionRuntimeMaterializeResult = {
   path: string;
   protected: boolean;
   warning?: string;
+  registration?: {
+    browserExtensionId: string;
+    workerRelativePath: string;
+    runtimeRevision: string;
+    signature: string;
+    migrationRequired: boolean;
+  };
 };
 
 type ExtensionRuntimeServiceOptions = {
@@ -49,12 +58,21 @@ type RuntimeConfig = {
   packageRevision: string;
   bindingRevision: string;
   initialBehavior: ExtensionRuntimeInitialBehavior;
+  preserveMissingState: boolean;
+  runtimeRevision: string;
+};
+
+type MaterializationMetadata = {
+  injectorVersion: number;
+  signature: string;
+  integritySha256: string;
+  registeredSignature?: string;
+  preserveMissingState?: boolean;
 };
 
 const CONFIG_FILE = "config.js";
 const BOOTSTRAP_FILE = "bootstrap.js";
 const SIGNATURE_FILE = "materialization.json";
-const CLASSIC_ORIGINAL_WORKER_FILE = "__cbpanel_lifecycle_original__.js";
 const MATERIALIZATION_METADATA_PATH = `${EXTENSION_LIFECYCLE_NAMESPACE}/${SIGNATURE_FILE}`;
 
 /**
@@ -92,6 +110,23 @@ export class ExtensionRuntimeService {
     }
   }
 
+  async markRegistrationReady(runtimePath: string, signature: string): Promise<void> {
+    const outputDir = assertDirectRuntimeOutputPath(this.options.runtimeDir, runtimePath);
+    await this.runEnvironmentOperation(path.dirname(outputDir), async () => {
+      await assertRuntimePathIsSafe(this.options.runtimeDir, outputDir, "extension runtime output");
+      if (!(await hasMaterializationSignature(outputDir, signature))) throw staleRegistrationMetadata();
+      const metadata = await readMaterializationMetadata(outputDir);
+      if (!metadata || metadata.signature !== signature) throw staleRegistrationMetadata();
+      if (metadata.registeredSignature === signature) return;
+      await assertRegularNonSymbolicPath(outputDir, MATERIALIZATION_METADATA_PATH, "materialization metadata");
+      await fs.writeFile(
+        path.join(outputDir, EXTENSION_LIFECYCLE_NAMESPACE, SIGNATURE_FILE),
+        `${JSON.stringify({ ...metadata, registeredSignature: signature }, null, 2)}\n`,
+        "utf8",
+      );
+    });
+  }
+
   private async materializeOnce(
     input: ExtensionRuntimeMaterializeInput,
     outputDir: string,
@@ -120,16 +155,11 @@ export class ExtensionRuntimeService {
       });
     }
 
+    await assertRuntimePathIsSafe(this.options.runtimeDir, outputDir, "extension runtime output");
+    const previousMetadata = await readMaterializationMetadata(outputDir);
     const initialBehavior = input.initialBehavior ?? (input.lifecycleRevision
       ? "install"
       : await this.legacyInitialBehavior(input.environmentId));
-    const config: RuntimeConfig = {
-      schemaVersion: 1,
-      version: input.extension.version,
-      packageRevision: input.extension.lastInstalledAt ?? input.extension.manifestSha256 ?? input.extension.version,
-      bindingRevision: input.lifecycleRevision ?? "legacy",
-      initialBehavior,
-    };
     const sourceRevision = input.extension.directoryMode === "reference"
       ? await fingerprintDirectory(sourcePath)
       : input.extension.manifestSha256 ?? input.extension.lastInstalledAt ?? input.extension.version;
@@ -137,8 +167,45 @@ export class ExtensionRuntimeService {
       const verifiedManifest = await readRuntimeManifest(sourcePath);
       if (JSON.stringify(verifiedManifest) !== JSON.stringify(manifest)) throw sourceChangedDuringMaterialization();
     }
+    const mv3Background = background.kind === "mv3-classic" || background.kind === "mv3-module"
+      ? background
+      : undefined;
+    const browserExtensionId = mv3Background ? browserExtensionIdFromManifestKey(manifestKey!) : undefined;
+    const browserEntryExists = browserExtensionId
+      ? await browserProfileHasExtension(this.options.browserDataDir, input.environmentId, browserExtensionId)
+      : false;
+    const preserveMissingState = input.preserveMissingState ?? (
+      initialBehavior === "preserve"
+      || previousMetadata?.preserveMissingState === true
+      || (browserEntryExists && previousMetadata?.injectorVersion !== EXTENSION_LIFECYCLE_INJECTOR_VERSION)
+    );
+    const packageRevision = input.extension.directoryMode === "reference"
+      ? sourceRevision
+      : input.extension.lastInstalledAt ?? input.extension.manifestSha256 ?? input.extension.version;
+    const semanticConfig: Omit<RuntimeConfig, "runtimeRevision"> = {
+      schemaVersion: 1,
+      version: input.extension.version,
+      packageRevision,
+      bindingRevision: input.lifecycleRevision ?? "legacy",
+      initialBehavior,
+      preserveMissingState,
+    };
+    const runtimeRevision = lifecycleRuntimeRevision(manifest, background, sourceRevision, semanticConfig);
+    const config: RuntimeConfig = {
+      ...semanticConfig,
+      runtimeRevision,
+    };
     const signature = materializationSignature(manifest, config, background, sourceRevision);
-    await assertRuntimePathIsSafe(this.options.runtimeDir, outputDir, "extension runtime output");
+    const workerRelativePath = mv3Background
+      ? mv3ResourcePaths(signature, mv3Background.original).wrapper
+      : undefined;
+    const registration = browserExtensionId && workerRelativePath ? {
+      browserExtensionId,
+      workerRelativePath,
+      runtimeRevision,
+      signature,
+      migrationRequired: previousMetadata?.registeredSignature !== signature,
+    } : undefined;
     if (await hasMaterializationSignature(outputDir, signature)) {
       // Integrity verification can take long enough for a reference-mode source to change after its
       // signature was computed. Recheck at the reuse boundary so this launch never selects runtime A
@@ -147,9 +214,16 @@ export class ExtensionRuntimeService {
         input.extension.directoryMode === "reference"
         && await fingerprintDirectory(sourcePath) !== sourceRevision
       ) throw sourceChangedDuringMaterialization();
-      return { path: outputDir, protected: true };
+      return { path: outputDir, protected: true, registration };
     }
     if (input.allowReplaceExisting === false && await lstatIfExists(outputDir)) throw replacementForbidden();
+
+    const registeredSignature = registration && (
+      previousMetadata?.registeredSignature === signature || !browserEntryExists
+        ? signature
+        : previousMetadata?.registeredSignature
+    );
+    if (registration) registration.migrationRequired = registeredSignature !== signature;
 
     await this.publishRuntimeCopy(
       sourcePath,
@@ -158,10 +232,12 @@ export class ExtensionRuntimeService {
       config,
       background,
       signature,
+      registeredSignature,
+      preserveMissingState,
       input.extension.directoryMode === "reference" ? sourceRevision : undefined,
       input.allowReplaceExisting !== false,
     );
-    return { path: outputDir, protected: true };
+    return { path: outputDir, protected: true, registration };
   }
 
   async removeEnvironment(environmentId: string): Promise<boolean> {
@@ -344,6 +420,8 @@ export class ExtensionRuntimeService {
     config: RuntimeConfig,
     background: BackgroundAdapter,
     signature: string,
+    registeredSignature: string | undefined,
+    preserveMissingState: boolean,
     expectedSourceRevision: string | undefined,
     allowReplaceExisting: boolean,
   ): Promise<void> {
@@ -362,9 +440,15 @@ export class ExtensionRuntimeService {
       if (expectedSourceRevision !== undefined && await fingerprintDirectory(tempDir) !== expectedSourceRevision) {
         throw sourceChangedDuringMaterialization();
       }
-      await injectLifecycleAdapter(tempDir, manifest, config, background);
+      await injectLifecycleAdapter(tempDir, manifest, config, background, signature);
       const integritySha256 = await fingerprintDirectory(tempDir, MATERIALIZATION_METADATA_PATH);
-      await writeMaterializationMetadata(tempDir, signature, integritySha256);
+      await writeMaterializationMetadata(
+        tempDir,
+        signature,
+        integritySha256,
+        registeredSignature,
+        preserveMissingState,
+      );
       if (expectedSourceRevision !== undefined && await fingerprintDirectory(sourcePath) !== expectedSourceRevision) {
         throw sourceChangedDuringMaterialization();
       }
@@ -387,7 +471,7 @@ export class ExtensionRuntimeService {
 }
 
 type BackgroundAdapter =
-  | { kind: "mv3-classic"; original: string; preservedOriginal: string }
+  | { kind: "mv3-classic"; original: string }
   | { kind: "mv3-module"; original: string }
   | { kind: "mv2-scripts"; scripts: string[] }
   | { kind: "mv2-page"; page: string };
@@ -400,11 +484,7 @@ async function classifyBackground(manifest: RuntimeManifest, sourcePath: string)
     const original = normalizeManifestPath(background.service_worker, "background.service_worker");
     await assertManifestFileExists(sourcePath, original);
     if (background.type === "module") return { kind: "mv3-module", original };
-    return {
-      kind: "mv3-classic",
-      original,
-      preservedOriginal: path.posix.join(path.posix.dirname(original), CLASSIC_ORIGINAL_WORKER_FILE),
-    };
+    return { kind: "mv3-classic", original };
   }
   if (manifestVersion === 2 && typeof background.page === "string" && background.page.trim()) {
     const page = normalizeManifestPath(background.page, "background.page");
@@ -437,48 +517,56 @@ async function injectLifecycleAdapter(
   manifest: RuntimeManifest,
   config: RuntimeConfig,
   background: BackgroundAdapter,
+  signature: string,
 ): Promise<void> {
   const namespaceDir = path.join(runtimePath, EXTENSION_LIFECYCLE_NAMESPACE);
   if (await lstatIfExists(namespaceDir)) {
-    throw Object.assign(new Error(`Extension uses reserved path ${EXTENSION_LIFECYCLE_NAMESPACE}`), {
-      status: 409,
-      code: "EXTENSION_LIFECYCLE_RESERVED_PATH",
-    });
+    throw lifecycleReservedPath(EXTENSION_LIFECYCLE_NAMESPACE);
   }
   await fs.mkdir(namespaceDir, { recursive: false });
+  const mv3Resources = background.kind === "mv3-classic" || background.kind === "mv3-module"
+    ? mv3ResourcePaths(signature, background.original)
+    : undefined;
+  const configRelativePath = mv3Resources?.config ?? `${EXTENSION_LIFECYCLE_NAMESPACE}/${CONFIG_FILE}`;
+  const bootstrapRelativePath = mv3Resources?.bootstrap ?? `${EXTENSION_LIFECYCLE_NAMESPACE}/${BOOTSTRAP_FILE}`;
   await fs.writeFile(
-    path.join(namespaceDir, CONFIG_FILE),
+    path.join(runtimePath, ...configRelativePath.split("/")),
     `globalThis.__CBPANEL_LIFECYCLE_CONFIG__ = ${JSON.stringify(config)};\n`,
     "utf8",
   );
-  await fs.writeFile(path.join(namespaceDir, BOOTSTRAP_FILE), LIFECYCLE_BOOTSTRAP, "utf8");
+  await fs.writeFile(
+    path.join(runtimePath, ...bootstrapRelativePath.split("/")),
+    LIFECYCLE_BOOTSTRAP,
+    "utf8",
+  );
 
   const nextManifest = structuredClone(manifest);
   const nextBackground = { ...(nextManifest.background ?? {}) };
   nextManifest.background = nextBackground;
   if (background.kind === "mv3-classic") {
-    const wrapperPath = path.join(runtimePath, ...background.original.split("/"));
-    const preservedOriginalPath = path.join(runtimePath, ...background.preservedOriginal.split("/"));
-    if (await pathExists(preservedOriginalPath)) {
-      throw new Error(`Extension uses reserved worker path: ${background.preservedOriginal}`);
-    }
-    await fs.rename(wrapperPath, preservedOriginalPath);
+    const wrapperRelativePath = mv3Resources!.wrapper;
+    const wrapperPath = path.join(runtimePath, ...wrapperRelativePath.split("/"));
+    if (await lstatIfExists(wrapperPath)) throw lifecycleReservedPath(wrapperRelativePath);
     await fs.writeFile(
       wrapperPath,
-      `importScripts(chrome.runtime.getURL(${JSON.stringify(`${EXTENSION_LIFECYCLE_NAMESPACE}/${CONFIG_FILE}`)}), chrome.runtime.getURL(${JSON.stringify(`${EXTENSION_LIFECYCLE_NAMESPACE}/${BOOTSTRAP_FILE}`)}), chrome.runtime.getURL(${JSON.stringify(background.preservedOriginal)}));\n`,
+      `importScripts(chrome.runtime.getURL(${JSON.stringify(configRelativePath)}), chrome.runtime.getURL(${JSON.stringify(bootstrapRelativePath)}), chrome.runtime.getURL(${JSON.stringify(background.original)}));\n`,
       "utf8",
     );
+    nextBackground.service_worker = wrapperRelativePath;
   } else if (background.kind === "mv3-module") {
-    const originalPath = path.join(runtimePath, ...background.original.split("/"));
-    const originalSource = await fs.readFile(originalPath, "utf8");
-    const originalDirectory = path.posix.dirname(background.original);
-    const configSpecifier = relativeModuleSpecifier(originalDirectory, `${EXTENSION_LIFECYCLE_NAMESPACE}/${CONFIG_FILE}`);
-    const bootstrapSpecifier = relativeModuleSpecifier(originalDirectory, `${EXTENSION_LIFECYCLE_NAMESPACE}/${BOOTSTRAP_FILE}`);
+    const wrapperRelativePath = mv3Resources!.wrapper;
+    const wrapperPath = path.join(runtimePath, ...wrapperRelativePath.split("/"));
+    if (await lstatIfExists(wrapperPath)) throw lifecycleReservedPath(wrapperRelativePath);
+    const wrapperDirectory = path.posix.dirname(wrapperRelativePath);
+    const configSpecifier = relativeModuleSpecifier(wrapperDirectory, configRelativePath);
+    const bootstrapSpecifier = relativeModuleSpecifier(wrapperDirectory, bootstrapRelativePath);
+    const originalSpecifier = relativeModuleSpecifier(wrapperDirectory, background.original);
     await fs.writeFile(
-      originalPath,
-      `import ${JSON.stringify(configSpecifier)};\nimport ${JSON.stringify(bootstrapSpecifier)};\n${originalSource}`,
+      wrapperPath,
+      `import ${JSON.stringify(configSpecifier)};\nimport ${JSON.stringify(bootstrapSpecifier)};\nimport ${JSON.stringify(originalSpecifier)};\n`,
       "utf8",
     );
+    nextBackground.service_worker = wrapperRelativePath;
   } else if (background.kind === "mv2-scripts") {
     nextBackground.scripts = [
       `${EXTENSION_LIFECYCLE_NAMESPACE}/${CONFIG_FILE}`,
@@ -501,10 +589,18 @@ async function writeMaterializationMetadata(
   runtimePath: string,
   signature: string,
   integritySha256: string,
+  registeredSignature: string | undefined,
+  preserveMissingState: boolean,
 ): Promise<void> {
   await fs.writeFile(
     path.join(runtimePath, EXTENSION_LIFECYCLE_NAMESPACE, SIGNATURE_FILE),
-    `${JSON.stringify({ injectorVersion: EXTENSION_LIFECYCLE_INJECTOR_VERSION, signature, integritySha256 }, null, 2)}\n`,
+    `${JSON.stringify({
+      injectorVersion: EXTENSION_LIFECYCLE_INJECTOR_VERSION,
+      signature,
+      integritySha256,
+      ...(registeredSignature ? { registeredSignature } : {}),
+      preserveMissingState,
+    }, null, 2)}\n`,
     "utf8",
   );
 }
@@ -518,6 +614,52 @@ function materializationSignature(
   return createHash("sha256")
     .update(JSON.stringify({ injectorVersion: EXTENSION_LIFECYCLE_INJECTOR_VERSION, manifest, config, background, sourceRevision }))
     .digest("hex");
+}
+
+function lifecycleRuntimeRevision(
+  manifest: RuntimeManifest,
+  background: BackgroundAdapter,
+  sourceRevision: string,
+  config: Omit<RuntimeConfig, "runtimeRevision">,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      injectorVersion: EXTENSION_LIFECYCLE_INJECTOR_VERSION,
+      manifest,
+      background,
+      sourceRevision,
+      config,
+    }))
+    .digest("hex");
+}
+
+function browserExtensionIdFromManifestKey(manifestKey: string): string {
+  const idHex = createHash("sha256").update(Buffer.from(manifestKey, "base64")).digest("hex").slice(0, 32);
+  return [...idHex].map((digit) => String.fromCharCode("a".charCodeAt(0) + Number.parseInt(digit, 16))).join("");
+}
+
+async function browserProfileHasExtension(
+  browserDataDir: string,
+  environmentId: string,
+  browserExtensionId: string,
+): Promise<boolean> {
+  const securePreferences = path.join(
+    browserDataDir,
+    assertDirectChildName(environmentId, "environment id"),
+    "Default",
+    "Secure Preferences",
+  );
+  try {
+    const parsed = JSON.parse((await fs.readFile(securePreferences, "utf8")).replace(/^\uFEFF/, "")) as {
+      extensions?: { settings?: Record<string, unknown> };
+    };
+    return Object.hasOwn(parsed.extensions?.settings ?? {}, browserExtensionId);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    // An unreadable existing profile must not be mistaken for a fresh install. Leave registration
+    // pending so Session can perform and confirm the idempotent management-toggle migration.
+    return true;
+  }
 }
 
 async function fingerprintDirectory(root: string, excludedRelativePath?: string): Promise<string> {
@@ -549,18 +691,34 @@ async function fingerprintDirectory(root: string, excludedRelativePath?: string)
 
 async function hasMaterializationSignature(outputDir: string, signature: string): Promise<boolean> {
   try {
-    await assertRegularNonSymbolicPath(outputDir, MATERIALIZATION_METADATA_PATH, "materialization metadata");
-    const parsed = JSON.parse(
-      await fs.readFile(path.join(outputDir, EXTENSION_LIFECYCLE_NAMESPACE, SIGNATURE_FILE), "utf8"),
-    ) as { injectorVersion?: unknown; signature?: unknown; integritySha256?: unknown };
+    const parsed = await readMaterializationMetadata(outputDir);
+    if (!parsed) return false;
     if (
       parsed.injectorVersion !== EXTENSION_LIFECYCLE_INJECTOR_VERSION
       || parsed.signature !== signature
-      || typeof parsed.integritySha256 !== "string"
     ) return false;
     return await fingerprintDirectory(outputDir, MATERIALIZATION_METADATA_PATH) === parsed.integritySha256;
   } catch {
     return false;
+  }
+}
+
+async function readMaterializationMetadata(outputDir: string): Promise<MaterializationMetadata | undefined> {
+  try {
+    await assertRegularNonSymbolicPath(outputDir, MATERIALIZATION_METADATA_PATH, "materialization metadata");
+    const parsed = JSON.parse(
+      await fs.readFile(path.join(outputDir, EXTENSION_LIFECYCLE_NAMESPACE, SIGNATURE_FILE), "utf8"),
+    ) as Partial<MaterializationMetadata>;
+    if (
+      typeof parsed.injectorVersion !== "number"
+      || typeof parsed.signature !== "string"
+      || typeof parsed.integritySha256 !== "string"
+      || (parsed.registeredSignature !== undefined && typeof parsed.registeredSignature !== "string")
+      || (parsed.preserveMissingState !== undefined && typeof parsed.preserveMissingState !== "boolean")
+    ) return undefined;
+    return parsed as MaterializationMetadata;
+  } catch {
+    return undefined;
   }
 }
 
@@ -601,12 +759,6 @@ async function assertTemporaryMutationPathsAreSafe(root: string, background: Bac
   } else if (background.kind === "mv2-page") {
     await assertRegularNonSymbolicPath(root, background.page, "runtime background page");
   }
-  if (background.kind === "mv3-classic") {
-    await assertNonSymbolicPathParents(root, background.preservedOriginal, "reserved runtime worker");
-    if (await lstatIfExists(path.join(root, ...background.preservedOriginal.split("/")))) {
-      throw new Error(`Extension uses reserved worker path: ${background.preservedOriginal}`);
-    }
-  }
 }
 
 async function assertRegularNonSymbolicPath(root: string, relativePath: string, label: string): Promise<void> {
@@ -618,16 +770,6 @@ async function assertRegularNonSymbolicPath(root: string, relativePath: string, 
     if (stat.isSymbolicLink()) throw unsafeRuntimePath(label);
     if (index < segments.length - 1 && !stat.isDirectory()) throw unsafeRuntimePath(label);
     if (index === segments.length - 1 && !stat.isFile()) throw unsafeRuntimePath(label);
-  }
-}
-
-async function assertNonSymbolicPathParents(root: string, relativePath: string, label: string): Promise<void> {
-  let candidate = root;
-  const parentSegments = relativePath.split("/").slice(0, -1);
-  for (const segment of parentSegments) {
-    candidate = path.join(candidate, segment);
-    const stat = await fs.lstat(candidate);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) throw unsafeRuntimePath(label);
   }
 }
 
@@ -708,9 +850,44 @@ function replacementForbidden(): Error {
   });
 }
 
+function staleRegistrationMetadata(): Error {
+  return Object.assign(new Error("Extension runtime registration no longer matches the materialized output"), {
+    status: 409,
+    code: "EXTENSION_RUNTIME_REGISTRATION_STALE",
+  });
+}
+
+function lifecycleReservedPath(relativePath: string): Error {
+  return Object.assign(new Error(`Extension uses reserved path ${relativePath}`), {
+    status: 409,
+    code: "EXTENSION_LIFECYCLE_RESERVED_PATH",
+  });
+}
+
 function relativeModuleSpecifier(fromDirectory: string, target: string): string {
   const relative = path.posix.relative(fromDirectory === "." ? "" : fromDirectory, target);
   return relative.startsWith(".") ? relative : `./${relative}`;
+}
+
+function mv3ResourcePaths(
+  signature: string,
+  originalWorker: string,
+): { config: string; bootstrap: string; wrapper: string } {
+  // Keep enough entropy to make collisions impractical without pushing long portable Windows
+  // installation paths past MAX_PATH. The complete signature remains in materialization.json.
+  const revision = Buffer.from(signature.slice(0, 32), "hex").toString("base64url");
+  const suffix = `v${EXTENSION_LIFECYCLE_INJECTOR_VERSION}-${revision}`;
+  const originalDirectory = path.posix.dirname(originalWorker);
+  const wrapperName = `${EXTENSION_LIFECYCLE_NAMESPACE}-worker-${suffix}.js`;
+  return {
+    config: `${EXTENSION_LIFECYCLE_NAMESPACE}/config-${suffix}.js`,
+    bootstrap: `${EXTENSION_LIFECYCLE_NAMESPACE}/bootstrap-${suffix}.js`,
+    // A classic worker resolves its own relative importScripts() calls against the registered worker
+    // URL, not against the imported source file. Keep the versioned wrapper beside the canonical entry
+    // so nested workers retain their original URL base. Doing the same for module workers also preserves
+    // code that intentionally derives resources from self.location while static imports keep their own base.
+    wrapper: originalDirectory === "." ? wrapperName : `${originalDirectory}/${wrapperName}`,
+  };
 }
 
 function injectBeforeFirstScript(html: string, injection: string): string {
@@ -792,6 +969,22 @@ function assertDirectChildName(value: string, label: string): string {
   return clean;
 }
 
+function assertDirectRuntimeOutputPath(runtimeRoot: string, runtimePath: string): string {
+  const root = path.resolve(runtimeRoot);
+  const output = path.resolve(runtimePath);
+  const relative = path.relative(root, output);
+  const segments = relative.split(path.sep).filter(Boolean);
+  if (
+    !relative
+    || path.isAbsolute(relative)
+    || relative.startsWith(`..${path.sep}`)
+    || segments.length !== 2
+  ) throw unsafeRuntimePath("extension runtime output");
+  assertDirectChildName(segments[0]!, "environment id");
+  assertDirectChildName(segments[1]!, "extension id");
+  return output;
+}
+
 function assertPathHasNoComma(value: string): void {
   if (value.includes(",")) {
     throw Object.assign(new Error(`Extension path cannot contain a comma: ${value}`), { status: 400 });
@@ -825,6 +1018,7 @@ const LIFECYCLE_BOOTSTRAP = `(() => {
   const nativeInstalledAdd = installedEvent.addListener.bind(installedEvent);
   const nativeStartupAdd = startupEvent.addListener.bind(startupEvent);
   let startupDispatched = false;
+  let nativeLifecycleObserved = false;
   let statePromise;
   let queue = Promise.resolve();
 
@@ -915,6 +1109,7 @@ const LIFECYCLE_BOOTSTRAP = `(() => {
       version: config.version,
       packageRevision: config.packageRevision,
       bindingRevision: config.bindingRevision,
+      runtimeRevision: config.runtimeRevision,
     };
   }
 
@@ -928,6 +1123,7 @@ const LIFECYCLE_BOOTSTRAP = `(() => {
           || typeof state.version !== "string"
           || typeof state.packageRevision !== "string"
           || typeof state.bindingRevision !== "string"
+          || (state.runtimeRevision !== undefined && typeof state.runtimeRevision !== "string")
         ) {
           console.error("CBPanel lifecycle protection found invalid state");
           return { status: "failed" };
@@ -979,13 +1175,22 @@ const LIFECYCLE_BOOTSTRAP = `(() => {
   }
 
   async function handleInstalled(details) {
+    if (startupDispatched) return;
     const loaded = await loadState();
     if (loaded.status === "failed") {
       console.error("CBPanel lifecycle protection suppressed install/update because its state could not be read safely");
       emitStartup();
       return;
     }
-    if (details?.reason !== "install") {
+    if (loaded.status === "missing") {
+      const persisted = await persistCurrentState();
+      const repeatedCommandLineLifecycle = details?.reason === "install" || details?.reason === "update";
+      if (config.preserveMissingState && repeatedCommandLineLifecycle) emitStartup();
+      else if (persisted) emitInstalled(details);
+      else console.error("CBPanel lifecycle protection suppressed install/update because its state could not be persisted");
+      return;
+    }
+    if (details?.reason === "chrome_update" || details?.reason === "shared_module_update") {
       if (await persistCurrentState()) emitInstalled(details);
       else {
         console.error("CBPanel lifecycle protection suppressed native install/update because its state could not be persisted");
@@ -993,17 +1198,11 @@ const LIFECYCLE_BOOTSTRAP = `(() => {
       }
       return;
     }
-    if (loaded.status === "missing") {
-      const persisted = await persistCurrentState();
-      if (config.initialBehavior === "preserve") emitStartup();
-      else if (persisted) emitInstalled(details);
-      else console.error("CBPanel lifecycle protection suppressed install because its state could not be persisted");
-      return;
-    }
     const previous = loaded.state;
     const versionChanged = previous.version !== config.version;
     const packageChanged = previous.packageRevision !== config.packageRevision;
     const bindingChanged = previous.bindingRevision !== config.bindingRevision;
+    const runtimeChanged = previous.runtimeRevision !== config.runtimeRevision;
     const preserveRebase = config.initialBehavior === "preserve" && bindingChanged;
     if (preserveRebase) {
       await persistCurrentState();
@@ -1022,38 +1221,93 @@ const LIFECYCLE_BOOTSTRAP = `(() => {
       }
       return;
     }
+    if (runtimeChanged) {
+      await persistCurrentState();
+      emitStartup();
+      return;
+    }
+    // Extensions.loadUnpacked emits native reason="update" even when only CBPanel's versioned wrapper
+    // registration changed (or a pending migration is retried). Once semantic metadata is equal, that is
+    // command-line maintenance noise just like repeated reason="install", not a plugin package update.
     emitStartup();
   }
 
   async function handleStartup() {
+    if (startupDispatched) return;
     const loaded = await loadState();
     if (loaded.status === "failed") {
       emitStartup();
       return;
     }
     if (loaded.status === "missing") {
-      if (config.initialBehavior === "preserve") {
+      if (config.preserveMissingState) {
         await persistCurrentState();
         emitStartup();
       }
       return;
     }
     const previous = loaded.state;
-    if (config.initialBehavior === "preserve" && previous.bindingRevision !== config.bindingRevision) {
+    const versionChanged = previous.version !== config.version;
+    const packageChanged = previous.packageRevision !== config.packageRevision;
+    const bindingChanged = previous.bindingRevision !== config.bindingRevision;
+    const runtimeChanged = previous.runtimeRevision !== config.runtimeRevision;
+    if (config.initialBehavior === "preserve" && bindingChanged) {
       await persistCurrentState();
       emitStartup();
       return;
     }
-    if (
-      previous.version !== config.version
-      || previous.packageRevision !== config.packageRevision
-      || (
-        previous.bindingRevision !== config.bindingRevision
-        && config.initialBehavior !== "preserve"
-      )
-    ) return;
-    if (previous.bindingRevision !== config.bindingRevision) await persistCurrentState();
+    if (versionChanged || packageChanged || bindingChanged) {
+      if (await persistCurrentState()) {
+        emitInstalled({
+          reason: "update",
+          previousVersion: previous.version || config.version,
+        });
+      } else {
+        console.error("CBPanel lifecycle protection suppressed startup-derived update because its state could not be persisted");
+        emitStartup();
+      }
+      return;
+    }
+    if (runtimeChanged) await persistCurrentState();
     emitStartup();
+  }
+
+  async function handleActivationFallback() {
+    const loaded = await loadState();
+    if (nativeLifecycleObserved || loaded.status === "failed") return;
+    if (loaded.status === "missing") {
+      if (config.preserveMissingState) {
+        await persistCurrentState();
+        emitStartup();
+      }
+      return;
+    }
+    const previous = loaded.state;
+    const versionChanged = previous.version !== config.version;
+    const packageChanged = previous.packageRevision !== config.packageRevision;
+    const bindingChanged = previous.bindingRevision !== config.bindingRevision;
+    const runtimeChanged = previous.runtimeRevision !== config.runtimeRevision;
+    const preserveRebase = config.initialBehavior === "preserve" && bindingChanged;
+    if (preserveRebase) {
+      await persistCurrentState();
+      emitStartup();
+      return;
+    }
+    if (versionChanged || packageChanged || bindingChanged) {
+      if (await persistCurrentState()) {
+        emitInstalled({
+          reason: "update",
+          previousVersion: previous.version || config.version,
+        });
+      } else {
+        console.error("CBPanel lifecycle protection suppressed activation update because its state could not be persisted");
+      }
+      return;
+    }
+    if (runtimeChanged) {
+      await persistCurrentState();
+      emitStartup();
+    }
   }
 
   function enqueue(task) {
@@ -1062,7 +1316,16 @@ const LIFECYCLE_BOOTSTRAP = `(() => {
     });
   }
 
-  nativeInstalledAdd((details) => enqueue(() => handleInstalled(details)));
-  nativeStartupAdd(() => enqueue(handleStartup));
+  nativeInstalledAdd((details) => {
+    nativeLifecycleObserved = true;
+    enqueue(() => handleInstalled(details));
+  });
+  nativeStartupAdd(() => {
+    nativeLifecycleObserved = true;
+    enqueue(handleStartup);
+  });
+  setTimeout(() => {
+    if (!nativeLifecycleObserved) enqueue(handleActivationFallback);
+  }, 0);
 })();
 `;

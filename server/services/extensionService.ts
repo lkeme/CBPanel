@@ -21,7 +21,7 @@ import {
 } from "../../src/shared/entities";
 import { createId, nowIso } from "../../src/shared/profile";
 import type { PanelRepository } from "../storage/types";
-import { ExtensionRuntimeService } from "./extensionRuntimeService";
+import { ExtensionRuntimeService, type ExtensionRuntimeMaterializeResult } from "./extensionRuntimeService";
 
 type ExtensionServiceOptions = {
   repository: PanelRepository;
@@ -64,9 +64,15 @@ export type ExtensionLaunchWarning = {
   reason: string;
 };
 
+export type ExtensionLaunchRegistration = NonNullable<ExtensionRuntimeMaterializeResult["registration"]> & {
+  name: string;
+  runtimePath: string;
+};
+
 export type EnsureExtensionsResult = {
   paths: string[];
   warnings: ExtensionLaunchWarning[];
+  registrations: ExtensionLaunchRegistration[];
 };
 
 export type EnsureExtensionsOptions = {
@@ -737,6 +743,7 @@ export class ExtensionService {
       && environment.runtimeProfile.runtime.launcher !== "playwright-browser";
     const paths: string[] = [];
     const warnings: ExtensionLaunchWarning[] = [];
+    const registrations: ExtensionLaunchRegistration[] = [];
     const loaded: ExtensionEntity[] = [];
     for (const extensionId of environment.extensionIds) {
       const extension = extensionById.get(extensionId);
@@ -784,6 +791,13 @@ export class ExtensionService {
           allowReplaceExisting: options.allowRuntimeReplacement,
         });
         paths.push(runtime.path);
+        if (runtime.registration) {
+          registrations.push({
+            ...runtime.registration,
+            name: installed.name,
+            runtimePath: runtime.path,
+          });
+        }
         if (runtime.warning) warnings.push({ name: installed.name, reason: runtime.warning });
         if (!runtime.protected && !this.options.activeEnvironmentIds?.().has(environmentId)) {
           await this.runtimeService.removeExtension(installed.id, [environmentId]);
@@ -794,7 +808,13 @@ export class ExtensionService {
       loaded.push(installed);
     }
     warnings.push(...duplicateIdentityWarnings(loaded));
-    return { paths, warnings };
+    return { paths, warnings, registrations };
+  }
+
+  async markRegistrationReady(
+    registration: Pick<ExtensionLaunchRegistration, "runtimePath" | "signature">,
+  ): Promise<void> {
+    await this.runtimeService.markRegistrationReady(registration.runtimePath, registration.signature);
   }
 
   async resolveEnvironment(environmentId: string): Promise<{ environment: BrowserEnvironment; profile: BrowserEnvironment["runtimeProfile"] }> {

@@ -1,11 +1,32 @@
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import type { NetworkCheckResult } from "../../src/shared/entities";
 import { defaultProfile, type BrowserProfile } from "../../src/shared/profile";
 import { normalizeSettings } from "../../src/shared/settings";
-import type { ExtensionService } from "./extensionService";
+import type { ExtensionLaunchRegistration, ExtensionService } from "./extensionService";
 import { restoreGithubMirrorFetch } from "./githubMirrorFetch";
-import { formatNetworkCheckDetail, getOrCreatePlaywrightPage, gotoStartUrl, SessionService } from "./sessionService";
+import {
+  type ExtensionRegistrationMigrationBrowser,
+  type ExtensionRegistrationPreflightLaunchOptions,
+  type ExtensionRegistrationPreflightProcess,
+  buildExtensionRegistrationPreflightLaunchOptions,
+  formatNetworkCheckDetail,
+  getOrCreatePlaywrightPage,
+  gotoStartUrl,
+  loadUnpackedExtensionRegistrations,
+  migrateExtensionRegistrations,
+  parseDevToolsActivePort,
+  prepareExtensionRegistrationPreflightUserDataDir,
+  puppeteerRegistrationMigrationBrowser,
+  rawCdpRegistrationPreflightProcess,
+  SessionService,
+  withRawCdpConnection,
+} from "./sessionService";
 
 type TestRuntimeHandle = {
   close: () => Promise<void>;
@@ -251,6 +272,64 @@ test("launchProfile surfaces extension launch warnings as a warn session event",
   assert.equal(session.status, "running");
 });
 
+test("launchProfile propagates ensured registration records into runtime startup", async () => {
+  const profile = defaultProfile({ id: "registration-propagation-launch-test" });
+  const registration = extensionRegistration({ migrationRequired: false });
+  const service = new RegistrationCaptureSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: {
+      resolveEnvironment: async () => ({
+        environment: { extensionIds: ["extension-1"] },
+        profile: profile.runtime,
+      }),
+      ensureExtensionsInstalled: async () => ({
+        paths: [registration.runtimePath],
+        warnings: [],
+        registrations: [registration],
+      }),
+    } as unknown as ExtensionService,
+  });
+
+  const launched = await service.launchProfile(profile);
+
+  assert.equal(launched.status, "running");
+  assert.deepEqual(service.registrations, [registration]);
+});
+
+test("a pending registration fails instead of silently using an unsupported launcher", async () => {
+  const base = defaultProfile({ id: "unsupported-registration-launch-test" });
+  const profile = {
+    ...base,
+    runtime: { ...base.runtime, launcher: "playwright-browser" as const },
+  };
+  const registration = extensionRegistration();
+  const service = new WedgedCloseSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: {
+      resolveEnvironment: async () => ({
+        environment: { extensionIds: ["extension-1"] },
+        profile: profile.runtime,
+      }),
+      ensureExtensionsInstalled: async () => ({
+        paths: [registration.runtimePath],
+        warnings: [],
+        registrations: [registration],
+      }),
+    } as unknown as ExtensionService,
+  });
+
+  await assert.rejects(
+    service.launchProfile(profile),
+    (error) => {
+      assert.equal((error as { code?: string }).code, "EXTENSION_REGISTRATION_MIGRATION_UNSUPPORTED");
+      return true;
+    },
+  );
+  assert.equal(service.closeCalls, 0);
+});
+
 test("launchProfile does not probe or install GitHub mirrors for Pro binaries", async () => {
   const originalFetch = globalThis.fetch;
   const seenUrls: string[] = [];
@@ -358,6 +437,1127 @@ class WedgedCloseSessionService extends SessionService {
   }
 }
 
+class RegistrationCaptureSessionService extends SessionService {
+  registrations: ExtensionLaunchRegistration[] = [];
+
+  protected override async startRuntime(
+    _profile: BrowserProfile,
+    _session: unknown,
+    _binary: unknown,
+    registrations: ExtensionLaunchRegistration[],
+  ): Promise<TestRuntimeHandle> {
+    this.registrations = registrations;
+    return {
+      close: async () => undefined,
+      pageUrl: () => "about:blank",
+    };
+  }
+}
+
+class RegistrationPreflightSessionService extends SessionService {
+  formalStarts = 0;
+  preflightLaunches = 0;
+  preflightOptions?: ExtensionRegistrationPreflightLaunchOptions;
+  readonly order: string[] = [];
+
+  constructor(
+    options: ConstructorParameters<typeof SessionService>[0],
+    private readonly launchPreflight: (
+      options: ExtensionRegistrationPreflightLaunchOptions,
+    ) => Promise<ExtensionRegistrationPreflightProcess>,
+    private readonly formalBrowser?: ExtensionRegistrationMigrationBrowser,
+    private readonly preflightTimeoutMs = 8,
+  ) {
+    super(options);
+  }
+
+  protected override registrationPreflightTimeoutMs(): number {
+    return this.preflightTimeoutMs;
+  }
+
+  protected override registrationPreflightLaunchGraceMs(): number {
+    return 2;
+  }
+
+  protected override closeTimeoutMs(): number {
+    return 30;
+  }
+
+  protected override async launchRegistrationPreflightProcess(
+    options: ExtensionRegistrationPreflightLaunchOptions,
+  ): Promise<ExtensionRegistrationPreflightProcess> {
+    this.preflightLaunches += 1;
+    this.preflightOptions = options;
+    this.order.push("preflight-launch");
+    return this.launchPreflight(options);
+  }
+
+  protected override async startRuntime(
+    _profile: BrowserProfile,
+    _session: unknown,
+    _binary: unknown,
+    registrations: ExtensionLaunchRegistration[],
+  ): Promise<TestRuntimeHandle> {
+    this.formalStarts += 1;
+    this.order.push("formal-start");
+    if (this.formalBrowser) await this.migrateExtensionRegistrations(this.formalBrowser, registrations);
+    return {
+      close: async () => undefined,
+      pageUrl: () => "about:blank",
+    };
+  }
+}
+
+function registrationPreflightProcess(options: {
+  onSend?: (command: string, params: Record<string, unknown>) => Promise<unknown>;
+  onClose?: () => Promise<void>;
+  order?: string[];
+} = {}) {
+  const commands: Array<{ command: string; params: Record<string, unknown> }> = [];
+  let closeCalls = 0;
+  let closePromise: Promise<void> | undefined;
+  const process: ExtensionRegistrationPreflightProcess = {
+    clearServiceWorkers: async (origins) => {
+      for (const origin of origins) {
+        const command = "Storage.clearDataForOrigin";
+        const params = { origin, storageTypes: "service_workers" };
+        commands.push({ command, params });
+        options.order?.push("preflight-clear");
+        await options.onSend?.(command, params);
+      }
+    },
+    loadUnpackedExtensions: async (registrations) => {
+      await loadUnpackedExtensionRegistrations({
+        send: async (command, params) => {
+          commands.push({ command, params });
+          options.order?.push("preflight-load");
+          if (!options.onSend) {
+            const registration = registrations.find((candidate) => candidate.runtimePath === params.path);
+            return { id: registration?.browserExtensionId };
+          }
+          return options.onSend(command, params);
+        },
+      }, registrations);
+    },
+    close: () => {
+      closePromise ??= (async () => {
+        closeCalls += 1;
+        options.order?.push("preflight-close");
+        await options.onClose?.();
+      })();
+      return closePromise;
+    },
+    pageUrl: () => "about:blank",
+  };
+  return { process, commands, closeCalls: () => closeCalls };
+}
+
+function extensionServiceWithRegistrations(
+  profile: BrowserProfile,
+  registrations: ExtensionLaunchRegistration[],
+  marked: ExtensionLaunchRegistration[],
+): ExtensionService {
+  return {
+    resolveEnvironment: async () => ({
+      environment: { extensionIds: registrations.map((_, index) => `extension-${index + 1}`) },
+      profile: profile.runtime,
+    }),
+    ensureExtensionsInstalled: async () => ({
+      paths: registrations.map((registration) => registration.runtimePath),
+      warnings: [],
+      registrations,
+    }),
+    markRegistrationReady: async (registration: ExtensionLaunchRegistration) => {
+      marked.push(registration);
+    },
+  } as unknown as ExtensionService;
+}
+
+function extensionRegistration(
+  overrides: Partial<ExtensionLaunchRegistration> = {},
+): ExtensionLaunchRegistration {
+  return {
+    name: "Migration Extension",
+    runtimePath: path.resolve("data/extension-runtimes/migration-test/extension-test"),
+    browserExtensionId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    workerRelativePath: "cbpanel_lifecycle/worker-test.js",
+    runtimeRevision: "runtime-revision-test",
+    signature: "a".repeat(64),
+    migrationRequired: true,
+    ...overrides,
+  };
+}
+
+function migrationHarness(
+  registration: ExtensionLaunchRegistration,
+  options: {
+    enabled?: boolean;
+    managementId?: string;
+    managementPath?: string;
+    mayDisable?: boolean;
+    workerRevision?: string;
+    workerUrl?: string;
+    publishWorkerOnEnable?: boolean;
+    failEnableCount?: number;
+  } = {},
+) {
+  let enabled = options.enabled ?? true;
+  let workerRevision = options.workerRevision;
+  let workerUrl = options.workerUrl ?? (workerRevision ? registrationWorkerUrl(registration) : undefined);
+  let failEnableCount = options.failEnableCount ?? 0;
+  const toggles: boolean[] = [];
+  let openCount = 0;
+  let closeCount = 0;
+  let inspectCount = 0;
+  const browser: ExtensionRegistrationMigrationBrowser = {
+    listWorkers: async () => workerUrl ? [{
+      url: workerUrl,
+      readRuntimeRevision: async () => workerRevision ?? "",
+    }] : [],
+    openManagementPage: async () => {
+      openCount += 1;
+      return {
+        inspect: async () => {
+          inspectCount += 1;
+          return {
+            id: options.managementId ?? registration.browserExtensionId,
+            path: options.managementPath ?? registration.runtimePath,
+            enabled,
+            mayDisable: options.mayDisable ?? true,
+          };
+        },
+        setEnabled: async (_extensionId, nextEnabled) => {
+          toggles.push(nextEnabled);
+          if (nextEnabled && failEnableCount > 0) {
+            failEnableCount -= 1;
+            throw new Error("enable failed");
+          }
+          enabled = nextEnabled;
+          if (nextEnabled && options.publishWorkerOnEnable !== false) {
+            workerUrl = registrationWorkerUrl(registration);
+            workerRevision = registration.runtimeRevision;
+          }
+          if (!nextEnabled) {
+            workerUrl = undefined;
+            workerRevision = undefined;
+          }
+        },
+        close: async () => {
+          closeCount += 1;
+        },
+      };
+    },
+  };
+  return {
+    browser,
+    toggles,
+    enabled: () => enabled,
+    openCount: () => openCount,
+    closeCount: () => closeCount,
+    inspectCount: () => inspectCount,
+  };
+}
+
+function registrationWorkerUrl(registration: ExtensionLaunchRegistration): string {
+  return new URL(
+    registration.workerRelativePath,
+    `chrome-extension://${registration.browserExtensionId}/`,
+  ).href;
+}
+
+test("ready registrations are a no-op", async () => {
+  const registration = extensionRegistration({ migrationRequired: false });
+  let marks = 0;
+  await migrateExtensionRegistrations({
+    listWorkers: async () => {
+      throw new Error("workers must not be inspected");
+    },
+    openManagementPage: async () => {
+      throw new Error("management page must not be opened");
+    },
+  }, [registration], async () => {
+    marks += 1;
+  });
+  assert.equal(marks, 0);
+});
+
+test("a pending current worker is verified and marked without toggling", async () => {
+  const registration = extensionRegistration();
+  const harness = migrationHarness(registration, { workerRevision: registration.runtimeRevision });
+  const marked: ExtensionLaunchRegistration[] = [];
+
+  await migrateExtensionRegistrations(harness.browser, [registration], async (ready) => {
+    marked.push(ready);
+  });
+
+  assert.deepEqual(marked, [registration]);
+  assert.equal(harness.openCount(), 0);
+  assert.deepEqual(harness.toggles, []);
+});
+
+test("a stale worker registration is disabled, enabled, verified, and marked", async () => {
+  const registration = extensionRegistration();
+  const harness = migrationHarness(registration, { workerRevision: "old-runtime-revision" });
+  const marked: ExtensionLaunchRegistration[] = [];
+
+  await migrateExtensionRegistrations(harness.browser, [registration], async (ready) => {
+    marked.push(ready);
+  });
+
+  assert.deepEqual(harness.toggles, [false, true]);
+  assert.equal(harness.enabled(), true);
+  assert.equal(harness.openCount(), 1);
+  assert.equal(harness.closeCount(), 1);
+  assert.ok(harness.inspectCount() >= 3);
+  assert.deepEqual(marked, [registration]);
+});
+
+test("registration migration rejects an ID, path, or modifiability mismatch before toggling or marking", async (context) => {
+  const registration = extensionRegistration();
+  const cases = [
+    { name: "ID", options: { managementId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } },
+    { name: "path", options: { managementPath: path.resolve("data/extension-runtimes/wrong") } },
+    { name: "modifiability", options: { mayDisable: false } },
+  ] as const;
+  for (const candidate of cases) {
+    await context.test(candidate.name, async () => {
+      const harness = migrationHarness(registration, candidate.options);
+      let marks = 0;
+      await assert.rejects(
+        migrateExtensionRegistrations(harness.browser, [registration], async () => {
+          marks += 1;
+        }),
+        (error) => {
+          assert.equal((error as { code?: string }).code, "EXTENSION_REGISTRATION_MIGRATION_FAILED");
+          return true;
+        },
+      );
+      assert.deepEqual(harness.toggles, []);
+      assert.equal(harness.closeCount(), 1);
+      assert.equal(marks, 0);
+    });
+  }
+});
+
+test("registration migration times out without marking when the expected worker never appears", async () => {
+  const registration = extensionRegistration();
+  const harness = migrationHarness(registration, { publishWorkerOnEnable: false });
+  let marks = 0;
+
+  await assert.rejects(
+    migrateExtensionRegistrations(harness.browser, [registration], async () => {
+      marks += 1;
+    }, 5),
+    (error) => {
+      assert.equal((error as { code?: string }).code, "EXTENSION_REGISTRATION_MIGRATION_FAILED");
+      assert.match((error as Error).message, /timed out waiting/);
+      return true;
+    },
+  );
+
+  assert.deepEqual(harness.toggles, [false, true]);
+  assert.equal(harness.closeCount(), 1);
+  assert.equal(marks, 0);
+});
+
+test("registration migration bounds every browser-facing operation and keeps completion pending", async (context) => {
+  const registration = extensionRegistration();
+  const never = <Value>() => new Promise<Value>(() => undefined);
+  const managementInfo = (enabled: boolean) => ({
+    id: registration.browserExtensionId,
+    path: registration.runtimePath,
+    enabled,
+    mayDisable: true,
+  });
+  const currentWorker = {
+    url: registrationWorkerUrl(registration),
+    readRuntimeRevision: async () => registration.runtimeRevision,
+  };
+  const cases: Array<{
+    name: string;
+    expectedOperation: string;
+    browser: ExtensionRegistrationMigrationBrowser;
+    markReady?: () => Promise<void>;
+  }> = [
+    {
+      name: "worker enumeration",
+      expectedOperation: "service-worker enumeration",
+      browser: { listWorkers: () => never(), openManagementPage: () => never() },
+    },
+    {
+      name: "worker state read",
+      expectedOperation: "service-worker lifecycle-state read",
+      browser: {
+        listWorkers: async () => [{ ...currentWorker, readRuntimeRevision: () => never() }],
+        openManagementPage: () => never(),
+      },
+    },
+    {
+      name: "management page open",
+      expectedOperation: "management page open",
+      browser: { listWorkers: async () => [], openManagementPage: () => never() },
+    },
+    {
+      name: "management inspection",
+      expectedOperation: "management inspection",
+      browser: {
+        listWorkers: async () => [],
+        openManagementPage: async () => ({
+          inspect: () => never(),
+          setEnabled: async () => undefined,
+          close: async () => undefined,
+        }),
+      },
+    },
+    {
+      name: "disable",
+      expectedOperation: "disable",
+      browser: {
+        listWorkers: async () => [],
+        openManagementPage: async () => ({
+          inspect: async () => managementInfo(true),
+          setEnabled: () => never(),
+          close: async () => undefined,
+        }),
+      },
+    },
+    {
+      name: "enable",
+      expectedOperation: "enable",
+      browser: {
+        listWorkers: async () => [],
+        openManagementPage: async () => ({
+          inspect: async () => managementInfo(false),
+          setEnabled: () => never(),
+          close: async () => undefined,
+        }),
+      },
+    },
+    {
+      name: "management page close",
+      expectedOperation: "management page close",
+      browser: {
+        listWorkers: async () => [],
+        openManagementPage: async () => {
+          let enabled = true;
+          return {
+            inspect: async () => managementInfo(enabled),
+            setEnabled: async (_extensionId, nextEnabled) => { enabled = nextEnabled; },
+            close: () => never(),
+          };
+        },
+      },
+    },
+    {
+      name: "completion marker",
+      expectedOperation: "completion marker write",
+      browser: { listWorkers: async () => [currentWorker], openManagementPage: () => never() },
+      markReady: () => never(),
+    },
+  ];
+
+  for (const candidate of cases) {
+    await context.test(candidate.name, async () => {
+      let marks = 0;
+      await assert.rejects(
+        migrateExtensionRegistrations(candidate.browser, [registration], async () => {
+          await candidate.markReady?.();
+          marks += 1;
+        }, 5),
+        (error) => {
+          assert.equal((error as { code?: string }).code, "EXTENSION_REGISTRATION_MIGRATION_FAILED");
+          assert.equal((error as { operation?: string }).operation, candidate.expectedOperation);
+          return true;
+        },
+      );
+      assert.equal(marks, 0);
+    });
+  }
+});
+
+test("a failed enable stays pending and the next launch enables an already-disabled extension only", async () => {
+  const registration = extensionRegistration();
+  const harness = migrationHarness(registration, { failEnableCount: 1 });
+  let marks = 0;
+
+  await assert.rejects(
+    migrateExtensionRegistrations(harness.browser, [registration], async () => {
+      marks += 1;
+    }),
+    /enable failed/,
+  );
+  assert.deepEqual(harness.toggles, [false, true]);
+  assert.equal(harness.enabled(), false);
+  assert.equal(marks, 0);
+
+  await migrateExtensionRegistrations(harness.browser, [registration], async () => {
+    marks += 1;
+  });
+  assert.deepEqual(harness.toggles, [false, true, true]);
+  assert.equal(harness.enabled(), true);
+  assert.equal(marks, 1);
+});
+
+test("the Puppeteer migration adapter binds page evaluation and close methods", async () => {
+  const registration = extensionRegistration();
+  const toggles: boolean[] = [];
+  let closed = false;
+  const page = {
+    url: () => "chrome://extensions/",
+    goto: async () => undefined,
+    evaluate: async function (this: unknown, _pageFunction: unknown, argument: unknown) {
+      assert.equal(this, page);
+      if (typeof argument === "string") {
+        return {
+          id: registration.browserExtensionId,
+          path: registration.runtimePath,
+          enabled: true,
+          mayDisable: true,
+        };
+      }
+      toggles.push((argument as { enabled: boolean }).enabled);
+      return undefined;
+    },
+    close: async function (this: unknown) {
+      assert.equal(this, page);
+      closed = true;
+    },
+  };
+  const browser = {
+    close: async () => undefined,
+    newPage: async () => page,
+    pages: async () => [page],
+    targets: () => [],
+  } as unknown as Parameters<typeof puppeteerRegistrationMigrationBrowser>[0];
+
+  const management = await puppeteerRegistrationMigrationBrowser(browser).openManagementPage();
+  assert.equal((await management.inspect(registration.browserExtensionId)).id, registration.browserExtensionId);
+  await management.setEnabled(registration.browserExtensionId, false);
+  await management.close();
+
+  assert.deepEqual(toggles, [false]);
+  assert.equal(closed, true);
+});
+
+test("registration preflight launch options are minimal and never include extension paths", () => {
+  const userDataDir = path.resolve("data/browser-data/preflight-options-test");
+  const executablePath = path.resolve("browser-cache/chromium-151/chrome.exe");
+  const options = buildExtensionRegistrationPreflightLaunchOptions(
+    userDataDir,
+    executablePath,
+    1234,
+  );
+
+  assert.equal(options.userDataDir, userDataDir);
+  assert.equal(options.executablePath, executablePath);
+  assert.deepEqual(options.args, [
+    `--user-data-dir=${userDataDir}`,
+    "--remote-debugging-address=127.0.0.1",
+    "--remote-debugging-port=0",
+    "--disable-extensions",
+    "--headless=new",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "about:blank",
+  ]);
+  assert.equal(options.timeout, 1234);
+  assert.deepEqual(options.spawnOptions, {
+    windowsHide: true,
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(Object.hasOwn(options, "extensionPaths"), false);
+});
+
+test("registration preflight keeps paths containing spaces as one argv entry without a shell", () => {
+  const userDataDir = path.resolve("data/browser data/profile with spaces");
+  const executablePath = path.resolve("browser cache/chromium/chrome.exe");
+  const options = buildExtensionRegistrationPreflightLaunchOptions(userDataDir, executablePath);
+
+  assert.equal(options.executablePath, executablePath);
+  assert.equal(options.args[0], `--user-data-dir=${userDataDir}`);
+  assert.equal(options.args.filter((argument) => argument.includes("profile with spaces")).length, 1);
+  assert.equal(options.spawnOptions.shell, false);
+});
+
+test("registration preflight removes a stale DevToolsActivePort before spawning Chromium", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-preflight-active-port-"));
+  try {
+    const activePortPath = path.join(root, "DevToolsActivePort");
+    await fs.writeFile(activePortPath, "9222\n/devtools/browser/stale\n", "utf8");
+
+    const prepared = await prepareExtensionRegistrationPreflightUserDataDir(root);
+
+    assert.equal(prepared, activePortPath);
+    await assert.rejects(fs.access(activePortPath), (error) => {
+      assert.equal((error as NodeJS.ErrnoException).code, "ENOENT");
+      return true;
+    });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("DevToolsActivePort parser accepts only a bounded port and browser target path", () => {
+  assert.deepEqual(parseDevToolsActivePort("43127\n/devtools/browser/browser-id\n"), {
+    port: 43127,
+    browserWebSocketPath: "/devtools/browser/browser-id",
+  });
+  for (const value of [
+    "",
+    "zero\n/devtools/browser/id\n",
+    "0\n/devtools/browser/id\n",
+    "65536\n/devtools/browser/id\n",
+    "9222\nws://remote.example/devtools/browser/id\n",
+    "9222\n/devtools/page/id\n",
+    "9222\n/devtools/browser/../../escape\n",
+  ]) assert.throws(() => parseDevToolsActivePort(value));
+});
+
+test("raw registration preflight reports a Chromium child that exits before CDP is ready", async () => {
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: undefined;
+    stderr: undefined;
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    kill: () => boolean;
+  };
+  child.stdout = undefined;
+  child.stderr = undefined;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.kill = () => true;
+  const process = rawCdpRegistrationPreflightProcess(
+    child as unknown as ChildProcess,
+    path.resolve("data/nonexistent-preflight/DevToolsActivePort"),
+    50,
+  );
+  queueMicrotask(() => child.emit("exit", 18, null));
+
+  await assert.rejects(
+    process.clearServiceWorkers(["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]),
+    (error) => {
+      assert.equal((error as { code?: string }).code, "EXTENSION_REGISTRATION_PREFLIGHT_EARLY_EXIT");
+      assert.match((error as Error).message, /exit code 18/);
+      return true;
+    },
+  );
+  await process.close();
+});
+
+test("raw registration preflight clears on the page target and loads unpacked runtimes on the browser target", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-preflight-cdp-targets-"));
+  const activePortPath = path.join(root, "DevToolsActivePort");
+  const originalFetch = globalThis.fetch;
+  const originalWebSocket = globalThis.WebSocket;
+  const port = 43127;
+  const registration = extensionRegistration();
+  const commands: Array<{ url: string; method: string; params: Record<string, unknown> }> = [];
+  let killCalls = 0;
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: undefined;
+    stderr: undefined;
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    kill: () => boolean;
+  };
+  child.stdout = undefined;
+  child.stderr = undefined;
+  child.exitCode = null;
+  child.signalCode = null;
+  const confirmExit = () => {
+    child.exitCode = 0;
+    child.emit("exit", 0, null);
+  };
+  child.kill = () => {
+    killCalls += 1;
+    queueMicrotask(confirmExit);
+    return true;
+  };
+
+  class CommandWebSocket extends EventTarget {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSING = 2;
+    static readonly CLOSED = 3;
+    readyState = CommandWebSocket.CONNECTING;
+    readonly url: string;
+
+    constructor(url: string | URL) {
+      super();
+      this.url = String(url);
+      queueMicrotask(() => {
+        this.readyState = CommandWebSocket.OPEN;
+        this.dispatchEvent(new Event("open"));
+      });
+    }
+
+    send(value: string): void {
+      const payload = JSON.parse(value) as {
+        id: number;
+        method: string;
+        params: Record<string, unknown>;
+      };
+      commands.push({ url: this.url, method: payload.method, params: payload.params });
+      const result = payload.method === "Extensions.loadUnpacked"
+        ? { id: registration.browserExtensionId }
+        : {};
+      queueMicrotask(() => {
+        this.dispatchEvent(new MessageEvent("message", {
+          data: JSON.stringify({ id: payload.id, result }),
+        }));
+        if (payload.method === "Browser.close") setTimeout(confirmExit, 10);
+      });
+    }
+
+    close(): void {
+      this.readyState = CommandWebSocket.CLOSED;
+    }
+  }
+
+  try {
+    await fs.writeFile(activePortPath, `${port}\n/devtools/browser/browser-id\n`, "utf8");
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      return {
+        ok: true,
+        json: async () => url.endsWith("/json/version")
+          ? { webSocketDebuggerUrl: `ws://untrusted.invalid:${port}/devtools/browser/browser-id` }
+          : [{
+              type: "page",
+              webSocketDebuggerUrl: `ws://untrusted.invalid:${port}/devtools/page/page-id`,
+            }],
+      } as Response;
+    }) as typeof fetch;
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: CommandWebSocket,
+    });
+
+    const process = rawCdpRegistrationPreflightProcess(
+      child as unknown as ChildProcess,
+      activePortPath,
+      100,
+    );
+    await process.clearServiceWorkers([`chrome-extension://${registration.browserExtensionId}`]);
+    await process.loadUnpackedExtensions([registration]);
+    await process.close();
+
+    assert.deepEqual(commands, [
+      {
+        url: `ws://127.0.0.1:${port}/devtools/page/page-id`,
+        method: "Storage.clearDataForOrigin",
+        params: {
+          origin: `chrome-extension://${registration.browserExtensionId}`,
+          storageTypes: "service_workers",
+        },
+      },
+      {
+        url: `ws://127.0.0.1:${port}/devtools/browser/browser-id`,
+        method: "Extensions.loadUnpacked",
+        params: { path: registration.runtimePath },
+      },
+      {
+        url: `ws://127.0.0.1:${port}/devtools/browser/browser-id`,
+        method: "Browser.close",
+        params: {},
+      },
+    ]);
+    assert.equal(killCalls, 0, "a successful Browser.close must get a grace period to flush the profile");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: originalWebSocket,
+    });
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("raw CDP WebSocket open errors and timeouts are bounded", async (context) => {
+  const originalWebSocket = globalThis.WebSocket;
+  class FakeWebSocket extends EventTarget {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSING = 2;
+    static readonly CLOSED = 3;
+    static mode: "error" | "timeout" = "timeout";
+    readyState = FakeWebSocket.CONNECTING;
+
+    constructor(_url: string | URL) {
+      super();
+      if (FakeWebSocket.mode === "error") {
+        queueMicrotask(() => this.dispatchEvent(new Event("error")));
+      }
+    }
+
+    send(): void {}
+
+    close(): void {
+      this.readyState = FakeWebSocket.CLOSED;
+    }
+  }
+  Object.defineProperty(globalThis, "WebSocket", { configurable: true, writable: true, value: FakeWebSocket });
+  try {
+    await context.test("error", async () => {
+      FakeWebSocket.mode = "error";
+      await assert.rejects(
+        withRawCdpConnection("ws://127.0.0.1:43127/devtools/page/id", 10, async () => undefined),
+        /failed to open/,
+      );
+    });
+    await context.test("timeout", async () => {
+      FakeWebSocket.mode = "timeout";
+      await assert.rejects(
+        withRawCdpConnection("ws://127.0.0.1:43127/devtools/page/id", 5, async () => undefined),
+        (error) => {
+          assert.equal((error as { code?: string }).code, "EXTENSION_REGISTRATION_PREFLIGHT_TIMEOUT");
+          return true;
+        },
+      );
+    });
+  } finally {
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: originalWebSocket,
+    });
+  }
+});
+
+test("unpacked registration loading sends exact absolute paths and requires each returned extension ID", async (context) => {
+  const first = extensionRegistration();
+  const second = extensionRegistration({
+    name: "Second Migration Extension",
+    runtimePath: path.resolve("data/extension-runtimes/migration-test/extension-2"),
+    browserExtensionId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  });
+
+  await context.test("multiple exact registrations", async () => {
+    const commands: Array<{ method: string; params: Record<string, unknown> }> = [];
+    await loadUnpackedExtensionRegistrations({
+      send: async (method, params) => {
+        commands.push({ method, params });
+        const registration = [first, second].find((candidate) => candidate.runtimePath === params.path);
+        return { id: registration?.browserExtensionId };
+      },
+    }, [first, second]);
+
+    assert.deepEqual(commands, [first, second].map((registration) => ({
+      method: "Extensions.loadUnpacked",
+      params: { path: registration.runtimePath },
+    })));
+  });
+
+  await context.test("all paths are validated before the first command", async () => {
+    let sends = 0;
+    await assert.rejects(
+      loadUnpackedExtensionRegistrations({
+        send: async () => {
+          sends += 1;
+          return { id: first.browserExtensionId };
+        },
+      }, [first, { ...second, runtimePath: "relative/runtime" }]),
+      (error) => {
+        assert.equal((error as { code?: string }).code, "EXTENSION_REGISTRATION_PREFLIGHT_LOAD_FAILED");
+        assert.match((error as Error).message, /runtime path must be absolute/);
+        return true;
+      },
+    );
+    assert.equal(sends, 0);
+  });
+
+  for (const [name, response] of [
+    ["mismatched ID", { id: second.browserExtensionId }],
+    ["missing ID", {}],
+  ] as const) {
+    await context.test(name, async () => {
+      await assert.rejects(
+        loadUnpackedExtensionRegistrations({
+          send: async () => response,
+        }, [first]),
+        (error) => {
+          assert.equal((error as { code?: string }).code, "EXTENSION_REGISTRATION_PREFLIGHT_LOAD_FAILED");
+          assert.match((error as Error).message, /Chromium returned extension ID/);
+          return true;
+        },
+      );
+    });
+  }
+
+  await context.test("CDP command error", async () => {
+    await assert.rejects(
+      loadUnpackedExtensionRegistrations({
+        send: async () => {
+          throw new Error("load command failed");
+        },
+      }, [first]),
+      /load command failed/,
+    );
+  });
+});
+
+test("pending registrations are cleared in a closed preflight before formal launch and then marked from the current worker", async () => {
+  const profile = defaultProfile({ id: "registration-preflight-sequence-test" });
+  const first = extensionRegistration();
+  const second = extensionRegistration({
+    name: "Second Migration Extension",
+    runtimePath: path.resolve("data/extension-runtimes/migration-test/extension-2"),
+    browserExtensionId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    workerRelativePath: "cbpanel_lifecycle/worker-second.js",
+    runtimeRevision: "runtime-revision-second",
+    signature: "b".repeat(64),
+  });
+  const registrations = [first, second];
+  const marked: ExtensionLaunchRegistration[] = [];
+  const formalBrowser: ExtensionRegistrationMigrationBrowser = {
+    listWorkers: async () => registrations.map((registration) => ({
+      url: registrationWorkerUrl(registration),
+      readRuntimeRevision: async () => registration.runtimeRevision,
+    })),
+    openManagementPage: async () => {
+      throw new Error("current workers must not be toggled");
+    },
+  };
+  let preflightProcess!: ExtensionRegistrationPreflightProcess;
+  const service = new RegistrationPreflightSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({
+      installed: true,
+      binaryPath: "E:/fake/chromium-151/chrome.exe",
+      version: "151.0.7922.108",
+    }),
+    extensionService: extensionServiceWithRegistrations(profile, registrations, marked),
+  }, async () => preflightProcess, formalBrowser);
+  const harness = registrationPreflightProcess({
+    order: service.order,
+    onClose: async () => {
+      assert.deepEqual(marked, []);
+    },
+  });
+  preflightProcess = harness.process;
+
+  const launched = await service.launchProfile(profile);
+
+  assert.equal(launched.status, "running");
+  assert.equal(service.preflightLaunches, 1);
+  assert.equal(service.formalStarts, 1);
+  assert.equal(harness.closeCalls(), 1);
+  assert.deepEqual(service.order, [
+    "preflight-launch",
+    "preflight-clear",
+    "preflight-clear",
+    "preflight-load",
+    "preflight-load",
+    "preflight-close",
+    "formal-start",
+  ]);
+  assert.deepEqual(harness.commands, [
+    ...registrations.map((registration) => ({
+      command: "Storage.clearDataForOrigin",
+      params: {
+        origin: `chrome-extension://${registration.browserExtensionId}`,
+        storageTypes: "service_workers",
+      },
+    })),
+    ...registrations.map((registration) => ({
+      command: "Extensions.loadUnpacked",
+      params: { path: registration.runtimePath },
+    })),
+  ]);
+  assert.equal(
+    harness.commands
+      .filter(({ command }) => command === "Storage.clearDataForOrigin")
+      .every(({ params }) => "origin" in params && !params.origin.endsWith("/")),
+    true,
+  );
+  assert.equal(service.preflightOptions?.userDataDir, path.resolve("data/browser-data-test", profile.id));
+  assert.equal(service.preflightOptions?.executablePath, "E:/fake/chromium-151/chrome.exe");
+  assert.deepEqual(service.preflightOptions?.args, [
+    `--user-data-dir=${path.resolve("data/browser-data-test", profile.id)}`,
+    "--remote-debugging-address=127.0.0.1",
+    "--remote-debugging-port=0",
+    "--disable-extensions",
+    "--headless=new",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "about:blank",
+  ]);
+  assert.equal(Object.hasOwn(service.preflightOptions ?? {}, "extensionPaths"), false);
+  assert.deepEqual(marked, registrations);
+});
+
+test("ready registrations skip the isolated preflight", async () => {
+  const profile = defaultProfile({ id: "registration-preflight-ready-skip-test" });
+  const ready = extensionRegistration({ migrationRequired: false });
+  const marked: ExtensionLaunchRegistration[] = [];
+  const service = new RegistrationPreflightSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: extensionServiceWithRegistrations(profile, [ready], marked),
+  }, async () => {
+    throw new Error("preflight must not launch");
+  });
+
+  const launched = await service.launchProfile(profile);
+
+  assert.equal(launched.status, "running");
+  assert.equal(service.preflightLaunches, 0);
+  assert.equal(service.formalStarts, 1);
+  assert.deepEqual(marked, []);
+});
+
+test("preflight launch, command, and close failures never start the formal browser or mark ready", async (context) => {
+  const cases = [
+    {
+      name: "launch timeout",
+      launch: async () => new Promise<ExtensionRegistrationPreflightProcess>(() => undefined),
+    },
+    {
+      name: "launch error",
+      launch: async () => Promise.reject(new Error("preflight launch failed")),
+    },
+    {
+      name: "clear command timeout",
+      context: () => registrationPreflightProcess({
+        onSend: async () => new Promise<never>(() => undefined),
+      }),
+    },
+    {
+      name: "clear command error",
+      context: () => registrationPreflightProcess({
+        onSend: async () => Promise.reject(new Error("preflight command failed")),
+      }),
+    },
+    {
+      name: "load command timeout",
+      context: () => registrationPreflightProcess({
+        onSend: async (command) => command === "Extensions.loadUnpacked"
+          ? new Promise<never>(() => undefined)
+          : undefined,
+      }),
+    },
+    {
+      name: "load command error",
+      context: () => registrationPreflightProcess({
+        onSend: async (command) => {
+          if (command === "Extensions.loadUnpacked") throw new Error("preflight load failed");
+          return undefined;
+        },
+      }),
+    },
+    {
+      name: "load ID mismatch",
+      context: () => registrationPreflightProcess({
+        onSend: async (command) => command === "Extensions.loadUnpacked"
+          ? { id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+          : undefined,
+      }),
+    },
+    {
+      name: "relative runtime path",
+      registration: () => extensionRegistration({ runtimePath: "relative/runtime" }),
+      context: () => registrationPreflightProcess(),
+    },
+    {
+      name: "close timeout",
+      context: () => registrationPreflightProcess({
+        onClose: async () => new Promise<void>(() => undefined),
+      }),
+    },
+    {
+      name: "close error",
+      context: () => registrationPreflightProcess({
+        onClose: async () => Promise.reject(new Error("preflight close failed")),
+      }),
+    },
+  ] as const;
+
+  for (const [index, candidate] of cases.entries()) {
+    await context.test(candidate.name, async () => {
+      const profile = defaultProfile({ id: `registration-preflight-failure-${index}` });
+      const registration = "registration" in candidate
+        ? candidate.registration()
+        : extensionRegistration();
+      const marked: ExtensionLaunchRegistration[] = [];
+      const harness = "context" in candidate ? candidate.context() : undefined;
+      const launch = "launch" in candidate
+        ? candidate.launch
+        : async () => harness!.process;
+      const service = new RegistrationPreflightSessionService({
+        browserDataDir: "data/browser-data-test",
+        readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+        extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+      }, launch);
+
+      await assert.rejects(service.launchProfile(profile));
+
+      assert.equal(service.formalStarts, 0);
+      assert.deepEqual(marked, []);
+      if (harness) assert.equal(harness.closeCalls(), 1);
+    });
+  }
+});
+
+test("stopProfile during registration preflight closes that exact generation and prevents formal launch", async () => {
+  const profile = defaultProfile({ id: "stop-during-registration-preflight-test" });
+  const registration = extensionRegistration();
+  const marked: ExtensionLaunchRegistration[] = [];
+  let releaseCommand!: () => void;
+  const commandGate = new Promise<void>((resolve) => {
+    releaseCommand = resolve;
+  });
+  const harness = registrationPreflightProcess({
+    onSend: async () => commandGate,
+    onClose: async () => releaseCommand(),
+  });
+  const service = new RegistrationPreflightSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+  }, async () => harness.process, undefined, 200);
+
+  const launching = service.launchProfile(profile);
+  await waitFor(() => harness.commands.length >= 1);
+  const stopping = service.stopProfile(profile.id);
+  const [launched, stopped] = await Promise.all([launching, stopping]);
+
+  assert.equal(launched.status, "stopped");
+  assert.equal(stopped.status, "stopped");
+  assert.equal(harness.closeCalls(), 1);
+  assert.equal(service.formalStarts, 0);
+  assert.deepEqual(marked, []);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], []);
+});
+
+test("a stop timeout during registration preflight retains the generation-specific runtime hold", async () => {
+  const profile = defaultProfile({ id: "stop-timeout-registration-preflight-test" });
+  const registration = extensionRegistration();
+  const marked: ExtensionLaunchRegistration[] = [];
+  const harness = registrationPreflightProcess({
+    onClose: async () => new Promise<void>(() => undefined),
+  });
+  const service = new RegistrationPreflightSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: extensionServiceWithRegistrations(profile, [registration], marked),
+  }, async () => harness.process, undefined, 80);
+
+  const launching = service.launchProfile(profile);
+  await waitFor(() => harness.commands.length >= 1);
+  const stopped = await service.stopProfile(profile.id);
+
+  assert.equal(stopped.status, "error");
+  assert.equal(stopped.closeUnconfirmed, true);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+  assert.equal(service.formalStarts, 0);
+  assert.deepEqual(marked, []);
+  await launching.catch(() => undefined);
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
+});
+
 class DelayedCloseSessionService extends SessionService {
   private readonly closeResolvers: Array<() => void> = [];
 
@@ -439,6 +1639,38 @@ test("a relaunch after an unconfirmed close forbids replacing an existing extens
 
   assert.deepEqual(allowReplacement, [true, false]);
   assert.equal(service.listSessions().find((item) => item.profileId === profile.id)?.closeUnconfirmed, true);
+});
+
+test("a pending registration preflight cannot mutate a profile held by an unconfirmed older generation", async () => {
+  const profile = defaultProfile({ id: "unconfirmed-registration-preflight-test" });
+  const registration = extensionRegistration();
+  let ensureCalls = 0;
+  const service = new WedgedCloseSessionService({
+    browserDataDir: "data/browser-data-test",
+    readBinaryInfo: async () => ({ installed: true, binaryPath: "C:/fake/chrome.exe", version: "test" }),
+    extensionService: {
+      resolveEnvironment: async () => ({ environment: { extensionIds: ["extension-1"] }, profile: profile.runtime }),
+      ensureExtensionsInstalled: async () => ({
+        paths: [registration.runtimePath],
+        warnings: [],
+        registrations: ensureCalls++ === 0 ? [] : [registration],
+      }),
+    } as unknown as ExtensionService,
+  });
+
+  await service.launchProfile(profile);
+  await service.stopProfile(profile.id);
+  await assert.rejects(
+    service.launchProfile(profile),
+    (error) => {
+      assert.equal(
+        (error as { code?: string }).code,
+        "EXTENSION_REGISTRATION_MIGRATION_CLOSE_UNCONFIRMED",
+      );
+      return true;
+    },
+  );
+  assert.deepEqual([...service.profileIdsHoldingRuntime()], [profile.id]);
 });
 
 test("a stop that never completes keeps the profile counted as holding its files", async () => {

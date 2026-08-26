@@ -1320,7 +1320,59 @@ test("check backfills a legacy reference manifest key in SQLite and lifecycle-pr
   assert.equal((await repository.getExtension(imported.id))?.manifestKey, PRESET_MANIFEST_KEY);
   assert.notEqual(ensured.paths[0], source);
   assert.ok(ensured.paths[0]?.startsWith(path.join(directory, "extension-runtimes", profile.id)));
+  assert.equal(ensured.registrations.length, 1);
+  assert.equal(ensured.registrations[0]?.name, "Legacy Keyed Reference");
+  assert.equal(ensured.registrations[0]?.runtimePath, ensured.paths[0]);
+  assert.equal(ensured.registrations[0]?.migrationRequired, false);
   assert.deepEqual(await fs.readFile(path.join(source, "manifest.json")), before);
+  repository.close();
+});
+
+test("ensure propagates a pending MV3 registration and marking it ready is idempotent", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const browserDataDir = path.join(directory, "browser-data");
+  const service = new ExtensionService({
+    repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionRuntimeDir: path.join(directory, "extension-runtimes"),
+    browserDataDir,
+  });
+  const source = await writeExtensionDirectory(directory, "pending-registration-reference", {
+    name: "Pending Registration",
+    key: PRESET_MANIFEST_KEY,
+    background: { service_worker: "background.js" },
+  });
+  await fs.writeFile(path.join(source, "background.js"), "globalThis.loaded = true;\n", "utf8");
+  const extension = await service.importDirectory(source, "reference");
+  const profile = await repository.createProfile({ name: "Pending Registration Runtime" });
+  await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
+
+  const initial = await service.ensureExtensionsInstalled(profile.id);
+  const browserExtensionId = initial.registrations[0]!.browserExtensionId;
+  const defaultProfileDir = path.join(browserDataDir, profile.id, "Default");
+  await fs.mkdir(defaultProfileDir, { recursive: true });
+  await fs.writeFile(
+    path.join(defaultProfileDir, "Secure Preferences"),
+    JSON.stringify({ extensions: { settings: { [browserExtensionId]: {} } } }),
+    "utf8",
+  );
+  await repository.unbindExtensionFromEnvironments(extension.id, [profile.id]);
+  await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
+
+  const pending = await service.ensureExtensionsInstalled(profile.id);
+  const registration = pending.registrations[0]!;
+  assert.equal(registration.name, "Pending Registration");
+  assert.equal(registration.runtimePath, pending.paths[0]);
+  assert.equal(registration.browserExtensionId, browserExtensionId);
+  assert.equal(registration.migrationRequired, true);
+
+  await service.markRegistrationReady(registration);
+  await service.markRegistrationReady(registration);
+  const ready = await service.ensureExtensionsInstalled(profile.id);
+  assert.equal(ready.registrations[0]?.signature, registration.signature);
+  assert.equal(ready.registrations[0]?.migrationRequired, false);
+
   repository.close();
 });
 

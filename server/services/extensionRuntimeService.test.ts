@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -6,10 +7,19 @@ import path from "node:path";
 import vm from "node:vm";
 import test from "node:test";
 import type { ExtensionEntity } from "../../src/shared/entities";
+import type { ExtensionLaunchRegistration } from "./extensionService";
 import {
+  EXTENSION_LIFECYCLE_INJECTOR_VERSION,
   EXTENSION_LIFECYCLE_NAMESPACE,
   ExtensionRuntimeService,
 } from "./extensionRuntimeService";
+import {
+  buildExtensionRegistrationPreflightLaunchOptions,
+  migrateExtensionRegistrations,
+  playwrightRegistrationMigrationBrowser,
+  prepareExtensionRegistrationPreflightUserDataDir,
+  rawCdpRegistrationPreflightProcess,
+} from "./sessionService";
 
 const MANIFEST_KEY = "stable-test-manifest-key";
 
@@ -23,6 +33,7 @@ test("materializes an MV3 classic worker without changing its reference source",
     background: { service_worker: "background/sw.js" },
   }, { "background/sw.js": "globalThis.originalLoaded = true;\n" });
   const sourceManifestBefore = await fs.readFile(path.join(source, "manifest.json"));
+  const sourceWorkerBefore = await fs.readFile(path.join(source, "background", "sw.js"));
   const sourceTreeBefore = await fingerprintTestTree(source);
   const service = runtimeService(root);
 
@@ -41,20 +52,54 @@ test("materializes an MV3 classic worker without changing its reference source",
     background: { service_worker: string };
   };
   assert.equal(runtimeManifest.key, MANIFEST_KEY);
-  assert.equal(runtimeManifest.background.service_worker, "background/sw.js");
-  const wrapper = await fs.readFile(path.join(result.path, "background", "sw.js"), "utf8");
-  assert.match(wrapper, /background\/__cbpanel_lifecycle_original__\.js/);
-  assert.match(
-    await fs.readFile(path.join(result.path, "background", "__cbpanel_lifecycle_original__.js"), "utf8"),
-    /originalLoaded/,
-  );
-  const config = await fs.readFile(path.join(result.path, EXTENSION_LIFECYCLE_NAMESPACE, "config.js"), "utf8");
+  const layout = await readMv3Layout(result.path);
+  assert.equal(runtimeManifest.background.service_worker, layout.wrapper);
+  assert.notEqual(layout.wrapper, "background/sw.js");
+  assert.equal(path.posix.dirname(layout.wrapper), "background");
+  assert.deepEqual(await fs.readFile(path.join(result.path, "background", "sw.js")), sourceWorkerBefore);
+  const wrapper = await fs.readFile(toRuntimePath(result.path, layout.wrapper), "utf8");
+  assert.match(wrapper, new RegExp(escapeRegExp(layout.config)));
+  assert.match(wrapper, new RegExp(escapeRegExp(layout.bootstrap)));
+  assert.match(wrapper, /background\/sw\.js/);
+  const config = await fs.readFile(toRuntimePath(result.path, layout.config), "utf8");
   assert.match(config, /"initialBehavior":"install"/);
-  const bootstrap = await fs.readFile(path.join(result.path, EXTENSION_LIFECYCLE_NAMESPACE, "bootstrap.js"), "utf8");
+  const bootstrap = await fs.readFile(toRuntimePath(result.path, layout.bootstrap), "utf8");
   assert.match(bootstrap, /rollbackInstalled/);
   assert.match(bootstrap, /reason: "update"/);
   assert.equal(await fingerprintTestTree(source), sourceTreeBefore);
 
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("generated lifecycle path segments avoid Chromium-reserved leading underscores", async () => {
+  const root = await makeTempDir();
+  const source = await writeExtension(root, "reserved-path-source", {
+    manifest_version: 3,
+    name: "Reserved Path",
+    version: "1.0.0",
+    key: MANIFEST_KEY,
+    background: { service_worker: "sw.js" },
+  }, { "sw.js": "globalThis.reservedPathLoaded = true;\n" });
+  const runtime = await runtimeService(root).materialize({
+    environmentId: "environment-reserved-path",
+    extension: extensionEntity("extension-reserved-path", source, "reference"),
+    lifecycleRevision: "binding-reserved-path",
+  });
+  const layout = await readMv3Layout(runtime.path);
+  const namespaceEntries = await fs.readdir(path.join(runtime.path, EXTENSION_LIFECYCLE_NAMESPACE));
+  const lifecyclePaths = [
+    EXTENSION_LIFECYCLE_NAMESPACE,
+    layout.config,
+    layout.bootstrap,
+    layout.wrapper,
+    ...namespaceEntries.map((name) => `${EXTENSION_LIFECYCLE_NAMESPACE}/${name}`),
+  ];
+
+  for (const lifecyclePath of lifecyclePaths) {
+    for (const segment of lifecyclePath.split("/")) {
+      assert.equal(segment.startsWith("_"), false, `Chromium rejects reserved path segment ${segment}`);
+    }
+  }
   await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -75,12 +120,57 @@ test("reference materialization refreshes when source code changes without a ver
   } as const;
 
   const first = await service.materialize(input);
-  assert.match(await fs.readFile(path.join(first.path, "__cbpanel_lifecycle_original__.js"), "utf8"), /revision = 1/);
+  const firstLayout = await readMv3Layout(first.path);
+  const firstConfig = parseGeneratedLifecycleConfig(await readConfig(first.path));
+  assert.match(await fs.readFile(path.join(first.path, "sw.js"), "utf8"), /revision = 1/);
   await fs.writeFile(path.join(source, "sw.js"), "globalThis.revision = 2;\n", "utf8");
   const second = await service.materialize(input);
+  const secondLayout = await readMv3Layout(second.path);
+  const secondConfig = parseGeneratedLifecycleConfig(await readConfig(second.path));
 
   assert.equal(second.path, first.path);
-  assert.match(await fs.readFile(path.join(second.path, "__cbpanel_lifecycle_original__.js"), "utf8"), /revision = 2/);
+  assert.notEqual(secondLayout.wrapper, firstLayout.wrapper);
+  assert.notEqual(second.registration?.runtimeRevision, first.registration?.runtimeRevision);
+  assert.notEqual(secondConfig.packageRevision, firstConfig.packageRevision);
+  assert.match(await fs.readFile(path.join(second.path, "sw.js"), "utf8"), /revision = 2/);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("MV3 registration URLs are deterministic and short for production-length IDs", async () => {
+  const root = await makeTempDir();
+  const source = await writeExtension(root, "long-registration-source", {
+    manifest_version: 3,
+    name: "Long Registration",
+    version: "1.0.0",
+    key: MANIFEST_KEY,
+    background: { service_worker: "nested/worker.js" },
+  }, { "nested/worker.js": "globalThis.longRegistration = true;\n" });
+  const environmentId = "profile-12345678-1234-1234-1234-123456789abc";
+  const extensionId = "extension-12345678-1234-1234-1234-123456789abc";
+  const service = runtimeService(root);
+  const entity = extensionEntity(extensionId, source, "reference");
+  const input = { environmentId, extension: entity, lifecycleRevision: "binding-long" } as const;
+
+  const first = await service.materialize(input);
+  const firstLayout = await readMv3Layout(first.path);
+  const reused = await service.materialize(input);
+  assert.equal(reused.registration?.signature, first.registration?.signature);
+  assert.equal(reused.registration?.workerRelativePath, firstLayout.wrapper);
+  assert.match(
+    path.posix.basename(firstLayout.wrapper),
+    new RegExp(`^${EXTENSION_LIFECYCLE_NAMESPACE}-worker-v${EXTENSION_LIFECYCLE_INJECTOR_VERSION}-[A-Za-z0-9_-]{22}\\.js$`),
+  );
+  assert.equal(path.posix.dirname(firstLayout.wrapper), "nested");
+  const productionTail = path.join("extension-runtimes", environmentId, extensionId, firstLayout.wrapper);
+  assert.ok(productionTail.length < 180, `MV3 runtime path tail is too long for portable Windows installs: ${productionTail.length}`);
+
+  const changed = await service.materialize({
+    ...input,
+    lifecycleRevision: "binding-long-rebound",
+  });
+  assert.notEqual(changed.registration?.signature, first.registration?.signature);
+  assert.notEqual(changed.registration?.runtimeRevision, first.registration?.runtimeRevision);
+  assert.notEqual(changed.registration?.workerRelativePath, first.registration?.workerRelativePath);
   await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -130,13 +220,14 @@ test("signature reuse verifies every runtime file and rebuilds missing or corrup
     lifecycleRevision: "binding-integrity",
   } as const;
   const first = await service.materialize(input);
-  await fs.rm(path.join(first.path, EXTENSION_LIFECYCLE_NAMESPACE, "bootstrap.js"));
+  const layout = await readMv3Layout(first.path);
+  await fs.rm(toRuntimePath(first.path, layout.bootstrap));
   await fs.writeFile(path.join(first.path, "asset.txt"), "corrupted\n", "utf8");
 
   const second = await service.materialize(input);
 
   assert.equal(second.path, first.path);
-  assert.equal(await exists(path.join(second.path, EXTENSION_LIFECYCLE_NAMESPACE, "bootstrap.js")), true);
+  assert.equal(await exists(toRuntimePath(second.path, layout.bootstrap)), true);
   assert.equal(await fs.readFile(path.join(second.path, "asset.txt"), "utf8"), "canonical\n");
   await fs.rm(root, { recursive: true, force: true });
 });
@@ -164,11 +255,18 @@ test("adapts MV3 modules and both supported MV2 background forms", async (contex
         const manifest = JSON.parse(await fs.readFile(path.join(runtimePath, "manifest.json"), "utf8")) as {
           background: { service_worker: string; type: string };
         };
-        assert.equal(manifest.background.service_worker, "module/sw.js");
+        const layout = await readMv3Layout(runtimePath);
+        assert.equal(manifest.background.service_worker, layout.wrapper);
         assert.equal(manifest.background.type, "module");
-        const worker = await fs.readFile(path.join(runtimePath, "module", "sw.js"), "utf8");
-        assert.match(worker, /\.\.\/__cbpanel_lifecycle__\/config\.js/);
-        assert.match(worker, /export const loaded = true/);
+        assert.equal(path.posix.dirname(layout.wrapper), "module");
+        assert.equal(
+          await fs.readFile(path.join(runtimePath, "module", "sw.js"), "utf8"),
+          "export const loaded = true;\n",
+        );
+        const wrapper = await fs.readFile(toRuntimePath(runtimePath, layout.wrapper), "utf8");
+        assert.match(wrapper, new RegExp(`\\.\\./${escapeRegExp(layout.config)}`));
+        assert.match(wrapper, new RegExp(`\\.\\./${escapeRegExp(layout.bootstrap)}`));
+        assert.match(wrapper, /\.\/sw\.js/);
       },
     },
     {
@@ -212,8 +310,8 @@ test("adapts MV3 modules and both supported MV2 background forms", async (contex
         const realScript = page.indexOf("<SCRIPT defer");
         assert.ok(page.indexOf("config.js") > page.indexOf("</style>") && page.indexOf("config.js") < realScript);
         assert.ok(page.indexOf("bootstrap.js") > page.indexOf("</style>") && page.indexOf("bootstrap.js") < realScript);
-        assert.match(page, /src="\/__cbpanel_lifecycle__\/config\.js"/);
-        assert.match(page, /src="\/__cbpanel_lifecycle__\/bootstrap\.js"/);
+        assert.match(page, /src="\/cbpanel_lifecycle\/config\.js"/);
+        assert.match(page, /src="\/cbpanel_lifecycle\/bootstrap\.js"/);
       },
     },
   ];
@@ -263,16 +361,59 @@ test("an explicit preserve override keeps a unique non-legacy binding token", as
     background: { service_worker: "sw.js" },
   }, { "sw.js": "" });
 
-  const runtime = await runtimeService(root).materialize({
+  const service = runtimeService(root);
+  const entity = extensionEntity("extension-imported", source, "reference");
+  const runtime = await service.materialize({
     environmentId: "environment-imported",
-    extension: extensionEntity("extension-imported", source, "reference"),
+    extension: entity,
     lifecycleRevision: "import-binding-token",
     initialBehavior: "preserve",
   });
 
   const config = await readConfig(runtime.path);
+  const firstLayout = await readMv3Layout(runtime.path);
   assert.match(config, /"bindingRevision":"import-binding-token"/);
   assert.match(config, /"initialBehavior":"preserve"/);
+  assert.match(config, /"preserveMissingState":true/);
+  assert.equal(runtime.registration?.migrationRequired, false);
+  await fs.mkdir(path.join(root, "browser-data", "environment-imported", "Default"), { recursive: true });
+  await fs.writeFile(
+    path.join(root, "browser-data", "environment-imported", "Default", "Secure Preferences"),
+    JSON.stringify({ extensions: { settings: { [runtime.registration!.browserExtensionId]: {} } } }),
+    "utf8",
+  );
+
+  const rebound = await service.materialize({
+    environmentId: "environment-imported",
+    extension: entity,
+    lifecycleRevision: "replacement-binding-token",
+    initialBehavior: "preserve",
+  });
+  const reboundLayout = await readMv3Layout(rebound.path);
+  assert.notEqual(reboundLayout.wrapper, firstLayout.wrapper);
+  assert.notEqual(reboundLayout.config, firstLayout.config);
+  assert.notEqual(reboundLayout.bootstrap, firstLayout.bootstrap);
+  assert.notEqual(rebound.registration?.runtimeRevision, runtime.registration?.runtimeRevision);
+  assert.equal(rebound.registration?.migrationRequired, true);
+  const stillPending = await service.materialize({
+    environmentId: "environment-imported",
+    extension: entity,
+    lifecycleRevision: "replacement-binding-token",
+    initialBehavior: "preserve",
+  });
+  assert.equal(stillPending.registration?.migrationRequired, true);
+  await assert.rejects(
+    service.markRegistrationReady(rebound.path, "0".repeat(64)),
+    hasErrorCode("EXTENSION_RUNTIME_REGISTRATION_STALE"),
+  );
+  await service.markRegistrationReady(rebound.path, rebound.registration!.signature);
+  const ready = await service.materialize({
+    environmentId: "environment-imported",
+    extension: entity,
+    lifecycleRevision: "replacement-binding-token",
+    initialBehavior: "preserve",
+  });
+  assert.equal(ready.registration?.migrationRequired, false);
   await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -497,10 +638,10 @@ test("replacement can be forbidden without blocking first creation or valid reus
   assert.equal(reused.path, first.path);
   await fs.writeFile(path.join(source, "sw.js"), "globalThis.replacement = 2;\n", "utf8");
   await assert.rejects(service.materialize(input), hasErrorCode("EXTENSION_RUNTIME_REPLACEMENT_FORBIDDEN"));
-  assert.match(await fs.readFile(path.join(first.path, "__cbpanel_lifecycle_original__.js"), "utf8"), /replacement = 1/);
+  assert.match(await fs.readFile(path.join(first.path, "sw.js"), "utf8"), /replacement = 1/);
 
   const replaced = await service.materialize({ ...input, allowReplaceExisting: true });
-  assert.match(await fs.readFile(path.join(replaced.path, "__cbpanel_lifecycle_original__.js"), "utf8"), /replacement = 2/);
+  assert.match(await fs.readFile(path.join(replaced.path, "sw.js"), "utf8"), /replacement = 2/);
   await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -548,7 +689,7 @@ test("reference reuse fails if the source changes during runtime integrity verif
   let changed = false;
   context.mock.method(fs, "readFile", async (...args: Parameters<typeof fs.readFile>) => {
     const candidate = typeof args[0] === "string" ? args[0] : args[0].toString();
-    if (!changed && candidate === path.join(first.path, "__cbpanel_lifecycle_original__.js")) {
+    if (!changed && candidate === path.join(first.path, "sw.js")) {
       changed = true;
       await fs.writeFile(path.join(source, "sw.js"), "globalThis.sourceRevision = 2;\n", "utf8");
     }
@@ -557,7 +698,7 @@ test("reference reuse fails if the source changes during runtime integrity verif
 
   await assert.rejects(service.materialize(input), hasErrorCode("EXTENSION_RUNTIME_SOURCE_CHANGED"));
   assert.equal(changed, true);
-  assert.match(await originalReadFile(path.join(first.path, "__cbpanel_lifecycle_original__.js"), "utf8"), /sourceRevision = 1/);
+  assert.match(await originalReadFile(path.join(first.path, "sw.js"), "utf8"), /sourceRevision = 1/);
   await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -708,7 +849,7 @@ test("bootstrap delivers one install, then one startup, and suppresses startup b
     extension: extensionEntity("extension-state", source, "reference"),
     lifecycleRevision: "binding-state",
   });
-  const bootstrap = await fs.readFile(path.join(runtime.path, EXTENSION_LIFECYCLE_NAMESPACE, "bootstrap.js"), "utf8");
+  const bootstrap = await readBootstrap(runtime.path);
   const store = new Map<string, unknown>();
   const config = lifecycleConfig();
 
@@ -737,6 +878,208 @@ test("bootstrap delivers one install, then one startup, and suppresses startup b
   await fs.rm(root, { recursive: true, force: true });
 });
 
+test("missing lifecycle state suppresses native update only while adopting preserved browser state", async () => {
+  const root = await makeTempDir();
+  const source = await writeExtension(root, "missing-native-update", {
+    manifest_version: 3,
+    name: "Missing Native Update",
+    version: "1.0.0",
+    key: MANIFEST_KEY,
+    background: { service_worker: "sw.js" },
+  }, { "sw.js": "" });
+  const runtime = await runtimeService(root).materialize({
+    environmentId: "environment-missing-native-update",
+    extension: extensionEntity("extension-missing-native-update", source, "reference"),
+    lifecycleRevision: "binding-missing-native-update",
+  });
+  const bootstrap = await readBootstrap(runtime.path);
+  const updateDetails = { reason: "update", previousVersion: "0.9.0" };
+
+  const preservedStore = new Map<string, unknown>();
+  const preserved = await runBootstrap(bootstrap, {
+    ...lifecycleConfig(),
+    preserveMissingState: true,
+  }, preservedStore);
+  preserved.nativeInstalled.emit(updateDetails);
+  await settleEvents();
+  assert.deepEqual(preserved.installed, []);
+  assert.equal(preserved.startups, 1);
+  assert.equal(JSON.stringify(preservedStore.get("state")), JSON.stringify(currentLifecycleState()));
+
+  const freshStore = new Map<string, unknown>();
+  const fresh = await runBootstrap(bootstrap, lifecycleConfig(), freshStore);
+  fresh.nativeInstalled.emit(updateDetails);
+  await settleEvents();
+  assert.deepEqual(fresh.installed, [updateDetails]);
+  assert.equal(fresh.startups, 0);
+  assert.equal(JSON.stringify(freshStore.get("state")), JSON.stringify(currentLifecycleState()));
+
+  for (const reason of ["chrome_update", "shared_module_update"]) {
+    const nativeStore = new Map<string, unknown>();
+    const native = await runBootstrap(bootstrap, {
+      ...lifecycleConfig(),
+      preserveMissingState: true,
+    }, nativeStore);
+    const details = { reason, marker: reason };
+    native.nativeInstalled.emit(details);
+    await settleEvents();
+    assert.deepEqual(native.installed, [details]);
+    assert.equal(native.startups, 0);
+    assert.equal(JSON.stringify(nativeStore.get("state")), JSON.stringify(currentLifecycleState()));
+  }
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("native update noise cannot escape for an unchanged or injector-only registration refresh", async () => {
+  const root = await makeTempDir();
+  const source = await writeExtension(root, "native-runtime-update-noise", {
+    manifest_version: 3,
+    name: "Native Runtime Update Noise",
+    version: "1.0.0",
+    key: MANIFEST_KEY,
+    background: { service_worker: "sw.js" },
+  }, { "sw.js": "" });
+  const runtime = await runtimeService(root).materialize({
+    environmentId: "environment-native-runtime-update-noise",
+    extension: extensionEntity("extension-native-runtime-update-noise", source, "reference"),
+    lifecycleRevision: "binding-native-runtime-update-noise",
+  });
+  const bootstrap = await readBootstrap(runtime.path);
+
+  for (const runtimeRevision of ["runtime-zero", lifecycleConfig().runtimeRevision]) {
+    const store = new Map<string, unknown>([["state", {
+      ...currentLifecycleState(),
+      runtimeRevision,
+    }]]);
+    const result = await runBootstrap(bootstrap, lifecycleConfig(), store);
+    result.nativeInstalled.emit({ reason: "update", previousVersion: "1.0.0", marker: "cdp-load" });
+    await settleEvents();
+
+    assert.deepEqual(result.installed, []);
+    assert.equal(result.startups, 1);
+    assert.equal(JSON.stringify(store.get("state")), JSON.stringify(currentLifecycleState()));
+  }
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("native startup alone synthesizes a pending semantic update exactly once", async () => {
+  const root = await makeTempDir();
+  const source = await writeExtension(root, "startup-semantic-update", {
+    manifest_version: 3,
+    name: "Startup Semantic Update",
+    version: "1.0.0",
+    key: MANIFEST_KEY,
+    background: { service_worker: "sw.js" },
+  }, { "sw.js": "" });
+  const runtime = await runtimeService(root).materialize({
+    environmentId: "environment-startup-semantic-update",
+    extension: extensionEntity("extension-startup-semantic-update", source, "reference"),
+    lifecycleRevision: "binding-startup-semantic-update",
+  });
+  const bootstrap = await readBootstrap(runtime.path);
+  const store = new Map<string, unknown>([["state", {
+    ...currentLifecycleState(),
+    version: "0.9.0",
+    packageRevision: "package-zero",
+  }]]);
+  const result = await runBootstrap(bootstrap, lifecycleConfig(), store);
+
+  result.nativeStartup.emit();
+  await settleEvents();
+
+  assert.equal(
+    JSON.stringify(result.installed),
+    JSON.stringify([{ reason: "update", previousVersion: "0.9.0" }]),
+  );
+  assert.equal(result.startups, 0);
+  assert.equal(JSON.stringify(store.get("state")), JSON.stringify(currentLifecycleState()));
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("activation fallback runs once only when persisted lifecycle semantics need adoption", async () => {
+  const root = await makeTempDir();
+  const source = await writeExtension(root, "activation-fallback", {
+    manifest_version: 3,
+    name: "Activation Fallback",
+    version: "1.0.0",
+    key: MANIFEST_KEY,
+    background: { service_worker: "sw.js" },
+  }, { "sw.js": "" });
+  const runtime = await runtimeService(root).materialize({
+    environmentId: "environment-activation-fallback",
+    extension: extensionEntity("extension-activation-fallback", source, "reference"),
+    lifecycleRevision: "binding-activation-fallback",
+  });
+  const bootstrap = await readBootstrap(runtime.path);
+
+  const adoptedStore = new Map<string, unknown>();
+  const adopted = await runBootstrap(bootstrap, {
+    ...lifecycleConfig(),
+    preserveMissingState: true,
+  }, adoptedStore);
+  await settleEvents();
+  assert.deepEqual(adopted.installed, []);
+  assert.equal(adopted.startups, 1);
+  assert.equal(JSON.stringify(adoptedStore.get("state")), JSON.stringify(currentLifecycleState()));
+
+  const currentStore = new Map<string, unknown>([["state", currentLifecycleState()]]);
+  const current = await runBootstrap(bootstrap, lifecycleConfig(), currentStore);
+  await settleEvents();
+  assert.deepEqual(current.installed, []);
+  assert.equal(current.startups, 0);
+
+  const runtimeUpgradeStore = new Map<string, unknown>([["state", {
+    ...currentLifecycleState(),
+    runtimeRevision: "runtime-zero",
+  }]]);
+  const runtimeUpgrade = await runBootstrap(bootstrap, lifecycleConfig(), runtimeUpgradeStore);
+  await settleEvents();
+  assert.deepEqual(runtimeUpgrade.installed, []);
+  assert.equal(runtimeUpgrade.startups, 1);
+  assert.equal(JSON.stringify(runtimeUpgradeStore.get("state")), JSON.stringify(currentLifecycleState()));
+
+  const semanticUpdateStore = new Map<string, unknown>([["state", {
+    schemaVersion: 1,
+    version: "0.9.0",
+    packageRevision: "package-zero",
+    bindingRevision: "binding-one",
+    runtimeRevision: "runtime-zero",
+  }]]);
+  const semanticUpdate = await runBootstrap(bootstrap, lifecycleConfig(), semanticUpdateStore);
+  await settleEvents();
+  assert.equal(
+    JSON.stringify(semanticUpdate.installed),
+    JSON.stringify([{ reason: "update", previousVersion: "0.9.0" }]),
+  );
+  assert.equal(semanticUpdate.startups, 0);
+  assert.equal(JSON.stringify(semanticUpdateStore.get("state")), JSON.stringify(currentLifecycleState()));
+
+  const reboundStore = new Map<string, unknown>([["state", {
+    ...currentLifecycleState(),
+    bindingRevision: "binding-zero",
+    runtimeRevision: "runtime-zero",
+  }]]);
+  const rebound = await runBootstrap(bootstrap, {
+    ...lifecycleConfig(),
+    preserveMissingState: true,
+  }, reboundStore);
+  await settleEvents();
+  assert.equal(
+    JSON.stringify(rebound.installed),
+    JSON.stringify([{ reason: "update", previousVersion: "1.0.0" }]),
+  );
+  assert.equal(rebound.startups, 0);
+  assert.equal(JSON.stringify(reboundStore.get("state")), JSON.stringify(currentLifecycleState()));
+
+  const freshStore = new Map<string, unknown>();
+  const fresh = await runBootstrap(bootstrap, lifecycleConfig(), freshStore);
+  await settleEvents();
+  assert.deepEqual(fresh.installed, []);
+  assert.equal(fresh.startups, 0);
+  assert.equal(freshStore.has("state"), false);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
 test("bootstrap fails safe when lifecycle state cannot be persisted", async () => {
   const root = await makeTempDir();
   const source = await writeExtension(root, "write-failure", {
@@ -751,7 +1094,7 @@ test("bootstrap fails safe when lifecycle state cannot be persisted", async () =
     extension: extensionEntity("extension-write-failure", source, "reference"),
     lifecycleRevision: "binding-write-failure",
   });
-  const bootstrap = await fs.readFile(path.join(runtime.path, EXTENSION_LIFECYCLE_NAMESPACE, "bootstrap.js"), "utf8");
+  const bootstrap = await readBootstrap(runtime.path);
   const errors: string[] = [];
   const result = await runBootstrap(bootstrap, lifecycleConfig(), new Map(), {
     writeFails: true,
@@ -781,7 +1124,7 @@ test("bootstrap distinguishes a failed state read from a missing state and never
     extension: extensionEntity("extension-read-failure", source, "reference"),
     lifecycleRevision: "binding-read-failure",
   });
-  const bootstrap = await fs.readFile(path.join(runtime.path, EXTENSION_LIFECYCLE_NAMESPACE, "bootstrap.js"), "utf8");
+  const bootstrap = await readBootstrap(runtime.path);
   const errors: string[] = [];
   const result = await runBootstrap(bootstrap, lifecycleConfig(), new Map(), { readFails: true, errors });
 
@@ -815,7 +1158,7 @@ test("bootstrap forwards native non-install reasons exactly and latches startup"
     extension: extensionEntity("extension-native-reasons", source, "reference"),
     lifecycleRevision: "binding-native-reasons",
   });
-  const bootstrap = await fs.readFile(path.join(runtime.path, EXTENSION_LIFECYCLE_NAMESPACE, "bootstrap.js"), "utf8");
+  const bootstrap = await readBootstrap(runtime.path);
 
   for (const reason of ["update", "chrome_update", "shared_module_update"]) {
     const store = new Map<string, unknown>([["state", {
@@ -854,7 +1197,7 @@ test("patched lifecycle events implement add, remove, hasListener, and hasListen
     extension: extensionEntity("extension-event-methods", source, "reference"),
     lifecycleRevision: "binding-event-methods",
   });
-  const bootstrap = await fs.readFile(path.join(runtime.path, EXTENSION_LIFECYCLE_NAMESPACE, "bootstrap.js"), "utf8");
+  const bootstrap = await readBootstrap(runtime.path);
   const result = await runBootstrap(bootstrap, lifecycleConfig(), new Map(), { captureListeners: false });
   const installedListener = () => undefined;
   const startupListener = () => undefined;
@@ -890,7 +1233,7 @@ test("a preserve-mode import token rebases legacy restored state once before nor
     extension: extensionEntity("extension-rebase", source, "reference"),
     lifecycleRevision: "binding-rebase",
   });
-  const bootstrap = await fs.readFile(path.join(runtime.path, EXTENSION_LIFECYCLE_NAMESPACE, "bootstrap.js"), "utf8");
+  const bootstrap = await readBootstrap(runtime.path);
   const store = new Map<string, unknown>([["state", {
     schemaVersion: 1,
     version: "1.0.0",
@@ -903,6 +1246,8 @@ test("a preserve-mode import token rebases legacy restored state once before nor
     packageRevision: "restored-package",
     bindingRevision: "import-rebase-token",
     initialBehavior: "preserve",
+    preserveMissingState: true,
+    runtimeRevision: "runtime-restored",
   };
 
   const restored = await runBootstrap(bootstrap, legacyConfig, store);
@@ -927,6 +1272,7 @@ test("real Chromium keeps MV3 classic and module lifecycle state across two pers
     context.skip("Neither CloakBrowser nor Playwright Chromium is installed");
     return;
   }
+  context.diagnostic(`Chromium fixture source: ${launchFixture.description}`);
   const keyPair = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const manifestKey = Buffer.from(keyPair.publicKey.export({ type: "spki", format: "der" })).toString("base64");
   for (const [kind, module] of [["classic", false], ["module", true]] as const) {
@@ -944,7 +1290,7 @@ test("real Chromium keeps MV3 classic and module lifecycle state across two pers
         }, {
           [workerPath]: browserFixtureWorker(module),
           "welcome.html": "<!doctype html><title>Welcome</title>",
-          ...(module ? { "nested/helper.js": "globalThis.fixtureHelperLoaded = true;\n" } : {}),
+          "nested/helper.js": "globalThis.fixtureHelperLoaded = true;\n",
         });
         const entity = extensionEntity(`extension-${kind}`, source, "reference");
         entity.manifestKey = manifestKey;
@@ -953,6 +1299,7 @@ test("real Chromium keeps MV3 classic and module lifecycle state across two pers
           extension: entity,
           lifecycleRevision: `binding-${kind}`,
         });
+        const layout = await readMv3Layout(runtime.path);
         const userDataDir = path.join(root, "browser-data", `environment-${kind}`);
 
         let first: import("playwright-core").BrowserContext | undefined;
@@ -961,14 +1308,19 @@ test("real Chromium keeps MV3 classic and module lifecycle state across two pers
           const firstState = await waitForBrowserFixtureState(first, (state) => (
             state.installCount === 1
             && state.welcomeCount === 1
+            && state.helperLoaded === true
             && JSON.stringify(state.events) === JSON.stringify(["installed:install"])
           ));
           const welcome = await waitForWelcomePage(first);
           assert.equal(firstState.installCount, 1);
           assert.equal(firstState.startupCount ?? 0, 0);
           assert.equal(firstState.persistedValue, "kept");
+          assert.equal(firstState.helperLoaded, true);
           assert.deepEqual(firstState.events, ["installed:install"]);
-          assert.match(typeof firstState.workerLocation === "string" ? firstState.workerLocation : "", /nested\/worker\.js$/);
+          assert.match(
+            typeof firstState.workerLocation === "string" ? firstState.workerLocation : "",
+            new RegExp(`${escapeRegExp(layout.wrapper)}$`),
+          );
           await welcome.close();
         } finally {
           await first?.close().catch(() => undefined);
@@ -997,11 +1349,169 @@ test("real Chromium keeps MV3 classic and module lifecycle state across two pers
   }
 });
 
+test("real Chromium migrates an existing canonical MV3 worker registration to the protected wrapper", async (context) => {
+  const launchFixture = await resolveBrowserFixtureLauncher();
+  if (!launchFixture) {
+    context.skip("Neither CloakBrowser nor Playwright Chromium is installed");
+    return;
+  }
+  context.diagnostic(`Chromium fixture source: ${launchFixture.description}`);
+  const keyPair = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const manifestKey = Buffer.from(keyPair.publicKey.export({ type: "spki", format: "der" })).toString("base64");
+  for (const [kind, module] of [["classic", false], ["module", true]] as const) {
+    await context.test(kind, async () => {
+      const root = await makeTempDir();
+      try {
+        const environmentId = `environment-canonical-migration-${kind}`;
+        const workerPath = "nested/worker.js";
+        const workerSource = browserFixtureWorker(module);
+        const source = await writeExtension(root, "canonical-browser-source", {
+          manifest_version: 3,
+          name: `Canonical migration ${kind}`,
+          version: "1.0.0",
+          key: manifestKey,
+          permissions: ["storage", "tabs"],
+          background: { service_worker: workerPath, ...(module ? { type: "module" } : {}) },
+        }, {
+          [workerPath]: workerSource,
+          "welcome.html": "<!doctype html><title>Welcome</title>",
+          "nested/helper.js": "globalThis.fixtureHelperLoaded = true;\n",
+        });
+        const entity = extensionEntity(`extension-canonical-migration-${kind}`, source, "reference");
+        entity.manifestKey = manifestKey;
+        const userDataDir = path.join(root, "browser-data", environmentId);
+        const legacyRuntimePath = path.join(root, "extension-runtimes", environmentId, entity.id);
+        await fs.mkdir(path.dirname(legacyRuntimePath), { recursive: true });
+        await fs.cp(source, legacyRuntimePath, { recursive: true });
+
+        let canonical: import("playwright-core").BrowserContext | undefined;
+        let canonicalWorkerLocation = "";
+        try {
+          canonical = await launchFixture(userDataDir, legacyRuntimePath);
+          const state = await waitForBrowserFixtureState(canonical, (candidate) => (
+            candidate.installCount === 1
+            && candidate.welcomeCount === 1
+            && candidate.helperLoaded === true
+            && JSON.stringify(candidate.events) === JSON.stringify(["installed:install"])
+          ));
+          canonicalWorkerLocation = typeof state.workerLocation === "string" ? state.workerLocation : "";
+          assert.match(canonicalWorkerLocation, /nested\/worker\.js$/);
+          await (await waitForWelcomePage(canonical)).close();
+        } finally {
+          await canonical?.close().catch(() => undefined);
+        }
+
+        const service = runtimeService(root);
+        const materializeInput = {
+          environmentId,
+          extension: entity,
+          lifecycleRevision: `binding-canonical-migration-${kind}`,
+        } as const;
+        const runtime = await service.materialize(materializeInput);
+        assert.equal(runtime.path, legacyRuntimePath);
+        assert.equal(runtime.registration?.migrationRequired, true);
+        const layout = await readMv3Layout(runtime.path);
+        const migrationConfig = await readConfig(runtime.path);
+        const parsedMigrationConfig = parseGeneratedLifecycleConfig(migrationConfig);
+        assert.match(migrationConfig, /"initialBehavior":"install"/);
+        assert.match(migrationConfig, /"preserveMissingState":true/);
+        assert.equal(await fs.readFile(path.join(runtime.path, ...workerPath.split("/")), "utf8"), workerSource);
+        const extensionId = new URL(canonicalWorkerLocation).host;
+        assert.equal(runtime.registration?.browserExtensionId, extensionId);
+        assert.equal(runtime.registration?.workerRelativePath, layout.wrapper);
+        const launchRegistration = {
+          ...runtime.registration!,
+          name: `Canonical migration ${kind}`,
+          runtimePath: runtime.path,
+        };
+        await runRawRegistrationPreflight(
+          launchFixture.executablePath,
+          userDataDir,
+          launchRegistration,
+        );
+
+        let migrated: import("playwright-core").BrowserContext | undefined;
+        try {
+          migrated = await launchFixture(userDataDir, runtime.path);
+          await migrateExtensionRegistrations(
+            playwrightRegistrationMigrationBrowser(migrated),
+            [launchRegistration],
+            () => service.markRegistrationReady(runtime.path, runtime.registration!.signature),
+          );
+          let state: Record<string, unknown>;
+          try {
+            state = await waitForBrowserFixtureState(migrated, (candidate) => (
+              candidate.installCount === 1
+              && candidate.startupCount === 1
+              && candidate.welcomeCount === 1
+              && JSON.stringify(candidate.events) === JSON.stringify(["installed:install", "startup"])
+            ));
+          } catch (error) {
+            const preferenceDiagnostics = await readExtensionPreferenceDiagnostics(userDataDir, extensionId);
+            throw new Error(`${error instanceof Error ? error.message : String(error)}; preferences=${JSON.stringify(preferenceDiagnostics)}`);
+          }
+          const migratedWorkerLocation = typeof state.workerLocation === "string" ? state.workerLocation : "";
+          assert.match(migratedWorkerLocation, new RegExp(`${escapeRegExp(layout.wrapper)}$`));
+          assert.notEqual(migratedWorkerLocation, canonicalWorkerLocation);
+          assert.equal(new URL(migratedWorkerLocation).host, new URL(canonicalWorkerLocation).host);
+          assert.equal(migrated.pages().some((page) => page.url().endsWith("welcome.html")), false);
+          assert.deepEqual(await readBrowserLifecycleState(migrated), {
+            schemaVersion: 1,
+            version: "1.0.0",
+            packageRevision: parsedMigrationConfig.packageRevision,
+            bindingRevision: `binding-canonical-migration-${kind}`,
+            runtimeRevision: runtime.registration?.runtimeRevision,
+          });
+        } finally {
+          await migrated?.close().catch(() => undefined);
+        }
+
+        const readyRuntime = await service.materialize(materializeInput);
+        assert.equal(readyRuntime.registration?.migrationRequired, false);
+
+        let steady: import("playwright-core").BrowserContext | undefined;
+        try {
+          steady = await launchFixture(userDataDir, runtime.path);
+          const state = await waitForBrowserFixtureState(steady, (candidate) => (
+            candidate.installCount === 1
+            && candidate.startupCount === 2
+            && candidate.welcomeCount === 1
+            && JSON.stringify(candidate.events) === JSON.stringify(["installed:install", "startup", "startup"])
+          ));
+          assert.equal(state.persistedValue, "kept");
+          assert.equal(steady.pages().some((page) => page.url().endsWith("welcome.html")), false);
+        } finally {
+          await steady?.close().catch(() => undefined);
+        }
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 function runtimeService(root: string): ExtensionRuntimeService {
   return new ExtensionRuntimeService({
     runtimeDir: path.join(root, "extension-runtimes"),
     browserDataDir: path.join(root, "browser-data"),
   });
+}
+
+async function runRawRegistrationPreflight(
+  executablePath: string,
+  userDataDir: string,
+  registration: ExtensionLaunchRegistration,
+): Promise<void> {
+  const options = buildExtensionRegistrationPreflightLaunchOptions(userDataDir, executablePath);
+  const activePortPath = await prepareExtensionRegistrationPreflightUserDataDir(userDataDir);
+  const child = spawn(options.executablePath, options.args, options.spawnOptions);
+  const preflight = rawCdpRegistrationPreflightProcess(child, activePortPath, options.timeout);
+  try {
+    await preflight.clearServiceWorkers([`chrome-extension://${registration.browserExtensionId}`]);
+    await preflight.loadUnpackedExtensions([registration]);
+  } finally {
+    await preflight.close();
+  }
 }
 
 function extensionEntity(id: string, localPath: string, directoryMode: "copy" | "reference"): ExtensionEntity {
@@ -1045,8 +1555,63 @@ async function writeExtension(
   return directory;
 }
 
+type Mv3RuntimeLayout = {
+  config: string;
+  bootstrap: string;
+  wrapper: string;
+};
+
+async function readMv3Layout(runtimePath: string): Promise<Mv3RuntimeLayout> {
+  const manifest = JSON.parse(await fs.readFile(path.join(runtimePath, "manifest.json"), "utf8")) as {
+    background?: { service_worker?: unknown };
+  };
+  const metadata = JSON.parse(await fs.readFile(
+    path.join(runtimePath, EXTENSION_LIFECYCLE_NAMESPACE, "materialization.json"),
+    "utf8",
+  )) as { injectorVersion?: unknown; signature?: unknown };
+  assert.equal(metadata.injectorVersion, EXTENSION_LIFECYCLE_INJECTOR_VERSION);
+  assert.equal(typeof metadata.signature, "string");
+  assert.match(metadata.signature as string, /^[a-f0-9]{64}$/);
+  const revision = Buffer.from((metadata.signature as string).slice(0, 32), "hex").toString("base64url");
+  const suffix = `v${EXTENSION_LIFECYCLE_INJECTOR_VERSION}-${revision}`;
+  const layout = {
+    config: `${EXTENSION_LIFECYCLE_NAMESPACE}/config-${suffix}.js`,
+    bootstrap: `${EXTENSION_LIFECYCLE_NAMESPACE}/bootstrap-${suffix}.js`,
+    wrapper: manifest.background?.service_worker,
+  };
+  assert.equal(typeof layout.wrapper, "string");
+  assert.match(
+    path.posix.basename(layout.wrapper as string),
+    new RegExp(`^${EXTENSION_LIFECYCLE_NAMESPACE}-worker-${escapeRegExp(suffix)}\\.js$`),
+  );
+  assert.equal(await exists(toRuntimePath(runtimePath, layout.wrapper as string)), true);
+  return layout as Mv3RuntimeLayout;
+}
+
+function toRuntimePath(runtimePath: string, relativePath: string): string {
+  return path.join(runtimePath, ...relativePath.split("/"));
+}
+
 async function readConfig(runtimePath: string): Promise<string> {
-  return fs.readFile(path.join(runtimePath, EXTENSION_LIFECYCLE_NAMESPACE, "config.js"), "utf8");
+  const layout = await readMv3Layout(runtimePath);
+  return fs.readFile(toRuntimePath(runtimePath, layout.config), "utf8");
+}
+
+function parseGeneratedLifecycleConfig(source: string): { packageRevision: string } {
+  const match = /^globalThis\.__CBPANEL_LIFECYCLE_CONFIG__ = (.+);\r?\n?$/.exec(source);
+  assert.ok(match?.[1], "generated lifecycle config must remain a single JSON assignment");
+  const parsed = JSON.parse(match[1]) as { packageRevision?: unknown };
+  assert.equal(typeof parsed.packageRevision, "string");
+  return parsed as { packageRevision: string };
+}
+
+async function readBootstrap(runtimePath: string): Promise<string> {
+  const layout = await readMv3Layout(runtimePath);
+  return fs.readFile(toRuntimePath(runtimePath, layout.bootstrap), "utf8");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function makeTempDir(): Promise<string> {
@@ -1118,6 +1683,8 @@ function lifecycleConfig(): Record<string, unknown> {
     packageRevision: "package-one",
     bindingRevision: "binding-one",
     initialBehavior: "install",
+    preserveMissingState: false,
+    runtimeRevision: "runtime-one",
   };
 }
 
@@ -1127,6 +1694,7 @@ function currentLifecycleState(): Record<string, unknown> {
     version: "1.0.0",
     packageRevision: "package-one",
     bindingRevision: "binding-one",
+    runtimeRevision: "runtime-one",
   };
 }
 
@@ -1237,38 +1805,70 @@ async function settleEvents(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 250));
 }
 
-type BrowserFixtureLauncher = (
+type BrowserFixtureLauncher = ((
   userDataDir: string,
   runtimePath: string,
-) => Promise<import("playwright-core").BrowserContext>;
+) => Promise<import("playwright-core").BrowserContext>) & {
+  description: string;
+  executablePath: string;
+};
 
 async function resolveBrowserFixtureLauncher(): Promise<BrowserFixtureLauncher | undefined> {
   const cloakbrowser = await import("cloakbrowser");
+  const explicitBinaryPath = process.env.CLOAKBROWSER_BINARY_PATH?.trim();
+  if (explicitBinaryPath) {
+    if (!path.isAbsolute(explicitBinaryPath)) {
+      throw new Error("CLOAKBROWSER_BINARY_PATH must be an absolute executable path for the Chromium fixture");
+    }
+    const stat = await fs.stat(explicitBinaryPath).catch(() => undefined);
+    if (!stat?.isFile()) {
+      throw new Error(`CLOAKBROWSER_BINARY_PATH does not name an existing file: ${explicitBinaryPath}`);
+    }
+    return Object.assign(
+      (userDataDir: string, runtimePath: string) => cloakbrowser.launchPersistentContext({
+        userDataDir,
+        extensionPaths: [runtimePath],
+        headless: true,
+        stealthArgs: false,
+        geoip: false,
+      }),
+      {
+        description: `explicit CLOAKBROWSER_BINARY_PATH (${explicitBinaryPath})`,
+        executablePath: explicitBinaryPath,
+      },
+    );
+  }
   const info = await cloakbrowser.binaryInfo();
   if (info.installed) {
-    return (userDataDir, runtimePath) => cloakbrowser.launchPersistentContext({
-      userDataDir,
-      extensionPaths: [runtimePath],
-      headless: true,
-      stealthArgs: false,
-      geoip: false,
-    });
+    return Object.assign(
+      (userDataDir: string, runtimePath: string) => cloakbrowser.launchPersistentContext({
+        userDataDir,
+        extensionPaths: [runtimePath],
+        headless: true,
+        stealthArgs: false,
+        geoip: false,
+      }),
+      { description: `CloakBrowser managed binary (${info.binaryPath})`, executablePath: info.binaryPath },
+    );
   }
   const { chromium } = await import("playwright-core");
   const executablePath = chromium.executablePath();
   if (!(await exists(executablePath))) return undefined;
-  return (userDataDir, runtimePath) => chromium.launchPersistentContext(userDataDir, {
-    executablePath,
-    headless: true,
-    args: [
-      `--disable-extensions-except=${runtimePath}`,
-      `--load-extension=${runtimePath}`,
-    ],
-  });
+  return Object.assign(
+    (userDataDir: string, runtimePath: string) => chromium.launchPersistentContext(userDataDir, {
+      executablePath,
+      headless: true,
+      args: [
+        `--disable-extensions-except=${runtimePath}`,
+        `--load-extension=${runtimePath}`,
+      ],
+    }),
+    { description: `Playwright fallback binary (${executablePath})`, executablePath },
+  );
 }
 
 function browserFixtureWorker(module: boolean): string {
-  return `${module ? 'import "./helper.js";\n' : ""}
+  return `${module ? 'import "./helper.js";\n' : 'importScripts("./helper.js");\n'}
 let fixtureQueue = Promise.resolve();
 function enqueueFixture(task) {
   fixtureQueue = fixtureQueue.then(task, task);
@@ -1281,6 +1881,7 @@ async function recordFixture(event) {
     installCount: (state.installCount || 0) + (event === "installed:install" ? 1 : 0),
     startupCount: (state.startupCount || 0) + (event === "startup" ? 1 : 0),
     persistedValue: state.persistedValue || "kept",
+    helperLoaded: globalThis.fixtureHelperLoaded === true,
     workerLocation: self.location.href,
   });
 }
@@ -1315,18 +1916,92 @@ async function waitForBrowserFixtureState(
   predicate: (state: Record<string, unknown>) => boolean,
 ): Promise<Record<string, unknown>> {
   const deadline = Date.now() + 15_000;
+  let lastState: Record<string, unknown> | undefined;
+  let lastError: unknown;
   while (Date.now() < deadline) {
     const worker = browserContext.serviceWorkers()[0];
     if (worker) {
-      const state = await worker.evaluate(async () => {
-        const runtime = globalThis as typeof globalThis & {
-          chrome: { storage: { local: { get: (keys: null) => Promise<Record<string, unknown>> } } };
-        };
-        return runtime.chrome.storage.local.get(null);
-      }) as Record<string, unknown>;
-      if (predicate(state)) return state;
+      try {
+        const state = await worker.evaluate(async () => {
+          const runtime = globalThis as typeof globalThis & {
+            chrome: { storage: { local: { get: (keys: null) => Promise<Record<string, unknown>> } } };
+          };
+          return runtime.chrome.storage.local.get(null);
+        }) as Record<string, unknown>;
+        lastState = state;
+        if (predicate(state)) return state;
+      } catch (error) {
+        lastError = error;
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("Timed out waiting for extension lifecycle fixture state");
+  throw new Error(`Timed out waiting for extension lifecycle fixture state: ${JSON.stringify({
+    workerUrls: browserContext.serviceWorkers().map((worker) => worker.url()),
+    pageUrls: browserContext.pages().map((page) => page.url()),
+    lastState,
+    lastError: lastError instanceof Error ? lastError.message : String(lastError ?? ""),
+  })}`);
+}
+
+async function readBrowserLifecycleState(
+  browserContext: import("playwright-core").BrowserContext,
+): Promise<Record<string, unknown>> {
+  const worker = browserContext.serviceWorkers()[0];
+  if (!worker) throw new Error("Extension lifecycle worker is not running");
+  return worker.evaluate(async () => new Promise<Record<string, unknown>>((resolve, reject) => {
+    const openRequest = indexedDB.open("__cbpanel_extension_lifecycle_v1", 1);
+    let missingDatabase = false;
+    openRequest.onupgradeneeded = () => {
+      missingDatabase = true;
+      openRequest.transaction?.abort();
+    };
+    openRequest.onerror = () => reject(new Error(
+      missingDatabase ? "Extension lifecycle database is missing" : "Extension lifecycle database could not be opened",
+    ));
+    openRequest.onsuccess = () => {
+      const database = openRequest.result;
+      if (!database.objectStoreNames.contains("lifecycle")) {
+        database.close();
+        reject(new Error("Extension lifecycle store is missing"));
+        return;
+      }
+      const transaction = database.transaction("lifecycle", "readonly");
+      const stateRequest = transaction.objectStore("lifecycle").get("state");
+      stateRequest.onerror = () => reject(new Error("Extension lifecycle state could not be read"));
+      stateRequest.onsuccess = () => {
+        database.close();
+        if (!stateRequest.result || typeof stateRequest.result !== "object") {
+          reject(new Error("Extension lifecycle state is missing"));
+          return;
+        }
+        resolve(stateRequest.result as Record<string, unknown>);
+      };
+    };
+  }));
+}
+
+async function readExtensionPreferenceDiagnostics(
+  userDataDir: string,
+  extensionId: string,
+): Promise<Record<string, unknown>> {
+  const diagnostics: Record<string, unknown> = {};
+  for (const fileName of ["Preferences", "Secure Preferences"]) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(path.join(userDataDir, "Default", fileName), "utf8")) as {
+        extensions?: { settings?: Record<string, Record<string, unknown>> };
+      };
+      const entry = parsed.extensions?.settings?.[extensionId];
+      diagnostics[fileName] = entry ? {
+        state: entry.state,
+        path: entry.path,
+        location: entry.location,
+        disableReasons: entry.disable_reasons,
+        manifest: entry.manifest,
+      } : "missing";
+    } catch (error) {
+      diagnostics[fileName] = error instanceof Error ? error.message : String(error);
+    }
+  }
+  return diagnostics;
 }
