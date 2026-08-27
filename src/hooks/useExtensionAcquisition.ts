@@ -506,7 +506,9 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     if (this.confirmInFlight) return this.confirmInFlight;
     const pending = this.confirmNow(request);
     this.confirmInFlight = pending;
-    void pending.finally(() => {
+    void pending.then(() => {
+      if (this.confirmInFlight === pending) this.confirmInFlight = undefined;
+    }, () => {
       if (this.confirmInFlight === pending) this.confirmInFlight = undefined;
     });
     return pending;
@@ -516,7 +518,9 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     if (this.refreshStateInFlight) return this.refreshStateInFlight;
     const pending = this.retryStateRefreshNow();
     this.refreshStateInFlight = pending;
-    void pending.finally(() => {
+    void pending.then(() => {
+      if (this.refreshStateInFlight === pending) this.refreshStateInFlight = undefined;
+    }, () => {
       if (this.refreshStateInFlight === pending) this.refreshStateInFlight = undefined;
     });
     return pending;
@@ -531,7 +535,9 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     if (this.updateProviderInFlight) return this.updateProviderInFlight;
     const pending = this.transitionUpdateProviderNow(extensionId, previousProviderId, requestedProviderId);
     this.updateProviderInFlight = pending;
-    void pending.finally(() => {
+    void pending.then(() => {
+      if (this.updateProviderInFlight === pending) this.updateProviderInFlight = undefined;
+    }, () => {
       if (this.updateProviderInFlight === pending) this.updateProviderInFlight = undefined;
     });
     return pending;

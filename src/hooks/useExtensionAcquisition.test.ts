@@ -479,6 +479,74 @@ test("local selection, active-session, and confirmation guards expose distinct s
   assert.equal(controller.getState().session.error?.code, "ACQUISITION_CONFIRMATION_NOT_READY");
 });
 
+test("rejected single-flight cleanup emits no detached unhandled rejection and releases every slot", async () => {
+  const failure = new Error("listener rejected acquisition state delivery");
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+  process.prependListener("unhandledRejection", onUnhandled);
+  const result = { session: session("consumed", "chrome-web-store"), extension: extension() };
+  const request = {
+    namespace: "chrome-web-store" as const,
+    storeId: STORE_ID,
+    artifactProviderId: "chrome-web-store" as const,
+    purpose: "install" as const,
+  };
+  const controller = createExtensionAcquisitionController({
+    settings: settings(),
+    client: stubClient({
+      createSession: async () => session("ready", "chrome-web-store"),
+      confirmSession: async () => result,
+    }),
+    reloadState: async () => { throw new Error("state unavailable"); },
+  });
+
+  try {
+    let unsubscribe = controller.subscribe(() => { throw failure; });
+    const rejectedConfirm = controller.confirm({ disposition: "create" });
+    await assert.rejects(rejectedConfirm, failure);
+    unsubscribe();
+    const nextConfirm = controller.confirm({ disposition: "create" });
+    assert.notEqual(nextConfirm, rejectedConfirm);
+    assert.equal(await nextConfirm, undefined);
+
+    controller.reset();
+    await controller.startSession(request);
+    await controller.confirm({ disposition: "create" });
+    assert.equal(controller.getState().session.refreshError?.code, "ACQUISITION_STATE_REFRESH_FAILED");
+
+    unsubscribe = controller.subscribe(() => { throw failure; });
+    const rejectedRefresh = controller.retryStateRefresh();
+    await assert.rejects(rejectedRefresh, failure);
+    unsubscribe();
+    const nextRefresh = controller.retryStateRefresh();
+    assert.notEqual(nextRefresh, rejectedRefresh);
+    assert.equal(await nextRefresh, false);
+
+    unsubscribe = controller.subscribe(() => { throw failure; });
+    const rejectedTransition = controller.transitionUpdateProvider(
+      "extension-1",
+      "chrome-web-store",
+      "crxsoso",
+    );
+    await assert.rejects(rejectedTransition, failure);
+    unsubscribe();
+    const nextTransition = controller.transitionUpdateProvider(
+      "extension-1",
+      "chrome-web-store",
+      "crxsoso",
+    );
+    assert.notEqual(nextTransition, rejectedTransition);
+    assert.equal((await nextTransition)?.updateProviderId, "crxsoso");
+
+    await flush();
+    await flush();
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+    controller.dispose();
+  }
+});
+
 test("failed update-provider transition retains the prior provider projection", async () => {
   const controller = createExtensionAcquisitionController({
     settings: settings(),
