@@ -3,6 +3,55 @@ import type { ExtensionEntity, ExtensionPermissionRisk } from "./entities";
 export const CHROME_EXTENSION_ID_PATTERN = /^[a-p]{32}$/;
 export const EXTENSION_ACQUISITION_DISCLOSURE_VERSION = 1;
 
+/**
+ * CRX搜搜 publishes extension thumbnails from a small, reviewed set of image
+ * hosts.  Keep this allowlist here so every API boundary applies the exact
+ * same projection before an image URL reaches the renderer.
+ */
+const CRXSOSO_CATALOG_ICON_HOSTS = new Set([
+  "lhimg.crxsoso.com",
+  "smimg.crxsoso.com",
+  "amimg.crxsoso.com",
+]);
+
+/** Return a canonical, token-free CRX搜搜 thumbnail URL or undefined. */
+export function normalizeCrxsosoCatalogIconUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value || value.length > 2_048) return undefined;
+  if (value.trim() !== value || /[\u0000-\u001f\u007f\\]/.test(value)) return undefined;
+  let parsed: URL;
+  const rawAuthority = /^https:\/\/([^/?#]+)/i.exec(value)?.[1];
+  // Validate the authority before URL canonicalization: WHATWG URL drops an
+  // explicit default port (e.g. `:443`), but the catalog image contract does
+  // not permit any explicit port or credentials.
+  if (
+    !rawAuthority
+    || rawAuthority.includes(":")
+    || rawAuthority.includes("@")
+    || rawAuthority.includes("%")
+    || /[^\x21-\x7e]/.test(rawAuthority)
+  ) {
+    return undefined;
+  }
+  try {
+    parsed = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (
+    parsed.protocol !== "https:"
+    || parsed.username
+    || parsed.password
+    || parsed.port
+    || parsed.search
+    || parsed.hash
+    || !CRXSOSO_CATALOG_ICON_HOSTS.has(parsed.hostname.toLowerCase())
+    || parsed.pathname === "/"
+  ) {
+    return undefined;
+  }
+  return `https://${parsed.hostname.toLowerCase()}${parsed.pathname}`;
+}
+
 export type ExtensionStoreNamespace = "chrome-web-store";
 export type ExtensionCatalogProviderId = "crxsoso";
 export type ExtensionArtifactProviderId = "chrome-web-store" | "crxsoso";
@@ -160,6 +209,8 @@ export interface ExtensionCatalogItem {
   name: string;
   description?: string;
   category?: string;
+  /** Optional CRX搜搜 thumbnail after strict host/scheme normalization. */
+  iconUrl?: string;
   rating?: number;
   userCount?: number;
 }

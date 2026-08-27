@@ -6,6 +6,7 @@ import {
   classifyExtensionReference,
   extensionCapabilityDescriptors,
   isCanonicalChromeExtensionId,
+  normalizeCrxsosoCatalogIconUrl,
   selectedExtensionArtifactProvider,
   type ExtensionAcquisitionCapabilityId,
   type ExtensionAcquisitionErrorCode,
@@ -570,6 +571,7 @@ function normalizeCatalogItem(raw: Record<string, unknown>, storeId: string): Ex
   const category = optionalBoundedString(raw.category, 256);
   const rating = optionalFiniteNumber(raw.rating, 0, 5);
   const userCount = optionalSafeInteger(raw.userCount, 0);
+  const iconUrl = normalizeCrxsosoCatalogIconUrl(raw.iconUrl);
   return {
     namespace: "chrome-web-store",
     storeId,
@@ -581,6 +583,7 @@ function normalizeCatalogItem(raw: Record<string, unknown>, storeId: string): Ex
     ...(category ? { category } : {}),
     ...(rating !== undefined ? { rating } : {}),
     ...(userCount !== undefined ? { userCount } : {}),
+    ...(iconUrl !== undefined ? { iconUrl } : {}),
   };
 }
 

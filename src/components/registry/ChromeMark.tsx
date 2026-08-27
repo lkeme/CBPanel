@@ -5,7 +5,7 @@
  * before the lazy results chunk loads. Keep this as a generic visual cue; it is
  * not a claim that catalog metadata or mirror transport came from Google.
  */
-export function ChromeMark({ size = 22 }: { size?: number } = {}) {
+export function ChromeMark({ size = 24 }: { size?: number } = {}) {
   return (
     <svg aria-hidden="true" className="chrome-mark" height={size} viewBox="0 0 24 24" width={size}>
       <circle cx="12" cy="12" fill="#4285f4" r="10" />

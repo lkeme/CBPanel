@@ -126,6 +126,31 @@ test("CRX搜搜 schema drift is distinct from a zero-result response", () => {
   );
 });
 
+test("CRX搜搜 catalog projects only reviewed thumbnail hosts", () => {
+  const page = normalizeCrxsosoSearchResponse({
+    code: 200,
+    data: {
+      extensionList: [
+        {
+          crxId: TAMPERMONKEY_ID,
+          name: "Tampermonkey",
+          thumbnail: "https://lhimg.crxsoso.com/thumb-token",
+        },
+        {
+          crxId: UBLOCK_ORIGIN_ID,
+          name: "uBlock Origin",
+          iconUrl: "https://lhimg.crxsoso.com/icon.png?token=must-not-leak",
+        },
+      ],
+      hasMorePages: false,
+    },
+  }, FIXED_NOW);
+
+  assert.equal(page.items[0]?.iconUrl, "https://lhimg.crxsoso.com/thumb-token");
+  assert.equal(page.items[1]?.iconUrl, undefined);
+  assert.equal(JSON.stringify(page).includes("token=must-not-leak"), false);
+});
+
 test("CRX搜搜 business rate limit is mapped without leaking its raw message", () => {
   assert.throws(
     () => normalizeCrxsosoSearchResponse({ code: 429, message: "raw-provider-message" }, FIXED_NOW),

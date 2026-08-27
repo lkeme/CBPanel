@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import {
   chromeWebStoreListingUrl,
   isCanonicalChromeExtensionId,
+  normalizeCrxsosoCatalogIconUrl,
   type ExtensionArtifactOffer,
   type ExtensionCatalogItem,
 } from "../../../src/shared/extensionAcquisition";
@@ -213,10 +214,16 @@ export function normalizeCrxsosoSearchResponse(value: unknown, observedAtValue: 
     );
     const userCount = optionalNonNegativeInteger(item.activeInstallCount, "CRX搜搜 active install count");
     const rating = optionalRating(item.averageRating);
+    // `thumbnail` is the field emitted by the public CRX搜搜 catalog.  Keep
+    // the historical `iconUrl` alias for fixture/compatibility payloads, but
+    // only expose it after the shared strict host/scheme projection.
+    const iconUrl = normalizeCrxsosoCatalogIconUrl(item.thumbnail)
+      ?? normalizeCrxsosoCatalogIconUrl(item.iconUrl);
     if (description !== undefined) normalized.description = description;
     if (category !== undefined) normalized.category = category;
     if (userCount !== undefined) normalized.userCount = userCount;
     if (rating !== undefined) normalized.rating = rating;
+    if (iconUrl !== undefined) normalized.iconUrl = iconUrl;
     items.push(normalized);
   }
 

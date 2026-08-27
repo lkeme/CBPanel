@@ -124,7 +124,7 @@ test("search deduplicates canonical ids and keeps provider continuation opaque",
   const pages: CatalogSearchPage[] = [
     {
       items: [
-        catalogItem(STORE_ID, "First observation"),
+        { ...catalogItem(STORE_ID, "First observation"), iconUrl: "https://lhimg.crxsoso.com/first.webp" },
         catalogItem(STORE_ID, "Duplicate observation"),
         { ...catalogItem(SECOND_STORE_ID, "Alias"), storeId: "youxiaohoubox" } as ExtensionCatalogItem,
         catalogItem(SECOND_STORE_ID, "Second extension"),
@@ -150,6 +150,7 @@ test("search deduplicates canonical ids and keeps provider continuation opaque",
     [STORE_ID, "First observation"],
     [SECOND_STORE_ID, "Second extension"],
   ]);
+  assert.equal(first.items[0]?.iconUrl, "https://lhimg.crxsoso.com/first.webp");
   assert.equal(first.excludedNonCanonicalCount, 3);
   assert.equal(first.hasMore, true);
   assert.match(first.cursor ?? "", /^[A-Za-z0-9_-]{32}$/);

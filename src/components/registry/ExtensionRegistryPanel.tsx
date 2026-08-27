@@ -442,7 +442,7 @@ export function ExtensionRegistryPanel({
   const [libraryQuery, setLibraryQuery] = useState("");
   const [sourceSettingsOpen, setSourceSettingsOpen] = useState(false);
   const [savingCapabilityId, setSavingCapabilityId] = useState<ExtensionArtifactProviderId | undefined>();
-  const [catalogViewMode, setCatalogViewMode] = useState<"list" | "two" | "four">("two");
+  const [catalogViewMode, setCatalogViewMode] = useState<"two" | "four">("two");
   const [catalogDetail, setCatalogDetail] = useState<ExtensionCatalogItem | undefined>();
   const acquisitionWorkspaceRef = useRef<HTMLDivElement>(null);
   const catalogScrollContainerRef = useRef<HTMLElement | null>(null);
@@ -751,17 +751,19 @@ export function ExtensionRegistryPanel({
           <div className="extension-acquisition-workspace" ref={acquisitionWorkspaceRef}>
             <form className="acquisition-search-form" onSubmit={submitDiscovery}>
               <div className="acquisition-search-control">
-                <ChromeMark size={18} />
-                <input
-                  aria-describedby={inputHint ? "extension-acquisition-query-hint" : undefined}
-                  aria-invalid={classification.kind === "invalid" || undefined}
-                  aria-label={t("extension.acquisition.search.label")}
-                  autoComplete="off"
-                  id="extension-acquisition-query"
-                  onChange={(event) => acquisition.setInput(event.target.value)}
-                  placeholder={t("extension.acquisition.search.placeholder")}
-                  value={acquisition.state.input}
-                />
+                <div className="acquisition-search-field">
+                  <ChromeMark size={26} />
+                  <input
+                    aria-describedby={inputHint ? "extension-acquisition-query-hint" : undefined}
+                    aria-invalid={classification.kind === "invalid" || undefined}
+                    aria-label={t("extension.acquisition.search.label")}
+                    autoComplete="off"
+                    id="extension-acquisition-query"
+                    onChange={(event) => acquisition.setInput(event.target.value)}
+                    placeholder={t("extension.acquisition.search.placeholder")}
+                    value={acquisition.state.input}
+                  />
+                </div>
                 <button
                   className="command primary"
                   disabled={

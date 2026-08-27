@@ -5,8 +5,6 @@ import {
   Download,
   ExternalLink,
   Grid2X2,
-  List,
-  PackageSearch,
   RefreshCw,
   SearchX,
   Settings2,
@@ -14,7 +12,7 @@ import {
   Star,
   Users,
 } from "lucide-react";
-import { useId, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 
 import type { Locale } from "../../i18n";
 import type {
@@ -84,7 +82,7 @@ export function ExtensionCatalogResults({
   detailProviderId,
   detailFooter,
   onRetry,
-  viewMode = "list",
+  viewMode = "two",
   onViewModeChange,
   page,
   selectedStoreId,
@@ -104,8 +102,8 @@ export function ExtensionCatalogResults({
   detailProviderId?: ExtensionArtifactProviderId;
   detailFooter?: ReactNode;
   onRetry: () => void;
-  viewMode?: "list" | "two" | "four";
-  onViewModeChange?: (mode: "list" | "two" | "four") => void;
+  viewMode?: "two" | "four";
+  onViewModeChange?: (mode: "two" | "four") => void;
   page?: ExtensionCatalogSearchPage;
   selectedStoreId?: string;
   status: ExtensionDiscoveryStatus;
@@ -173,22 +171,12 @@ export function ExtensionCatalogResults({
     <section aria-labelledby={headingId} className="acquisition-results">
       <header className="acquisition-section-header">
         <div>
-          <h3 id={headingId}>{t("extension.acquisition.results.title")}</h3>
-          <p aria-live="polite">
-            {t("extension.acquisition.results.summary", { count: page.items.length, query: page.query })}
-          </p>
+          <h3 id={headingId} aria-live="polite">
+            {t("extension.acquisition.results.summary", { query: page.query })}
+          </h3>
         </div>
         {onViewModeChange && (
           <div className="acquisition-view-switch" role="group" aria-label={t("extension.acquisition.results.viewLabel")}>
-            <button
-              aria-label={t("extension.acquisition.results.viewList")}
-              aria-pressed={viewMode === "list"}
-              className="icon-button compact"
-              onClick={() => onViewModeChange("list")}
-              type="button"
-            >
-              <List aria-hidden="true" size={16} />
-            </button>
             <button
               aria-label={t("extension.acquisition.results.viewTwo")}
               aria-pressed={viewMode === "two"}
@@ -258,6 +246,7 @@ export function ExtensionCatalogResults({
               locale={locale}
               onChoose={onChoose}
               onOpenDetail={onOpenDetail}
+              viewMode={viewMode}
               selected={item.storeId === selectedStoreId}
               t={t}
             />
@@ -279,6 +268,13 @@ export function ExtensionCatalogResults({
           {t("extension.acquisition.loadMore")}
         </button>
       )}
+      {status === "ready" && !page.hasMore && page.items.length > 0 && (
+        <div aria-live="polite" className="acquisition-results-end" role="status">
+          <span aria-hidden="true" />
+          <span>{t("extension.acquisition.results.end")}</span>
+          <span aria-hidden="true" />
+        </div>
+      )}
     </section>
   );
 }
@@ -288,6 +284,7 @@ function CatalogResultCard({
   locale,
   onChoose,
   onOpenDetail,
+  viewMode,
   selected,
   t,
 }: {
@@ -295,11 +292,15 @@ function CatalogResultCard({
   locale: Locale;
   onChoose: (item: ExtensionCatalogItem) => void;
   onOpenDetail?: (item: ExtensionCatalogItem) => void;
+  viewMode: "two" | "four";
   selected: boolean;
   t: ExtensionAcquisitionUiTranslator;
 }) {
   const titleId = useId();
+  const [iconFailed, setIconFailed] = useState(false);
   const details = [item.category, t("extension.acquisition.results.crxsosoProvider")].filter(Boolean);
+  const activate = () => (onOpenDetail ? onOpenDetail(item) : onChoose(item));
+  const glyph = extensionGlyph(item);
 
   return (
     <article
@@ -307,29 +308,49 @@ function CatalogResultCard({
       className={`acquisition-result-card ${selected ? "selected" : ""}`.trim()}
       role="listitem"
     >
-      <span className="acquisition-result-icon" aria-hidden="true"><PackageSearch size={22} /></span>
-      <div className="acquisition-result-copy">
-        <div className="acquisition-result-heading">
-          <h4 id={titleId}>{item.name}</h4>
-          {selected && <StatusPill tone="running">{t("extension.acquisition.channel.selected")}</StatusPill>}
+      <button
+        aria-labelledby={titleId}
+        className="acquisition-result-card-surface"
+        onClick={activate}
+        type="button"
+      >
+        <span className={`acquisition-result-icon acquisition-result-glyph glyph-${glyph.tone}`} aria-hidden="true">
+          {item.iconUrl && !iconFailed ? (
+            <img alt="" loading="lazy" onError={() => setIconFailed(true)} referrerPolicy="no-referrer" src={item.iconUrl} />
+          ) : <span>{glyph.label}</span>}
+        </span>
+        <div className="acquisition-result-copy">
+          <div className="acquisition-result-heading">
+            <span className="acquisition-result-title" id={titleId}>{item.name}</span>
+            {selected && <StatusPill tone="running">{t("extension.acquisition.channel.selected")}</StatusPill>}
+            {viewMode === "two" && <span className="acquisition-result-arrow" aria-hidden="true">›</span>}
+          </div>
+          {details.length > 0 && (
+            <div className="acquisition-result-badges">
+              {item.category && <span className="acquisition-result-badge category">{item.category}</span>}
+              <span className="acquisition-result-badge provider">{t("extension.acquisition.results.crxsosoProvider")}</span>
+            </div>
+          )}
+          {item.description && <p>{item.description}</p>}
+          {(item.rating !== undefined || item.userCount !== undefined) && (
+            <div className="acquisition-result-metrics">
+              {item.rating !== undefined && <span className="acquisition-result-metric rating"><Star aria-hidden="true" size={13} /> {item.rating.toFixed(1)}</span>}
+              {item.userCount !== undefined && <span className="acquisition-result-metric users"><Users aria-hidden="true" size={13} /> {formatUserCount(item.userCount, locale)}</span>}
+            </div>
+          )}
         </div>
-        {item.description && <p>{item.description}</p>}
-        <span className="mono-cell acquisition-result-store-id">{item.storeId}</span>
-        {details.length > 0 && <small>{details.join(" · ")}</small>}
-        {(item.rating !== undefined || item.userCount !== undefined) && (
-          <small className="acquisition-result-metrics">
-            {item.rating !== undefined && <span><Star aria-hidden="true" size={13} /> {item.rating.toFixed(1)}</span>}
-            {item.userCount !== undefined && <span><Users aria-hidden="true" size={13} /> {formatUserCount(item.userCount, locale)}</span>}
-          </small>
-        )}
-      </div>
-      <div className="acquisition-result-actions">
-        <button className="command primary" onClick={() => (onOpenDetail ? onOpenDetail(item) : onChoose(item))} type="button">
-          {onOpenDetail ? t("extension.acquisition.results.details") : t("extension.acquisition.results.choose")}
-        </button>
-      </div>
+      </button>
     </article>
   );
+}
+
+function extensionGlyph(item: ExtensionCatalogItem): { label: string; tone: number } {
+  const words = item.name.trim().split(/\s+/).filter(Boolean);
+  const label = (words.length > 1 ? `${words[0]?.[0] ?? ""}${words[1]?.[0] ?? ""}` : item.name.slice(0, 2))
+    .toUpperCase() || "EX";
+  let hash = 0;
+  for (const char of item.storeId) hash = (hash * 31 + char.charCodeAt(0)) | 0;
+  return { label, tone: Math.abs(hash) % 6 };
 }
 
 /**
@@ -355,6 +376,8 @@ export function ExtensionCatalogDetail({
   t: ExtensionAcquisitionUiTranslator;
 }) {
   const headingId = useId();
+  const [iconFailed, setIconFailed] = useState(false);
+  const glyph = extensionGlyph(item);
   return (
     <section aria-labelledby={headingId} className="acquisition-result-detail">
       <header className="acquisition-detail-header">
@@ -364,7 +387,11 @@ export function ExtensionCatalogDetail({
         <span className="acquisition-detail-breadcrumb">{t("extension.acquisition.results.title")}</span>
       </header>
       <div className="acquisition-detail-hero">
-        <span className="acquisition-result-icon" aria-hidden="true"><PackageSearch size={42} /></span>
+        <span className={`acquisition-result-icon acquisition-result-glyph glyph-${glyph.tone}`} aria-hidden="true">
+          {item.iconUrl && !iconFailed ? (
+            <img alt="" loading="lazy" onError={() => setIconFailed(true)} referrerPolicy="no-referrer" src={item.iconUrl} />
+          ) : <span>{glyph.label}</span>}
+        </span>
         <div>
           <h3 id={headingId}>{item.name}</h3>
           <p>{item.description || t("extension.acquisition.results.noDescription")}</p>

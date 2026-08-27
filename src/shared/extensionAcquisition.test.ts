@@ -5,6 +5,7 @@ import {
   classifyExtensionReference,
   extensionCapabilityDescriptors,
   isCanonicalChromeExtensionId,
+  normalizeCrxsosoCatalogIconUrl,
   normalizeExtensionProvenance,
   normalizeExtensionStoreIdentity,
   normalizeExtensionUpdateProviderId,
@@ -107,6 +108,25 @@ test("selected artifact provider accepts only canonical runtime settings and fai
   assert.equal(selectedExtensionArtifactProvider({ artifactProviderId: "chrome-web-store" }), "chrome-web-store");
   assert.equal(selectedExtensionArtifactProvider({ artifactProviderId: "crxsoso" }), "crxsoso");
   assert.equal(selectedExtensionArtifactProvider({ artifactProviderId: "invalid" as never }), "crxsoso");
+});
+
+test("CRX搜搜 catalog icon projection is strict and token-free", () => {
+  assert.equal(
+    normalizeCrxsosoCatalogIconUrl("https://lhimg.crxsoso.com/assets/thumb.webp"),
+    "https://lhimg.crxsoso.com/assets/thumb.webp",
+  );
+  for (const value of [
+    "https://provider.invalid/icon.png",
+    "http://lhimg.crxsoso.com/icon.png",
+    "https://lhimg.crxsoso.com/icon.png?token=secret",
+    "https://lhimg.crxsoso.com/icon.png#fragment",
+    "https://lhimg.crxsoso.com:443/icon.png",
+    "https://lhimg.crxsoso.com.evil.example/icon.png",
+    "https://user:pass@lhimg.crxsoso.com/icon.png",
+    "https://lhimg.crxsoso.com/",
+  ]) {
+    assert.equal(normalizeCrxsosoCatalogIconUrl(value), undefined, value);
+  }
 });
 
 test("strict acquisition projections normalize valid server-derived facts", () => {

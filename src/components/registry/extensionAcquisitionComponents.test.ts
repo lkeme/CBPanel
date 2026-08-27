@@ -109,10 +109,15 @@ test("acquisition modal CSS outranks the generic layer and remains inside short 
     styles,
     /\.modal-layer\.acquisition-modal-layer\s*\{[^}]*padding:\s*min\(24px,\s*4dvh\)\s+min\(24px,\s*4dvw\)/s,
   );
+  assert.match(styles, /\.acquisition-search-field\s*\{[^}]*border:\s*1px solid/s);
+  assert.match(styles, /\.acquisition-search-control input\s*\{[^}]*border:\s*0;[^}]*border-radius:\s*0/s);
   assert.match(
     styles,
     /@media \(max-width:\s*1024px\)\s*\{[\s\S]*?\.acquisition-result-list\.view-four\s*\{[^}]*grid-template-columns:\s*repeat\(2,/,
   );
+  const genericFocus = styles.indexOf("input:focus,");
+  const compositeFocus = styles.indexOf(".acquisition-search-field input:focus,");
+  assert.ok(genericFocus >= 0 && compositeFocus > genericFocus, "composite search focus reset must win the generic input focus rule");
 });
 
 test("Get extensions owns the single local-import entry and keeps the redundant search label nonvisual", () => {
@@ -214,7 +219,7 @@ test("acquisition dialogs trap Tab, honor Escape locking, and restore only conne
   assert.equal(closed, 1);
 });
 
-test("catalog rendering announces omitted aliases and routes the single card action to details", () => {
+test("catalog rendering announces omitted aliases and exposes whole-card detail activation", () => {
   const html = renderToStaticMarkup(React.createElement(ExtensionCatalogResults, {
     locale: "en-US",
     onCancel: () => undefined,
@@ -241,7 +246,13 @@ test("catalog rendering announces omitted aliases and routes the single card act
   }));
 
   assert.ok(html.includes("extension.acquisition.aliasesExcluded:count=2"));
-  assert.ok(html.includes("extension.acquisition.results.details"));
+  assert.ok(html.includes("acquisition-result-card-surface"));
+  assert.ok(html.includes("acquisition-result-arrow"));
+  assert.ok(html.includes("extension.acquisition.results.summary:query=userscript"));
+  assert.ok(!html.includes("Remote results"));
+  assert.ok(!html.includes("count=1"));
+  assert.ok(!html.includes("extension.acquisition.results.viewList"));
+  assert.ok(!html.includes("extension.acquisition.results.details"));
   assert.ok(!html.includes("extension.acquisition.openWebStore"));
   assert.ok(html.includes("extension.acquisition.loadMore"));
   assert.match(html, /role="status"/);
@@ -259,6 +270,7 @@ test("catalog supports four-column cards with Chrome marks and a detail child vi
     category: "Productivity",
     rating: 4.8,
     userCount: 1_200_000,
+    iconUrl: "https://lhimg.crxsoso.com/icon/example.png",
   };
   const grid = renderToStaticMarkup(React.createElement(ExtensionCatalogResults, {
     locale: "en-US",
@@ -276,10 +288,12 @@ test("catalog supports four-column cards with Chrome marks and a detail child vi
   }));
 
   assert.ok(grid.includes("acquisition-result-list view-four"));
-  assert.ok(grid.includes("lucide-package-search"));
-  assert.ok(grid.includes("extension.acquisition.results.details"));
-  assert.equal((grid.match(/extension\.acquisition\.results\.details/g) ?? []).length, 1);
+  assert.ok(grid.includes("acquisition-result-glyph"));
+  assert.ok(grid.includes("loading=\"lazy\""));
+  assert.ok(grid.includes("lhimg.crxsoso.com/icon/example.png"));
+  assert.ok(!grid.includes("extension.acquisition.results.details"));
   assert.ok(!grid.includes("extension.acquisition.openWebStore"));
+  assert.ok(grid.includes("extension.acquisition.results.end"));
   assert.match(grid, /aria-label="extension\.acquisition\.results\.viewFour"[^>]*aria-pressed="true"/);
   assert.ok(!grid.includes(item.observedAt));
 

@@ -126,28 +126,68 @@
 
 .acquisition-search-control {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
-  min-height: 46px;
-  padding: 4px 4px 4px 12px;
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
+  min-height: 48px;
+  padding: 0;
+  background: transparent;
+  border: 0;
 }
 
 .acquisition-search-control:focus-within {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.acquisition-search-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0;
+  align-items: center;
+  min-width: 0;
+  min-height: 48px;
+  overflow: hidden;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+}
+
+.acquisition-search-field > .chrome-mark {
+  display: block;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  margin: 0;
+  margin-inline: 11px 8px;
 }
 
 .acquisition-search-control input {
   min-width: 0;
-  min-height: 38px;
-  padding: 0;
+  min-height: 48px;
+  padding: 0 14px 0 0;
   background: transparent;
   border: 0;
+  border-radius: 0;
   outline: 0;
+  box-shadow: none;
+}
+
+.acquisition-search-control input:focus {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.acquisition-search-field:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.acquisition-search-control > .command {
+  min-height: 48px;
+  padding-inline: 18px;
+  border-radius: var(--radius-control);
+  box-shadow: 0 6px 14px color-mix(in srgb, var(--primary) 22%, transparent);
 }
 
 .acquisition-input-hint,
@@ -168,7 +208,6 @@
   justify-content: space-between;
 }
 
-.acquisition-result-actions,
 .acquisition-section-actions,
 .acquisition-success-actions,
 .acquisition-confirmation-actions,
@@ -242,7 +281,7 @@
 }
 
 .acquisition-result-list {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .acquisition-result-list.view-two {
@@ -269,21 +308,81 @@
   transition: border-color 160ms ease, background-color 160ms ease;
 }
 
+/* Marketplace cards borrow CRX搜搜's visual rhythm: a cool tinted surface,
+   bright border accent and compact metadata chips make each result scannable
+   without relying on a separate action button. */
+.acquisition-result-card {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  min-height: 154px;
+  padding: 18px;
+  background:
+    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 46%),
+    linear-gradient(145deg, color-mix(in srgb, var(--primary-soft) 78%, var(--surface)) 0%, var(--surface) 78%);
+  border-color: color-mix(in srgb, var(--primary) 24%, var(--border));
+  box-shadow: var(--shadow-card);
+  transition: transform var(--motion-standard) var(--motion-ease),
+    border-color var(--motion-standard) var(--motion-ease),
+    box-shadow var(--motion-standard) var(--motion-ease);
+}
+
+.acquisition-result-card:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--primary) 58%, var(--border));
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--primary) 12%, transparent);
+}
+
+.acquisition-result-card:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+
+.acquisition-result-card-surface {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  grid-column: 1 / -1;
+  gap: 14px;
+  width: 100%;
+  height: 100%;
+  align-self: stretch;
+  min-width: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  appearance: none;
+  cursor: pointer;
+}
+
+.acquisition-result-card-surface:focus-visible {
+  outline: 3px solid var(--primary);
+  outline-offset: 4px;
+  border-radius: var(--radius-control);
+}
+
 .acquisition-result-list.view-four .acquisition-result-card {
   grid-template-columns: 1fr;
   align-items: start;
-  min-height: 260px;
-  padding: 12px;
+  min-height: 278px;
+  padding: 14px;
+}
+
+.acquisition-result-list.view-four .acquisition-result-card-surface {
+  grid-template-columns: 1fr;
 }
 
 .acquisition-result-list.view-four .acquisition-result-icon {
   width: 100%;
-  height: 86px;
-  border-radius: var(--radius-control);
+  height: 112px;
+  border-radius: 14px;
 }
 
-.acquisition-result-list.view-four .acquisition-result-actions {
-  align-self: end;
+.acquisition-result-list.view-four .acquisition-result-arrow {
+  display: none;
 }
 
 .acquisition-result-list.view-two .acquisition-result-card {
@@ -291,28 +390,10 @@
   align-items: start;
 }
 
-.acquisition-result-list.view-two .acquisition-result-actions {
-  align-self: center;
-}
-
-.acquisition-result-list.view-two .acquisition-result-store-id,
-.acquisition-result-list.view-four .acquisition-result-store-id {
-  display: none;
-}
-
-.acquisition-result-store-id {
-  overflow-wrap: anywhere;
-}
-
-.acquisition-result-list.view-four .acquisition-result-actions,
-.acquisition-result-list.view-four .acquisition-result-actions .command {
-  width: 100%;
-}
-
 .acquisition-result-metrics {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 6px;
   align-items: center;
   color: var(--foreground-muted);
 }
@@ -322,6 +403,50 @@
   display: inline-flex;
   gap: 4px;
   align-items: center;
+}
+
+.acquisition-result-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 1px;
+}
+
+.acquisition-result-badge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 3px 8px;
+  overflow: hidden;
+  color: var(--foreground-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--surface) 72%, var(--primary-soft));
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.acquisition-result-badge.provider {
+  color: color-mix(in srgb, var(--info) 72%, var(--foreground));
+  background: color-mix(in srgb, var(--info-soft) 82%, var(--surface));
+}
+
+.acquisition-result-badge.category {
+  color: color-mix(in srgb, var(--accent) 72%, var(--foreground));
+  background: color-mix(in srgb, var(--accent-soft) 82%, var(--surface));
+}
+
+.acquisition-result-metrics span {
+  padding: 3px 8px;
+  color: color-mix(in srgb, var(--foreground) 76%, var(--warning));
+  background: color-mix(in srgb, var(--warning-soft) 80%, var(--surface));
+  border-radius: 999px;
+}
+
+.acquisition-result-metrics span + span {
+  color: color-mix(in srgb, var(--info) 75%, var(--foreground));
+  background: color-mix(in srgb, var(--info-soft) 82%, var(--surface));
 }
 
 .acquisition-view-switch {
@@ -497,10 +622,44 @@
   place-items: center;
   width: 38px;
   height: 38px;
-  color: var(--primary);
-  background: var(--primary-soft);
-  border-radius: 10px;
+  color: #fff;
+  background: linear-gradient(145deg, #4f7cff, #7657ed 76%);
+  border-radius: 12px;
+  box-shadow: 0 7px 16px rgba(72, 93, 202, 0.22);
 }
+
+.acquisition-result-icon {
+  width: 54px;
+  height: 54px;
+  font-size: 22px;
+}
+
+.acquisition-result-glyph {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: #fff;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.acquisition-result-glyph img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: inherit;
+  background: var(--surface);
+}
+
+.acquisition-result-glyph.glyph-0 { background: linear-gradient(145deg, #2563eb, #60a5fa); }
+.acquisition-result-glyph.glyph-1 { background: linear-gradient(145deg, #0d9488, #14b8a6); }
+.acquisition-result-glyph.glyph-2 { background: linear-gradient(145deg, #ea580c, #f59e0b); }
+.acquisition-result-glyph.glyph-3 { background: linear-gradient(145deg, #db2777, #f472b6); }
+.acquisition-result-glyph.glyph-4 { background: linear-gradient(145deg, #15803d, #22c55e); }
+.acquisition-result-glyph.glyph-5 { background: linear-gradient(145deg, #7c3aed, #a78bfa); }
 
 .acquisition-result-copy,
 .acquisition-source-copy,
@@ -523,10 +682,62 @@
   align-items: center;
 }
 
-.acquisition-result-heading h4,
 .acquisition-source-heading h4 {
   margin: 0;
-  font-size: 14px;
+  color: var(--foreground);
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.acquisition-result-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 17px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.acquisition-result-copy p {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.acquisition-result-heading {
+  min-width: 0;
+  justify-content: space-between;
+}
+
+.acquisition-result-arrow {
+  flex: 0 0 auto;
+  margin-left: 8px;
+  color: var(--primary-strong);
+  font-size: 27px;
+  font-weight: 500;
+  line-height: 1;
+  opacity: 0.85;
+}
+
+.acquisition-results-end {
+  display: grid;
+  grid-template-columns: minmax(24px, 1fr) auto minmax(24px, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin: 4px 0 0;
+  color: var(--foreground-soft);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.acquisition-results-end > span:first-child,
+.acquisition-results-end > span:last-child {
+  height: 1px;
+  background: var(--border);
 }
 
 .acquisition-source-toggle {
@@ -774,7 +985,6 @@
     grid-template-columns: auto 38px minmax(0, 1fr) auto;
   }
 
-  .acquisition-result-actions,
   .acquisition-source-toggle {
     grid-column: 1 / -1;
     justify-content: flex-start;
@@ -788,12 +998,13 @@
   }
 
   .acquisition-search-control {
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .acquisition-search-control .command {
     grid-column: 1 / -1;
     width: 100%;
+    margin-left: 0;
     min-height: 44px;
   }
 
@@ -801,12 +1012,26 @@
     min-height: 0;
   }
 
+  .acquisition-result-list.view-four .acquisition-result-card-surface {
+    grid-template-columns: 1fr;
+  }
+
+  .acquisition-result-list.view-four .acquisition-result-icon {
+    height: 96px;
+  }
+
   .acquisition-result-list.view-two .acquisition-result-card {
     grid-template-columns: 38px minmax(0, 1fr);
   }
 
-  .acquisition-result-list.view-two .acquisition-result-actions {
-    grid-column: 1 / -1;
+  .acquisition-result-card-surface {
+    grid-template-columns: 44px minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .acquisition-result-list.view-two .acquisition-result-icon {
+    width: 44px;
+    height: 44px;
   }
 
   .acquisition-detail-hero {
@@ -3684,6 +3909,18 @@ textarea:focus,
 button:focus-visible {
   border-color: var(--primary);
   box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+/* The shared form rule above intentionally styles ordinary inputs, but this
+   composite search field owns the only visible border. Keep the inner input
+   borderless even when the generic `input:focus` rule is declared later in the
+   cascade. */
+.acquisition-search-field input:focus,
+.acquisition-search-field input:focus-visible {
+  border: 0;
+  border-color: transparent;
+  box-shadow: none;
+  outline: 0;
 }
 
 .command.primary {
