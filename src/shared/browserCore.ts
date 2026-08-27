@@ -161,6 +161,8 @@ export interface CloakBrowserDiagnosticsLaunch {
   missingLibs?: string[];
 }
 
+export type CloakBrowserDiagnosticsSessionState = "ok" | "unreachable" | "denied" | "unknown";
+
 export interface CloakBrowserDiagnosticsLicense {
   tier?: string;
   valid?: boolean;
@@ -168,6 +170,9 @@ export interface CloakBrowserDiagnosticsLicense {
   error?: string;
   sessions?: {
     active?: number | null;
+    limit?: number | null;
+    state?: CloakBrowserDiagnosticsSessionState;
+    reason?: string | null;
   };
 }
 

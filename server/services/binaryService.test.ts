@@ -651,6 +651,9 @@ test("BinaryService reads wrapper diagnostics through the upstream CLI with mana
           valid: true,
           sessions: {
             active: 2,
+            limit: 5,
+            state: "ok",
+            reason: null,
           },
         },
         geoip: {
@@ -688,6 +691,9 @@ test("BinaryService reads wrapper diagnostics through the upstream CLI with mana
     assert.equal(result.binary?.version, "147.0.7700.1");
     assert.equal(result.license?.tier, "team");
     assert.equal(result.license?.sessions?.active, 2);
+    assert.equal(result.license?.sessions?.limit, 5);
+    assert.equal(result.license?.sessions?.state, "ok");
+    assert.equal(result.license?.sessions?.reason, null);
     assert.equal(result.geoip?.dbPresent, true);
     assert.equal(result.modules?.["mmdb-lib"], false);
   } finally {

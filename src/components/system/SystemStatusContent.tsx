@@ -354,8 +354,14 @@ function formatWrapperLicense(
     ? license.tier ? `${license.tier} (${license.error})` : license.error
     : license.tier ?? "-";
   if (!license.sessions) return status;
-  const active = license.sessions.active;
-  return `${status} / ${t("system.sessions")}: ${active === null || active === undefined ? t("settings.notApplicable") : active}`;
+  const sessions = license.sessions;
+  const unavailable = sessions.state && sessions.state !== "ok";
+  const active = unavailable || sessions.active === null || sessions.active === undefined
+    ? t("settings.notApplicable")
+    : typeof sessions.limit === "number"
+      ? `${sessions.active}/${sessions.limit}`
+      : String(sessions.active);
+  return `${status} / ${t("system.sessions")}: ${active}`;
 }
 
 function formatWrapperGeoIp(

@@ -12,6 +12,7 @@ import {
   type CloakBrowserDiagnostics,
   type CloakBrowserDiagnosticsGeoIpResolved,
   type CloakBrowserDiagnosticsLicense,
+  type CloakBrowserDiagnosticsSessionState,
   type BrowserCoreEnvRuntimeValue,
   type BrowserCoreImportAnalysis,
   type BrowserCoreImportedBuild,
@@ -2032,7 +2033,15 @@ function diagnosticsLicenseSessions(value: unknown): CloakBrowserDiagnosticsLice
   const sessions = objectValue(value);
   if (!sessions) return undefined;
   const active = nullableNumberValue(sessions.active);
-  return active === undefined ? undefined : { active };
+  const limit = nullableNumberValue(sessions.limit);
+  const state = diagnosticsSessionState(sessions.state);
+  const reason = sessions.reason === null ? null : stringValue(sessions.reason);
+  if (active === undefined && limit === undefined && state === undefined && reason === undefined) return undefined;
+  return { active, limit, state, reason };
+}
+
+function diagnosticsSessionState(value: unknown): CloakBrowserDiagnosticsSessionState | undefined {
+  return value === "ok" || value === "unreachable" || value === "denied" || value === "unknown" ? value : undefined;
 }
 
 // Upstream writes this key only when the caller passed a proxy, and writes `exit_ip` in snake case like

@@ -4,7 +4,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { translate, type TranslationKey } from "../../i18n";
-import type { CloakBrowserDiagnosticsGeoIpResolved } from "../../shared/browserCore";
+import type { CloakBrowserDiagnosticsGeoIpResolved, CloakBrowserDiagnosticsLicense } from "../../shared/browserCore";
 import type { ProxyEntity, SystemDiagnostics } from "../../shared/entities";
 import type { StorageInfo } from "../../shared/settings";
 import { TooltipProvider } from "../ui/tooltip";
@@ -63,6 +63,12 @@ test("a payload of nulls still renders the block, with dashes", () => {
   assert.ok(hasRow(html, t("system.exitIp")));
   assert.ok(hasRow(html, t("system.timezone")));
   assert.ok(hasRow(html, t("system.locale")));
+});
+
+test("wrapper seat diagnostics preserve a bounded count and limit", () => {
+  const html = renderPanel(undefined, [proxy()], undefined, { tier: "team", sessions: { active: 2, limit: 5, state: "ok" } });
+
+  assert.ok(html.includes("2/5"));
 });
 
 // An empty library leaves the picker with nothing to pick, so the action must not look available.
@@ -128,6 +134,7 @@ function renderPanel(
   resolved: CloakBrowserDiagnosticsGeoIpResolved | undefined,
   proxies: ProxyEntity[] = [proxy()],
   storage?: StorageInfo,
+  license?: CloakBrowserDiagnosticsLicense,
 ): string {
   return renderToStaticMarkup(
     React.createElement(
@@ -137,7 +144,7 @@ function renderPanel(
         binaryInfo: null,
         busy: "",
         copyDiagnostics: async () => {},
-        diagnostics: diagnostics(resolved),
+        diagnostics: diagnostics(resolved, license),
         exportDiagnostics: () => {},
         proxies,
         pruneBrowserData: async () => {},
@@ -152,7 +159,7 @@ function renderPanel(
   );
 }
 
-function diagnostics(resolved: CloakBrowserDiagnosticsGeoIpResolved | undefined): SystemDiagnostics {
+function diagnostics(resolved: CloakBrowserDiagnosticsGeoIpResolved | undefined, license?: CloakBrowserDiagnosticsLicense): SystemDiagnostics {
   const base: SystemDiagnostics = {
     checkedAt: "2026-08-06T00:00:00.000Z",
     schemaVersion: 3,
@@ -166,6 +173,7 @@ function diagnostics(resolved: CloakBrowserDiagnosticsGeoIpResolved | undefined)
     browserCoreDiagnostics: {
       checkedAt: "2026-08-06T00:00:00.000Z",
       available: true,
+      license,
       geoip: { dbPresent: false, path: "D:/data/cloakbrowser-cache/geoip/GeoLite2-City.mmdb", resolved },
     },
     recentErrors: [],
