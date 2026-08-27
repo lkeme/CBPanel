@@ -109,6 +109,32 @@ test("environment package export includes dependency closure and materializes pr
   assert.equal(JSON.stringify(importedExtension).includes(directory), false);
   importedRepository.close();
 
+  await fs.rm(extensionDir, { recursive: true, force: true });
+  const artifactOnlyPath = path.join(directory, "artifact-only.cbpe");
+  await service.exportToPackage({ outputPath: artifactOnlyPath });
+  const artifactOnlyEntries = unzipSync(await fs.readFile(artifactOnlyPath));
+  assert.equal(Boolean(artifactOnlyEntries[`extensions/${extension.id}/manifest.json`]), false);
+  assert.ok(artifactOnlyEntries[`extension-artifacts/${extension.id}/current.crx`]);
+  const artifactOnlyDirectory = await makeTempDir();
+  const artifactOnlyRepository = new SqlitePanelRepository({ dataDir: artifactOnlyDirectory, seed: () => [] });
+  const artifactOnlyService = makeService(artifactOnlyDirectory, artifactOnlyRepository, new Set(), verifier.verifyFile);
+  const artifactOnlyImported = await artifactOnlyService.importFromPackage({ inputPath: artifactOnlyPath });
+  const artifactOnlyExtensionId = artifactOnlyImported.idMap?.extensions[extension.id];
+  assert.ok(artifactOnlyExtensionId);
+  const artifactOnlyExtension = await artifactOnlyRepository.getExtension(artifactOnlyExtensionId);
+  assert.equal(artifactOnlyExtension?.installState, "local-missing");
+  assert.equal(artifactOnlyExtension?.localPath, undefined);
+  const localReinstall = new ExtensionService({
+    repository: artifactOnlyRepository,
+    extensionCacheDir: path.join(artifactOnlyDirectory, "extensions"),
+    extensionArtifactDir: path.join(artifactOnlyDirectory, "extension-artifacts"),
+    extensionAcquisitionDir: path.join(artifactOnlyDirectory, "extension-acquisitions"),
+    verifyStoreCrxFileForTesting: verifier.verifyFile,
+  });
+  await localReinstall.initialize();
+  assert.equal((await localReinstall.reinstall(artifactOnlyExtensionId)).installState, "installed");
+  artifactOnlyRepository.close();
+
   repository.close();
 });
 

@@ -19,7 +19,10 @@ import type { ExtensionAcquisitionSettings } from "../../shared/settings";
 import type { ExtensionUpdateProviderTransitionState } from "../../hooks/extensionAcquisitionState";
 import { CopyButton } from "../ui/CopyButton";
 import { riskReasonText } from "./entityDisplay";
-import { formatAcquisitionDateTime } from "./extensionAcquisitionUi";
+import {
+  formatAcquisitionDateTime,
+  formatExtensionAcquisitionError,
+} from "./extensionAcquisitionUi";
 
 type Translate = (key: TranslationKey, params?: Record<string, string | number>) => string;
 
@@ -150,18 +153,21 @@ export function ExtensionRowDetail({
   const hasEnabledUpdateProviderAlternative = updateProviderOptions.some((option) => (
     option.id !== displayedUpdateProvider && option.enabled
   ));
-  const updateProviderFailure = updateProviderTransitionApplies && updateProviderTransition.status === "error"
-    ? updateProviderTransition.error?.message
+  const updateProviderFailure = updateProviderTransitionApplies
+    && updateProviderTransition.status === "error"
+    && updateProviderTransition.error
+    ? formatExtensionAcquisitionError(updateProviderTransition.error, t)
     : undefined;
   const updateProviderRefreshFailure = updateProviderTransitionApplies
-    ? updateProviderTransition.refreshError?.message
+    && updateProviderTransition.refreshError
+    ? formatExtensionAcquisitionError(updateProviderTransition.refreshError, t)
     : undefined;
   const updateProviderFeedback = updateProviderSaving
     ? t("extension.detail.updateProvider.saving")
     : updateProviderFailure
-      ? t("extension.detail.updateProvider.failed", { message: updateProviderFailure })
+      ? t("extension.detail.updateProvider.failed", { message: updateProviderFailure.primary })
       : updateProviderRefreshFailure
-        ? t("extension.detail.updateProvider.savedRefreshFailed", { message: updateProviderRefreshFailure })
+        ? t("extension.detail.updateProvider.savedRefreshFailed", { message: updateProviderRefreshFailure.primary })
         : updateProviderTransitionApplies && updateProviderTransition.status === "success" && displayedUpdateProvider
           ? t("extension.detail.updateProvider.saved", {
               provider: extensionProviderLabel(displayedUpdateProvider, t),
@@ -169,6 +175,7 @@ export function ExtensionRowDetail({
           : hasEnabledUpdateProviderAlternative
             ? t("extension.detail.updateProvider.help")
             : t("extension.detail.updateProvider.noAlternative");
+  const updateProviderFeedbackDetail = updateProviderFailure?.detail ?? updateProviderRefreshFailure?.detail;
   const updateProviderFeedbackIsError = Boolean(updateProviderFailure || updateProviderRefreshFailure);
   const lifecycleUnprotected = extension.sourceKind === "local-directory"
     && extension.directoryMode !== "copy"
@@ -430,6 +437,7 @@ export function ExtensionRowDetail({
                   role={updateProviderFeedbackIsError ? "alert" : "status"}
                 >
                   {updateProviderFeedback}
+                  {updateProviderFeedbackDetail ? ` — ${updateProviderFeedbackDetail}` : ""}
                 </small>
               </dd>
             </div>

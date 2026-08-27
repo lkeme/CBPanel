@@ -200,6 +200,36 @@
   overflow-wrap: anywhere;
 }
 
+.acquisition-error-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.acquisition-error-copy small {
+  color: currentColor;
+  font-size: 12px;
+  line-height: 1.45;
+  opacity: 0.82;
+}
+
+.diagnostic-note.acquisition-refresh-warning {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  width: min(680px, 100%);
+  padding: 12px;
+  color: var(--warning-foreground, var(--foreground));
+  background: var(--warning-soft, var(--surface-muted));
+  border: 1px solid color-mix(in srgb, var(--warning, #d97706) 42%, var(--border));
+  border-radius: var(--radius-control);
+  text-align: left;
+}
+
+.diagnostic-note.acquisition-refresh-warning > svg {
+  color: var(--warning, #d97706);
+}
+
 .acquisition-result-list,
 .acquisition-source-list,
 .acquisition-channel-list,
@@ -519,6 +549,11 @@
 
   .acquisition-progress-steps {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .diagnostic-note.acquisition-refresh-warning > .command {
+    grid-column: 1 / -1;
+    justify-self: start;
   }
 
   .acquisition-permission-groups,

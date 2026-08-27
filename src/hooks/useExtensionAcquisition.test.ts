@@ -333,6 +333,8 @@ test("session polling reaches preflight and duplicate confirmation refreshes glo
 
 test("a post-confirm state refresh failure preserves acquisition success as a separate outcome", async () => {
   const result = { session: session("consumed", "chrome-web-store"), extension: extension() };
+  let refreshAvailable = false;
+  let reloadCalls = 0;
   const controller = createExtensionAcquisitionController({
     settings: settings(),
     client: stubClient({
@@ -340,7 +342,8 @@ test("a post-confirm state refresh failure preserves acquisition success as a se
       confirmSession: async () => result,
     }),
     reloadState: async () => {
-      throw new Error("state unavailable");
+      reloadCalls += 1;
+      if (!refreshAvailable) throw new Error("state unavailable");
     },
   });
   await controller.startSession({
@@ -355,6 +358,17 @@ test("a post-confirm state refresh failure preserves acquisition success as a se
   assert.equal(controller.getState().session.confirmation?.extension.id, "extension-1");
   assert.equal(controller.getState().session.refreshError?.code, "ACQUISITION_STATE_REFRESH_FAILED");
   assert.equal(controller.getState().session.error, undefined);
+
+  refreshAvailable = true;
+  const firstRetry = controller.retryStateRefresh();
+  const duplicateRetry = controller.retryStateRefresh();
+  assert.equal(firstRetry, duplicateRetry);
+  assert.equal(controller.getState().session.refreshingState, true);
+  assert.deepEqual(await Promise.all([firstRetry, duplicateRetry]), [true, true]);
+  assert.equal(reloadCalls, 2);
+  assert.equal(controller.getState().session.refreshingState, false);
+  assert.equal(controller.getState().session.refreshError, undefined);
+  assert.equal(controller.getState().session.view?.status, "consumed");
 });
 
 test("disabling catalog search aborts the active request and discards its late response", async () => {
@@ -436,6 +450,33 @@ test("retry and pagination recheck disclosure and current capability settings be
   await controller.retryDiscovery();
   assert.equal(resolveCalls, 1);
   assert.equal(controller.getState().discovery.error?.code, "REMOTE_ACQUISITION_DISABLED");
+});
+
+test("local selection, active-session, and confirmation guards expose distinct stable codes", async () => {
+  const controller = createExtensionAcquisitionController({
+    settings: settings(),
+    client: stubClient({
+      createSession: async (request) => session("ready", request.artifactProviderId),
+    }),
+    reloadState: async () => undefined,
+  });
+
+  await controller.startSelectedSession();
+  assert.equal(controller.getState().session.error?.code, "ACQUISITION_PROVIDER_SELECTION_REQUIRED");
+
+  const request = {
+    namespace: "chrome-web-store" as const,
+    storeId: STORE_ID,
+    artifactProviderId: "chrome-web-store" as const,
+    purpose: "install" as const,
+  };
+  await controller.startSession(request);
+  await controller.startSession(request);
+  assert.equal(controller.getState().session.error?.code, "ACQUISITION_SESSION_ACTIVE");
+
+  controller.reset();
+  await controller.confirm({ disposition: "create" });
+  assert.equal(controller.getState().session.error?.code, "ACQUISITION_CONFIRMATION_NOT_READY");
 });
 
 test("failed update-provider transition retains the prior provider projection", async () => {

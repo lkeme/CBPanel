@@ -78,6 +78,7 @@ export interface ExtensionAcquisitionController {
   restartWithSelectedProvider(): Promise<ExtensionAcquisitionSessionView | undefined>;
   cancelSession(): Promise<ExtensionAcquisitionSessionView | undefined>;
   confirm(request: ExtensionAcquisitionSessionConfirmRequest): Promise<ExtensionAcquisitionConfirmationResult | undefined>;
+  retryStateRefresh(): Promise<boolean>;
   transitionUpdateProvider(
     extensionId: string,
     previousProviderId: ExtensionArtifactProviderId,
@@ -107,6 +108,7 @@ export type UseExtensionAcquisitionResult = {
   | "restartWithSelectedProvider"
   | "cancelSession"
   | "confirm"
+  | "retryStateRefresh"
   | "transitionUpdateProvider"
   | "reset"
 >;
@@ -163,6 +165,7 @@ export function useExtensionAcquisition(options: UseExtensionAcquisitionOptions)
     restartWithSelectedProvider: controller.restartWithSelectedProvider,
     cancelSession: controller.cancelSession,
     confirm: controller.confirm,
+    retryStateRefresh: controller.retryStateRefresh,
     transitionUpdateProvider: controller.transitionUpdateProvider,
     reset: controller.reset,
   }), [controller, state]);
@@ -194,6 +197,8 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
   private settingsTail: Promise<unknown> = Promise.resolve();
 
   private confirmInFlight?: Promise<ExtensionAcquisitionConfirmationResult | undefined>;
+
+  private refreshStateInFlight?: Promise<boolean>;
 
   private updateProviderInFlight?: Promise<ExtensionEntity | undefined>;
 
@@ -265,15 +270,12 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     if (this.suspended) return;
     const reference = classifyExtensionReference(input);
     if (reference.kind === "invalid") {
-      this.failDiscoveryLocally("resolve", input, { code: reference.code, message: reference.message });
+      this.failDiscoveryLocally("resolve", input, localAcquisitionFailure(reference.code));
       return;
     }
     if (reference.kind === "keyword") {
       if (!this.state.settings.crxsosoSearchEnabled) {
-        this.failDiscoveryLocally("search", reference.query, {
-          code: "CATALOG_SEARCH_DISABLED",
-          message: "Keyword search is disabled. Enable the CRX搜搜 search capability or use an exact extension id.",
-        });
+        this.failDiscoveryLocally("search", reference.query, localAcquisitionFailure("CATALOG_SEARCH_DISABLED"));
         return;
       }
       if (
@@ -287,10 +289,7 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
       return;
     }
     if (!this.anyArtifactProviderEnabled()) {
-      this.failDiscoveryLocally("resolve", input, {
-        code: "REMOTE_ACQUISITION_DISABLED",
-        message: "Remote acquisition is disabled. Enable at least one artifact channel.",
-      });
+      this.failDiscoveryLocally("resolve", input, localAcquisitionFailure("REMOTE_ACQUISITION_DISABLED"));
       return;
     }
     await this.runResolution(input);
@@ -392,10 +391,7 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     const selection = this.state.selection;
     const providerId = this.state.selectedProviderId;
     if (!selection || !providerId) {
-      this.failSessionLocally({
-        code: "ARTIFACT_CHANNEL_DISABLED",
-        message: "Select an enabled artifact channel before starting acquisition.",
-      });
+      this.failSessionLocally(localAcquisitionFailure("ACQUISITION_PROVIDER_SELECTION_REQUIRED"));
       return undefined;
     }
     return this.startSession({
@@ -413,24 +409,15 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
   ): Promise<ExtensionAcquisitionSessionView | undefined> => {
     if (this.suspended) return undefined;
     if (!isCanonicalChromeExtensionId(request.storeId) || request.namespace !== "chrome-web-store") {
-      this.failSessionLocally({
-        code: "ACQUISITION_INPUT_UNSUPPORTED",
-        message: "A canonical Chrome Web Store extension id is required.",
-      });
+      this.failSessionLocally(localAcquisitionFailure("ACQUISITION_INPUT_UNSUPPORTED"));
       return undefined;
     }
     if (!artifactProviderEnabled(this.state.settings, request.artifactProviderId)) {
-      this.failSessionLocally({
-        code: "ARTIFACT_CHANNEL_DISABLED",
-        message: "The selected artifact channel is disabled.",
-      }, request);
+      this.failSessionLocally(localAcquisitionFailure("ARTIFACT_CHANNEL_DISABLED"), request);
       return undefined;
     }
     if (this.sessionBlocksReplacement()) {
-      this.failSessionLocally({
-        code: "ACQUISITION_SESSION_NOT_READY",
-        message: "Finish or cancel the current acquisition before starting another one.",
-      });
+      this.failSessionLocally(localAcquisitionFailure("ACQUISITION_SESSION_ACTIVE"));
       return undefined;
     }
 
@@ -490,7 +477,7 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
       this.dispatch({
         type: "session-failed",
         sequence,
-        error: { code: "ACQUISITION_REQUEST_CANCELLED", message: "The acquisition was cancelled." },
+        error: localAcquisitionFailure("ACQUISITION_REQUEST_CANCELLED"),
       });
       return undefined;
     }
@@ -521,6 +508,16 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     this.confirmInFlight = pending;
     void pending.finally(() => {
       if (this.confirmInFlight === pending) this.confirmInFlight = undefined;
+    });
+    return pending;
+  };
+
+  readonly retryStateRefresh = (): Promise<boolean> => {
+    if (this.refreshStateInFlight) return this.refreshStateInFlight;
+    const pending = this.retryStateRefreshNow();
+    this.refreshStateInFlight = pending;
+    void pending.finally(() => {
+      if (this.refreshStateInFlight === pending) this.refreshStateInFlight = undefined;
     });
     return pending;
   };
@@ -558,10 +555,7 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
   private async runSearch(query: string, cursor: string | undefined, append: boolean): Promise<void> {
     if (this.suspended) return;
     if (!this.state.settings.crxsosoSearchEnabled) {
-      this.failDiscoveryLocally("search", query, {
-        code: "CATALOG_SEARCH_DISABLED",
-        message: "Keyword search is disabled. Enable the CRX搜搜 search capability or use an exact extension id.",
-      }, append);
+      this.failDiscoveryLocally("search", query, localAcquisitionFailure("CATALOG_SEARCH_DISABLED"), append);
       return;
     }
     if (
@@ -606,19 +600,15 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     if (this.suspended) return;
     const reference = classifyExtensionReference(input);
     if (reference.kind !== "canonical") {
-      this.failDiscoveryLocally("resolve", input, {
-        code: reference.kind === "invalid" ? reference.code : "ACQUISITION_INPUT_UNSUPPORTED",
-        message: reference.kind === "invalid"
-          ? reference.message
-          : "A canonical Chrome Web Store extension id or supported detail URL is required.",
-      });
+      this.failDiscoveryLocally(
+        "resolve",
+        input,
+        localAcquisitionFailure(reference.kind === "invalid" ? reference.code : "ACQUISITION_INPUT_UNSUPPORTED"),
+      );
       return;
     }
     if (!this.anyArtifactProviderEnabled()) {
-      this.failDiscoveryLocally("resolve", input, {
-        code: "REMOTE_ACQUISITION_DISABLED",
-        message: "Remote acquisition is disabled. Enable at least one artifact channel.",
-      });
+      this.failDiscoveryLocally("resolve", input, localAcquisitionFailure("REMOTE_ACQUISITION_DISABLED"));
       return;
     }
     abortRequest(this.discoveryController);
@@ -709,10 +699,7 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
   ): Promise<ExtensionAcquisitionConfirmationResult | undefined> {
     const view = this.state.session.view;
     if (!view || view.status !== "ready") {
-      this.failSessionLocally({
-        code: "ACQUISITION_SESSION_NOT_READY",
-        message: "Review a ready preflight report before confirming.",
-      });
+      this.failSessionLocally(localAcquisitionFailure("ACQUISITION_CONFIRMATION_NOT_READY"));
       return undefined;
     }
     abortRequest(this.sessionController);
@@ -744,6 +731,28 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     }
   }
 
+  private async retryStateRefreshNow(): Promise<boolean> {
+    const session = this.state.session;
+    if (!session.refreshError || session.view?.status !== "consumed") return false;
+    const sequence = session.sequence;
+    const reloadState = this.options.reloadState;
+    this.dispatch({ type: "session-refresh-requested", sequence });
+    try {
+      await reloadState();
+      if (!this.isCurrentSessionRefresh(sequence)) return false;
+      this.dispatch({ type: "session-refresh-succeeded", sequence });
+      return true;
+    } catch (error) {
+      if (!this.isCurrentSessionRefresh(sequence)) return false;
+      this.dispatch({
+        type: "session-refresh-failed",
+        sequence,
+        error: { ...acquisitionFailure(error), code: "ACQUISITION_STATE_REFRESH_FAILED" },
+      });
+      return false;
+    }
+  }
+
   private async transitionUpdateProviderNow(
     extensionId: string,
     previousProviderId: ExtensionArtifactProviderId,
@@ -761,7 +770,7 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
       this.dispatch({
         type: "update-provider-failed",
         sequence,
-        error: { code: "ARTIFACT_CHANNEL_DISABLED", message: "The requested update provider is disabled." },
+        error: localAcquisitionFailure("ARTIFACT_CHANNEL_DISABLED"),
       });
       return undefined;
     }
@@ -895,6 +904,12 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
       && this.updateProviderController === controller
       && this.state.updateProvider.sequence === sequence;
   }
+
+  private isCurrentSessionRefresh(sequence: number): boolean {
+    return !this.suspended
+      && this.state.session.sequence === sequence
+      && this.state.session.view?.status === "consumed";
+  }
 }
 
 function normalizeControllerOptions(
@@ -924,6 +939,10 @@ function persistedAcquisitionSettings(
     || !Number.isSafeInteger(candidate.crxsosoDisclosureVersionAccepted)
   ) return { ...fallback };
   return { ...candidate };
+}
+
+function localAcquisitionFailure(code: string): ExtensionAcquisitionFailure {
+  return { code, message: code };
 }
 
 function acquisitionFailure(error: unknown): ExtensionAcquisitionFailure {

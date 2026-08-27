@@ -253,6 +253,55 @@ test("disconnecting a search request propagates cancellation to the service", as
   }
 });
 
+test("disconnecting an update-provider request propagates cancellation to the probe", async () => {
+  let receivedSignal: AbortSignal | undefined;
+  let signalAborted: (() => void) | undefined;
+  const aborted = new Promise<void>((resolve) => {
+    signalAborted = resolve;
+  });
+  const service: ExtensionAcquisitionRouteService = {
+    ...unusedSessionRoutes(),
+    capabilities: async () => [],
+    search: async () => ({ query: "", items: [], excludedNonCanonicalCount: 0, hasMore: false }),
+    resolve: async () => ({
+      namespace: "chrome-web-store",
+      storeId: STORE_ID,
+      storeUrl: chromeWebStoreListingUrl(STORE_ID),
+      offers: [],
+    }),
+    transitionUpdateProvider: async (_extensionId, _providerId, signal) => {
+      assert.ok(signal);
+      receivedSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          signalAborted?.();
+          reject(new ExtensionAcquisitionError("ACQUISITION_CANCELLED"));
+        }, { once: true });
+      });
+    },
+  };
+  const app = express();
+  app.use(express.json());
+  app.use("/api/extension-acquisition", createExtensionAcquisitionRouter(service));
+  const server = await startServer(app);
+  try {
+    const controller = new AbortController();
+    const pending = fetch(`${server.baseUrl}/api/extension-acquisition/extensions/extension-1/update-provider`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ providerId: "crxsoso" }),
+      signal: controller.signal,
+    });
+    await until(() => receivedSignal !== undefined);
+    controller.abort();
+    await assert.rejects(pending);
+    await within(aborted, 2_000);
+    assert.equal(receivedSignal?.aborted, true);
+  } finally {
+    await server.dispose();
+  }
+});
+
 function assertDecoderCode(run: () => unknown, code: string): void {
   assert.throws(run, (error: unknown) => {
     assert.ok(error instanceof ExtensionAcquisitionError);

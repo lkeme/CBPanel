@@ -25,9 +25,11 @@ import { verifyChromeWebStoreCrx3File } from "./crx3Verifier";
 import { ExtensionRuntimeService, type ExtensionRuntimeMaterializeResult } from "./extensionRuntimeService";
 import { validateTransferredExtensionArtifact } from "./extensionArtifactTransferVerifier";
 import { preflightExtensionPackage } from "./extensionPackagePreflight";
+import { extensionPermissionIncreases } from "./extensionPermissionDiff";
 import { DataMutationCoordinator } from "./dataMutationCoordinator";
 import {
   ExtensionAcquisitionCommitJournal,
+  ExtensionCommitJournalCreateError,
   type ExtensionCommitJournalRecord,
   type ExtensionCommitPublication,
 } from "./extensionAcquisitionCommitJournal";
@@ -60,7 +62,13 @@ type ExtensionServiceOptions = {
   acquisitionCommitFaultForTesting?: (
     phase: "prepared" | "files-published" | "database-written" | "database-committed" | "complete",
   ) => void | Promise<void>;
+  commitJournalSyncDirectoryForTesting?: (directory: string) => Promise<void>;
   activeEnvironmentIds?: () => Set<string>;
+};
+
+type ActiveProviderProbe = {
+  providerId: "chrome-web-store" | "crxsoso";
+  controller: AbortController;
 };
 
 type ExtensionManifest = {
@@ -192,6 +200,8 @@ export class ExtensionService {
 
   private providerProbeReservations = 0;
 
+  private readonly activeProviderProbes = new Set<ActiveProviderProbe>();
+
   private readonly runtimeService: ExtensionRuntimeService;
 
   constructor(private readonly options: ExtensionServiceOptions) {
@@ -211,6 +221,7 @@ export class ExtensionService {
         path.resolve(this.extensionArtifactDir),
         path.resolve(this.extensionAcquisitionDir),
       ],
+      syncDirectoryForTesting: options.commitJournalSyncDirectoryForTesting,
     });
     this.runtimeService = new ExtensionRuntimeService({
       runtimeDir: options.extensionRuntimeDir ?? path.join(dataDir, "extension-runtimes"),
@@ -220,6 +231,8 @@ export class ExtensionService {
 
   /** Startup barrier: recover any interrupted acquisition before launch or API mutations become reachable. */
   async initialize(): Promise<void> {
+    for (const probe of this.activeProviderProbes) probe.controller.abort();
+    this.activeProviderProbes.clear();
     await this.commitJournal.initialize();
     await this.commitJournal.reconcileAll({
       databaseState: (record) => this.commitDatabaseState(record),
@@ -232,6 +245,18 @@ export class ExtensionService {
     });
     this.providerProbeReservations = 0;
     await this.sweepCacheArtifacts();
+  }
+
+  settingsChanged(settingsInput: AppSettings): void {
+    const settings = normalizeSettings(settingsInput);
+    for (const probe of this.activeProviderProbes) {
+      if (!isArtifactProviderEnabled(settings, probe.providerId) && !probe.controller.signal.aborted) {
+        probe.controller.abort(acquisitionError(
+          "ARTIFACT_PROVIDER_DISABLED",
+          "The selected update provider was disabled during verification.",
+        ));
+      }
+    }
   }
 
   async importDirectory(
@@ -760,6 +785,7 @@ export class ExtensionService {
       await this.commitJournal.remove(journal);
       return entity;
     } catch (error) {
+      if (!journal && error instanceof ExtensionCommitJournalCreateError) journal = error.record;
       if (!journal) throw error;
       const databaseState = await this.commitDatabaseState(journal).catch(() => undefined);
       try {
@@ -1308,6 +1334,7 @@ export class ExtensionService {
   async transitionUpdateProvider(
     id: string,
     providerId: "chrome-web-store" | "crxsoso",
+    callerSignal?: AbortSignal,
   ): Promise<ExtensionEntity> {
     if (providerId !== "chrome-web-store" && providerId !== "crxsoso") {
       throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "The requested update provider is unsupported.");
@@ -1359,10 +1386,17 @@ export class ExtensionService {
       }
       this.providerProbeReservations += 1;
       let probeRoot: string | undefined;
+      const activeProbe: ActiveProviderProbe = { providerId, controller: new AbortController() };
+      this.activeProviderProbes.add(activeProbe);
+      const signal = callerSignal
+        ? AbortSignal.any([callerSignal, activeProbe.controller.signal])
+        : activeProbe.controller.signal;
       try {
+        throwIfProviderProbeAborted(signal);
         probeRoot = await fs.mkdtemp(path.join(this.extensionAcquisitionDir, ".provider-probe-"));
         const probePath = path.join(probeRoot, "artifact.crx");
-        const probe = await this.options.probeArtifactProvider(providerId, extension.storeIdentity.storeId, probePath, new AbortController().signal);
+        const probe = await this.options.probeArtifactProvider(providerId, extension.storeIdentity.storeId, probePath, signal);
+        throwIfProviderProbeAborted(signal);
         if (
           probe.storeId !== extension.storeIdentity.storeId
           || probe.artifactProviderId !== providerId
@@ -1371,6 +1405,7 @@ export class ExtensionService {
           throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "The provider returned inconsistent identity facts.");
         }
         const verified = await this.verifyStoreCrxFile(probePath, extension.storeIdentity.storeId);
+        throwIfProviderProbeAborted(signal);
         if (
           verified.crxSha256 !== probe.download.sha256
           || verified.crxSize !== probe.download.size
@@ -1382,7 +1417,26 @@ export class ExtensionService {
         ) {
           throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "The provider probe failed its CRX3 verification.");
         }
+        const latestSettings = this.options.readSettings
+          ? normalizeSettings(await this.options.readSettings())
+          : undefined;
+        throwIfProviderProbeAborted(signal);
+        if (latestSettings && !isArtifactProviderEnabled(latestSettings, providerId)) {
+          throw acquisitionError("ARTIFACT_PROVIDER_DISABLED", "The selected update provider was disabled during verification.");
+        }
+        // Await inside the try so the registered probe remains cancellable
+        // until the repository's synchronous pre-write guard has run.
+        return await this.options.repository.updateExtension(
+          id,
+          {
+            updateProviderId: providerId,
+            updateState: { status: "idle", checkedAt: nowIso() },
+            updatePolicy: providerId === "chrome-web-store" ? "auto" : "notify",
+          },
+          () => throwIfProviderProbeAborted(signal),
+        );
       } finally {
+        this.activeProviderProbes.delete(activeProbe);
         try {
           if (probeRoot) await fs.rm(probeRoot, { recursive: true, force: true });
           this.providerProbeReservations = Math.max(0, this.providerProbeReservations - 1);
@@ -1390,11 +1444,6 @@ export class ExtensionService {
           // Keep the reservation until startup sweep can reclaim the debt.
         }
       }
-      return this.options.repository.updateExtension(id, {
-        updateProviderId: providerId,
-        updateState: { status: "idle", checkedAt: nowIso() },
-        updatePolicy: providerId === "chrome-web-store" ? "auto" : "notify",
-      });
     });
   }
 
@@ -1751,6 +1800,32 @@ export class ExtensionService {
       const archivePath = path.join(this.extensionArchiveDir, `${extension.id}.${assetKind}`);
       await fs.rm(archivePath, { force: true }).catch(() => undefined);
     }
+    const artifactDirectory = path.dirname(this.canonicalArtifactPath(extension.id));
+    const artifactStats = await fs.lstat(artifactDirectory).catch(() => undefined);
+    if (artifactStats) {
+      if (artifactStats.isSymbolicLink() || !artifactStats.isDirectory()) {
+        // Remove only the unexpected managed entry itself; never traverse a
+        // linked extension-id directory during deletion.
+        await fs.rm(artifactDirectory, { force: true }).catch(() => undefined);
+      } else {
+        try {
+          const [canonicalDirectory, canonicalRoot] = await Promise.all([
+            fs.realpath(artifactDirectory),
+            fs.realpath(this.extensionArtifactDir),
+          ]);
+          if (
+            isPathInsideDir(canonicalDirectory, canonicalRoot)
+            && path.basename(canonicalDirectory) === extension.id
+          ) {
+            await fs.rm(artifactDirectory, { recursive: true, force: true }).catch(() => undefined);
+          }
+        } catch {
+          // The row is already deleted and every other owned-file cleanup is
+          // best effort. A concurrent disappearance must not turn a committed
+          // delete into an API failure or skip runtime cleanup.
+        }
+      }
+    }
   }
 
   private async checkLocalArchiveUpdate(extension: ExtensionEntity): Promise<ExtensionEntity> {
@@ -2007,6 +2082,7 @@ export class ExtensionService {
     const artifactLink = path.join(recoveryRoot, "artifact.crx");
     const stagedRoot = path.join(recoveryRoot, "unpacked");
     await fs.mkdir(recoveryRoot, { recursive: false });
+    let journalPending = false;
     try {
       await validateTransferredExtensionArtifact({
         extension,
@@ -2104,6 +2180,7 @@ export class ExtensionService {
           newEntityFingerprint: newDatabaseFingerprint,
           publications,
         });
+        journalPending = true;
         await this.options.acquisitionCommitFaultForTesting?.("prepared");
         await this.publishCommitFiles(journal);
         journal = await this.commitJournal.advance(journal, "files-published");
@@ -2121,8 +2198,13 @@ export class ExtensionService {
         journal = await this.commitJournal.advance(journal, "complete");
         await this.options.acquisitionCommitFaultForTesting?.("complete");
         await this.commitJournal.remove(journal);
+        journalPending = false;
         return restoredEntity;
       } catch (error) {
+        if (!journal && error instanceof ExtensionCommitJournalCreateError) {
+          journal = error.record;
+          journalPending = true;
+        }
         if (!journal) throw error;
         const databaseState = await this.commitDatabaseState(journal).catch(() => undefined);
         try {
@@ -2131,6 +2213,7 @@ export class ExtensionService {
             rollbackFiles: (record) => this.rollbackCommitFiles(record),
             finalizeFiles: (record) => this.finalizeCommitFiles(record),
           });
+          journalPending = false;
         } catch (reconciliationError) {
           throw Object.assign(
             acquisitionError("ACQUISITION_RECONCILIATION_REQUIRED", "The local reinstall is awaiting durable startup reconciliation."),
@@ -2144,7 +2227,11 @@ export class ExtensionService {
         throw acquisitionError("ACQUISITION_COMMIT_FAILED", "The local reinstall was rolled back safely.", error);
       }
     } finally {
-      await fs.rm(recoveryRoot, { recursive: true, force: true }).catch(() => undefined);
+      // A surviving journal owns these staging files. Startup reconciliation
+      // needs them after a secondary in-process recovery failure.
+      if (!journalPending) {
+        await fs.rm(recoveryRoot, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   }
 
@@ -2326,6 +2413,37 @@ export class ExtensionService {
       const liveFingerprint = await fingerprintPublishedPath(publication.kind, publication.livePath);
       const asideExists = await pathExists(publication.asidePath);
       const stagedExists = await pathExists(publication.stagedPath);
+      if (publication.oldFingerprint === publication.newFingerprint) {
+        // A same-byte publication (retained CRX during tree-only reinstall)
+        // has no old/new distinction. Keep a valid live copy in place and never
+        // infer publication merely because staging is absent.
+        if (liveFingerprint !== publication.oldFingerprint) {
+          const asideFingerprint = asideExists
+            ? await fingerprintPublishedPath(publication.kind, publication.asidePath)
+            : undefined;
+          const stagedFingerprint = stagedExists
+            ? await fingerprintPublishedPath(publication.kind, publication.stagedPath)
+            : undefined;
+          const recoveryPath = asideFingerprint === publication.oldFingerprint
+            ? publication.asidePath
+            : stagedFingerprint === publication.oldFingerprint
+              ? publication.stagedPath
+              : undefined;
+          if (!recoveryPath) throw new Error("Could not recover the unchanged extension publication.");
+          await fs.rm(publication.livePath, { recursive: true, force: true });
+          await fs.mkdir(path.dirname(publication.livePath), { recursive: true });
+          await fs.rename(recoveryPath, publication.livePath);
+        }
+        await Promise.all([
+          fs.rm(publication.asidePath, { recursive: true, force: true }),
+          fs.rm(publication.stagedPath, { recursive: true, force: true }),
+        ]);
+        if (await fingerprintPublishedPath(publication.kind, publication.livePath) !== publication.oldFingerprint) {
+          throw new Error("Could not restore the unchanged extension publication exactly.");
+        }
+        await syncNearestManagedDirectory(path.dirname(publication.livePath));
+        continue;
+      }
       // In the prepared phase a same-byte live file may be the old publication, so only
       // move it back when an aside proves we already displaced it, or when the staged
       // source is gone (a crash immediately after the final rename for a new target).
@@ -3133,18 +3251,7 @@ function stringArray(value: unknown): string[] {
 }
 
 function permissionsAdded(previous: ExtensionEntity, next: ExtensionEntity): string[] {
-  const before = new Set([
-    ...previous.permissions,
-    ...previous.hostPermissions,
-    ...(previous.optionalPermissions ?? []),
-    ...(previous.optionalHostPermissions ?? []),
-  ]);
-  return [...new Set([
-    ...next.permissions,
-    ...next.hostPermissions,
-    ...(next.optionalPermissions ?? []),
-    ...(next.optionalHostPermissions ?? []),
-  ].filter((permission) => !before.has(permission)))];
+  return extensionPermissionIncreases(previous, next);
 }
 
 function isPermissionConfirmationError(error: unknown): boolean {
@@ -3245,6 +3352,12 @@ async function readManifestKey(directory: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+function throwIfProviderProbeAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw acquisitionError("ACQUISITION_CANCELLED", "The update-provider verification was cancelled.");
 }
 
 async function readManifestKeyExact(directory: string): Promise<string | undefined> {

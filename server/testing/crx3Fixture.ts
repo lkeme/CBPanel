@@ -26,6 +26,8 @@ export function createSyntheticStoreCrx3(options: {
   version?: string;
   permissions?: string[];
   hostPermissions?: string[];
+  optionalPermissions?: string[];
+  optionalHostPermissions?: string[];
   signingKeys?: SyntheticCrx3SigningKeys;
 } = {}): SyntheticStoreCrx3Fixture {
   const developer = options.signingKeys?.developer ?? syntheticKey("rsa");
@@ -36,6 +38,12 @@ export function createSyntheticStoreCrx3(options: {
     version: options.version ?? "1.0.0",
     permissions: options.permissions ?? ["storage"],
     host_permissions: options.hostPermissions ?? ["https://example.test/*"],
+    ...(options.optionalPermissions !== undefined
+      ? { optional_permissions: options.optionalPermissions }
+      : {}),
+    ...(options.optionalHostPermissions !== undefined
+      ? { optional_host_permissions: options.optionalHostPermissions }
+      : {}),
     background: { service_worker: "worker.js" },
   };
   const manifestBytes = Buffer.from(JSON.stringify(manifest), "utf8");

@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { X } from "lucide-react";
 
 import type { TranslationKey } from "../../i18n";
 import type {
@@ -17,6 +18,142 @@ import { Field, Segmented, ToggleField } from "../ui/form-controls";
 import { PasswordInput } from "../ui/PasswordInput";
 import { SelectMenu } from "../ui/SelectMenu";
 import { maskManagedProxyForDisplay } from "../profiles/proxyDisplay";
+import { useExtensionAcquisitionDialogFocus } from "./extensionAcquisitionDialogFocus";
+import type { ExtensionAcquisitionUiTranslator } from "./extensionAcquisitionUi";
+
+/** Acquisition dialogs share the registry modal surface while adding a trapped, returned focus lifecycle. */
+export function ExtensionAcquisitionDialog({
+  actions,
+  busy,
+  children,
+  closeDisabled = false,
+  closeLabel,
+  description,
+  onClose,
+  panelClassName = "registry-editor-panel",
+  showCloseButton = true,
+  title,
+}: {
+  actions?: React.ReactNode;
+  busy?: boolean;
+  children: React.ReactNode;
+  closeDisabled?: boolean;
+  closeLabel: string;
+  description?: React.ReactNode;
+  onClose: () => void;
+  panelClassName?: string;
+  showCloseButton?: boolean;
+  title: React.ReactNode;
+}) {
+  const titleId = React.useId();
+  const descriptionId = React.useId();
+  const { handleKeyDown, layerRef, panelRef } = useExtensionAcquisitionDialogFocus({ closeDisabled, onClose });
+
+  return (
+    <div
+      aria-describedby={description ? descriptionId : undefined}
+      aria-labelledby={titleId}
+      aria-modal="true"
+      className="modal-layer acquisition-modal-layer"
+      onKeyDown={handleKeyDown}
+      ref={layerRef}
+      role="dialog"
+    >
+      <div
+        aria-hidden="true"
+        className="modal-scrim"
+        onMouseDown={(event) => {
+          if (!closeDisabled && event.currentTarget === event.target) onClose();
+        }}
+      />
+      <section
+        aria-busy={(busy ?? closeDisabled) || undefined}
+        className={`modal-panel acquisition-modal-panel ${panelClassName}`.trim()}
+        ref={panelRef}
+        tabIndex={-1}
+      >
+        <header className={`modal-header ${showCloseButton ? "with-close" : ""}`}>
+          <div className="modal-title-block">
+            <h2 id={titleId}>{title}</h2>
+            {description && <p id={descriptionId}>{description}</p>}
+          </div>
+          {showCloseButton && (
+            <button
+              aria-label={closeLabel}
+              className="icon-button modal-close-button"
+              disabled={closeDisabled}
+              onClick={onClose}
+              title={closeLabel}
+              type="button"
+            >
+              <X aria-hidden="true" size={16} />
+            </button>
+          )}
+        </header>
+        <div className="modal-body">{children}</div>
+        {actions && <footer className="modal-footer">{actions}</footer>}
+      </section>
+    </div>
+  );
+}
+
+export function ExtensionAcquisitionDialogLoading({
+  close,
+  t,
+  title,
+}: {
+  close: () => void;
+  t: ExtensionAcquisitionUiTranslator;
+  title: string;
+}) {
+  const titleId = React.useId();
+  const descriptionId = `${titleId}-loading`;
+  const returnFocus = typeof document !== "undefined" && document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
+
+  React.useEffect(() => () => { if (returnFocus?.isConnected) returnFocus.focus(); }, []);
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "Escape" && event.key !== "Tab") return;
+    event.preventDefault();
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      close();
+    } else {
+      event.currentTarget.querySelector<HTMLElement>("button")?.focus();
+    }
+  }
+
+  return (
+    <div
+      aria-describedby={descriptionId}
+      aria-labelledby={titleId}
+      aria-modal="true"
+      className="modal-layer acquisition-modal-layer"
+      onKeyDown={handleKeyDown}
+      role="dialog"
+    >
+      <div aria-hidden="true" className="modal-scrim" />
+      <section aria-busy="true" className="modal-panel acquisition-modal-panel registry-editor-panel">
+        <header className="modal-header with-close">
+          <h2 id={titleId}>{title}</h2>
+          <button autoFocus className="command subtle" onClick={close} type="button">
+            {t("actions.close")}
+          </button>
+        </header>
+        <div
+          aria-live="polite"
+          className="modal-body preflight-empty"
+          id={descriptionId}
+          role="status"
+        >
+          {t("extension.acquisition.loading")}
+        </div>
+      </section>
+    </div>
+  );
+}
 
 export type TextInputDialogState = {
   title: string;

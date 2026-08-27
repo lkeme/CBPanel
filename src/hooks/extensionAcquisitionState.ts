@@ -19,6 +19,9 @@ export type ExtensionAcquisitionLocalErrorCode =
   | "REMOTE_ACQUISITION_DISABLED"
   | "CATALOG_SEARCH_DISABLED"
   | "ARTIFACT_CHANNEL_DISABLED"
+  | "ACQUISITION_PROVIDER_SELECTION_REQUIRED"
+  | "ACQUISITION_CONFIRMATION_NOT_READY"
+  | "ACQUISITION_SESSION_ACTIVE"
   | "ACQUISITION_REQUEST_CANCELLED"
   | "ACQUISITION_STATE_REFRESH_FAILED";
 
@@ -77,6 +80,7 @@ export interface ExtensionAcquisitionSessionState {
   lastRequest?: ExtensionAcquisitionSessionCreateRequest;
   confirmation?: ExtensionAcquisitionConfirmationResult;
   refreshError?: ExtensionAcquisitionFailure;
+  refreshingState?: boolean;
 }
 
 export interface ExtensionUpdateProviderTransitionState {
@@ -176,6 +180,8 @@ export type ExtensionAcquisitionAction =
       sequence: number;
       result: ExtensionAcquisitionConfirmationResult;
     }
+  | { type: "session-refresh-requested"; sequence: number }
+  | { type: "session-refresh-succeeded"; sequence: number }
   | { type: "session-refresh-failed"; sequence: number; error: ExtensionAcquisitionFailure }
   | {
       type: "update-provider-requested";
@@ -352,7 +358,7 @@ export function extensionAcquisitionReducer(
           ...state.discovery,
           sequence: action.sequence,
           status: "cancelled",
-          error: { code: "ACQUISITION_REQUEST_CANCELLED", message: "The request was cancelled." },
+          error: { code: "ACQUISITION_REQUEST_CANCELLED", message: "ACQUISITION_REQUEST_CANCELLED" },
         },
       };
     case "catalog-item-selected":
@@ -381,6 +387,7 @@ export function extensionAcquisitionReducer(
           operation: "polling",
           error: undefined,
           refreshError: undefined,
+          refreshingState: false,
         },
       };
     case "session-view-received":
@@ -419,6 +426,7 @@ export function extensionAcquisitionReducer(
           operation: "confirming",
           error: undefined,
           refreshError: undefined,
+          refreshingState: false,
         },
       };
     case "session-confirmed":
@@ -431,13 +439,26 @@ export function extensionAcquisitionReducer(
           view: cloneSessionView(action.result.session),
           confirmation: action.result,
           error: undefined,
+          refreshingState: false,
         },
+      };
+    case "session-refresh-requested":
+      if (action.sequence !== state.session.sequence) return state;
+      return {
+        ...state,
+        session: { ...state.session, refreshingState: true },
+      };
+    case "session-refresh-succeeded":
+      if (action.sequence !== state.session.sequence) return state;
+      return {
+        ...state,
+        session: { ...state.session, refreshingState: false, refreshError: undefined },
       };
     case "session-refresh-failed":
       if (action.sequence !== state.session.sequence) return state;
       return {
         ...state,
-        session: { ...state.session, refreshError: action.error },
+        session: { ...state.session, refreshingState: false, refreshError: action.error },
       };
     case "update-provider-requested":
       return {

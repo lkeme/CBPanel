@@ -3,6 +3,8 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { extensionAcquisitionEnUS } from "../../locales/extensionAcquisition.en-US";
+import { extensionAcquisitionZhCN } from "../../locales/extensionAcquisition.zh-CN";
 import type {
   ExtensionAcquisitionSessionView,
   ExtensionCapabilityView,
@@ -18,11 +20,13 @@ import {
   ExtensionAcquisitionDisclosureDialog,
   ExtensionAcquisitionSourceSettings,
 } from "./ExtensionAcquisitionSources";
-import type { ExtensionAcquisitionUiTranslator } from "./extensionAcquisitionUi";
+import { ExtensionAcquisitionDialogLoading } from "./RegistryDialogs";
 import {
   handleExtensionAcquisitionDialogKey,
   restoreExtensionAcquisitionDialogFocus,
-} from "./extensionAcquisitionUi";
+} from "./extensionAcquisitionDialogFocus";
+import type { ExtensionAcquisitionUiTranslator } from "./extensionAcquisitionUi";
+import { formatExtensionAcquisitionError } from "./extensionAcquisitionUi";
 
 const t: ExtensionAcquisitionUiTranslator = (key, params) => (
   params ? `${key}:${Object.entries(params).map(([name, value]) => `${name}=${value}`).join(",")}` : key
@@ -86,6 +90,48 @@ test("third-party disclosure is a named modal whose safe default is Cancel", () 
   assert.match(html, new RegExp(`<h2 id="${escapeRegExp(labelledBy)}">`));
   assert.match(html, new RegExp(`<p id="${escapeRegExp(describedBy)}">`));
   assert.match(html, /<button[^>]*data-acquisition-autofocus="true"[^>]*>actions\.cancel<\/button>/);
+});
+
+test("the cold-loading fallback is a named busy dialog with one safe close action", () => {
+  const html = renderToStaticMarkup(React.createElement(ExtensionAcquisitionDialogLoading, {
+    close: () => undefined,
+    t,
+    title: "Source settings",
+  }));
+
+  const dialog = html.match(/<div[^>]*role="dialog"[^>]*>/)?.[0] ?? "";
+  assert.match(dialog, /aria-modal="true"/);
+  assert.ok(attribute(dialog, "aria-labelledby"));
+  assert.ok(attribute(dialog, "aria-describedby"));
+  assert.match(html, /<section[^>]*aria-busy="true"/);
+  assert.equal((html.match(/<button/g) ?? []).length, 1);
+  assert.match(html, /<button[^>]*autofocus=""[^>]*>actions\.close<\/button>/);
+  assert.ok(html.includes("extension.acquisition.loading"));
+});
+
+test("stable acquisition error codes produce localized primary copy and bounded raw diagnostics", () => {
+  const zhT = localeTranslator(extensionAcquisitionZhCN);
+  const enT = localeTranslator(extensionAcquisitionEnUS);
+  const clientError = {
+    code: "CATALOG_SEARCH_DISABLED",
+    message: "Keyword search is disabled. Enable a provider.",
+  };
+
+  assert.deepEqual(formatExtensionAcquisitionError(clientError, zhT), {
+    primary: extensionAcquisitionZhCN["extension.acquisition.errorCode.CATALOG_SEARCH_DISABLED"],
+  });
+  assert.deepEqual(formatExtensionAcquisitionError(clientError, enT), {
+    primary: extensionAcquisitionEnUS["extension.acquisition.errorCode.CATALOG_SEARCH_DISABLED"],
+  });
+
+  const unknown = formatExtensionAcquisitionError({
+    code: "FUTURE_PROVIDER_FAILURE",
+    message: `  provider\n${"x".repeat(400)}  `,
+  }, zhT);
+  assert.equal(unknown.primary, extensionAcquisitionZhCN["extension.acquisition.error"]);
+  assert.equal(unknown.detail?.includes("\n"), false);
+  assert.equal(unknown.detail?.length, 300);
+  assert.ok(unknown.detail?.endsWith("…"));
 });
 
 test("acquisition dialogs trap Tab, honor Escape locking, and restore only connected focus", () => {
@@ -218,7 +264,7 @@ test("cancelling pagination retains results but exposes one explicit retry inste
 test("exact ID resolution failures are announced as acquisition failures rather than search failures", () => {
   const html = renderToStaticMarkup(React.createElement(ExtensionCatalogResults, {
     discoveryKind: "resolve",
-    error: "provider unavailable",
+    error: { message: "provider unavailable" },
     locale: "en-US",
     onCancel: () => undefined,
     onChoose: () => undefined,
@@ -229,8 +275,9 @@ test("exact ID resolution failures are announced as acquisition failures rather 
     t,
   }));
 
-  assert.ok(html.includes("extension.acquisition.error: provider unavailable"));
-  assert.ok(!html.includes("extension.acquisition.results.error"));
+  assert.ok(html.includes("extension.acquisition.error"));
+  assert.ok(html.includes("provider unavailable"));
+  assert.ok(!html.includes("extension.acquisition.results.errorTitle"));
   assert.match(html, /role="alert"/);
 });
 
@@ -359,6 +406,37 @@ test("ready preflight renders package, channel, proof, risk and discrepancy fact
   assert.doesNotMatch(html, /\bsafe\b/i);
 });
 
+test("consumed acquisition keeps success visible while refresh failure offers an explicit retry", () => {
+  const html = renderToStaticMarkup(React.createElement(ExtensionAcquisitionSessionPanel, {
+    confirmedExtension: { id: "extension-1", name: "Example", version: "1.2.3" },
+    locale: "en-US",
+    onCancel: () => undefined,
+    onConfirm: () => undefined,
+    onDone: () => undefined,
+    onRetry: () => undefined,
+    onRetryStateRefresh: () => undefined,
+    operation: "idle",
+    refreshError: { code: "ACQUISITION_STATE_REFRESH_FAILED", message: "state unavailable" },
+    session: {
+      sessionId: "session_12345678901234567890123456789012",
+      purpose: "install",
+      namespace: "chrome-web-store",
+      storeId: "c".repeat(32),
+      selectedProviderId: "chrome-web-store",
+      status: "consumed",
+      createdAt: "2026-08-27T00:00:00.000Z",
+      updatedAt: "2026-08-27T00:01:00.000Z",
+    },
+    t: localeTranslator(extensionAcquisitionEnUS),
+  }));
+
+  assert.ok(html.includes(extensionAcquisitionEnUS["extension.acquisition.success.title"]));
+  assert.ok(html.includes(extensionAcquisitionEnUS["extension.acquisition.errorCode.ACQUISITION_STATE_REFRESH_FAILED"]));
+  assert.ok(!html.includes("state unavailable"));
+  assert.ok(html.includes(extensionAcquisitionEnUS["extension.acquisition.success.retryRefresh"]));
+  assert.match(html, /role="alert"/);
+});
+
 function capability(
   id: ExtensionCapabilityView["id"],
   kind: ExtensionCapabilityView["kind"],
@@ -432,4 +510,10 @@ function attribute(html: string, name: string): string {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function localeTranslator(
+  dictionary: Readonly<Record<string, string>>,
+): ExtensionAcquisitionUiTranslator {
+  return (key) => dictionary[key] ?? key;
 }

@@ -110,7 +110,12 @@ export interface RegistryRepository {
   listExtensions(): Promise<ExtensionEntity[]>;
   getExtension(id: string): Promise<ExtensionEntity | undefined>;
   createExtension(input: Partial<ExtensionEntity>): Promise<ExtensionEntity>;
-  updateExtension(id: string, patch: Partial<ExtensionEntity>): Promise<ExtensionEntity>;
+  updateExtension(
+    id: string,
+    patch: Partial<ExtensionEntity>,
+    /** Synchronous policy/CAS guard run after repository initialization and immediately before SQLite writes. */
+    beforeWrite?: () => void,
+  ): Promise<ExtensionEntity>;
   commitExtensionAcquisition(input: ExtensionAcquisitionDatabaseCommitInput): Promise<ExtensionEntity>;
   deleteExtension(id: string): Promise<void>;
   listEnvironmentExtensionBindings(environmentId: string): Promise<EnvironmentExtensionBinding[]>;

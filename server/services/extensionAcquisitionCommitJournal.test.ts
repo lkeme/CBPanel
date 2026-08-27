@@ -5,9 +5,51 @@ import path from "node:path";
 import test from "node:test";
 import {
   ExtensionAcquisitionCommitJournal,
+  ExtensionCommitJournalCreateError,
   normalizeExtensionCommitJournal,
   type ExtensionCommitJournalRecord,
 } from "./extensionAcquisitionCommitJournal";
+
+test("create exposes a canonical journal that was renamed before directory sync failed", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-extension-journal-sync-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const journalRoot = path.join(root, "journals");
+  const artifactRoot = path.join(root, "managed", "artifacts");
+  const treeRoot = path.join(root, "managed", "trees");
+  const sessionRoot = path.join(root, "sessions");
+  let failSync = true;
+  const journal = new ExtensionAcquisitionCommitJournal({
+    journalRoot,
+    allowedRoots: [artifactRoot, treeRoot, sessionRoot],
+    syncDirectoryForTesting: async () => {
+      if (!failSync) return;
+      failSync = false;
+      throw new Error("injected directory sync failure");
+    },
+  });
+  await journal.initialize();
+  const fixture = {
+    root,
+    journalRoot,
+    managedRoot: path.join(root, "managed"),
+    artifactRoot,
+    treeRoot,
+    sessionRoot,
+    journal,
+  };
+  let published: ExtensionCommitJournalCreateError | undefined;
+  await assert.rejects(
+    journal.create(journalInput(fixture)),
+    (error: unknown) => {
+      assert.ok(error instanceof ExtensionCommitJournalCreateError);
+      published = error;
+      return true;
+    },
+  );
+  assert.ok(published);
+  assert.equal(published.record.phase, "prepared");
+  assert.deepEqual(await journal.list(), [published.record]);
+});
 
 test("commit journal persists strict ordered phases and removes complete records", async (context) => {
   const fixture = await makeFixture(context);

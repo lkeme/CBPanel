@@ -9,12 +9,12 @@ import type { ExtensionEntity } from "../../shared/entities";
 import type { ExtensionAcquisitionSettings } from "../../shared/settings";
 import { canAutoCheckExtension } from "../../hooks/useExtensionActions";
 import { ExtensionAcquisitionSessionPanel } from "./ExtensionAcquisitionSessionPanel";
+import { ExtensionAcquisitionStartError } from "./ExtensionAcquisitionResults";
 import {
   allExtensionRemoteCapabilitiesDisabled,
   browserRuntimeIdFromManifestKey,
   canStartTrustedExtensionAcquisitionUpdate,
   canonicalExtensionListingUrl,
-  ExtensionAcquisitionStartError,
   ExtensionLocalImportActions,
   ExtensionRemoteDisabledNotice,
   usesTrustedExtensionAcquisitionUpdate,
@@ -56,7 +56,8 @@ test("library details distinguish all identities and retain verified provenance 
 
   assert.match(html, /<option value="chrome-web-store" selected="">/);
   assert.doesNotMatch(html, /<option[^>]*value="crxsoso"[^>]*selected=""/);
-  assert.ok(html.includes("extension.detail.updateProvider.failed:transition refused"));
+  assert.ok(html.includes("extension.detail.updateProvider.failed:extension.acquisition.error"));
+  assert.ok(html.includes("transition refused"));
   assert.match(html, /role="alert"/);
   const updatePolicyControlId = html.match(/<label for="([^"]+)">module\.extensionUpdatePolicy<\/label>/)?.[1];
   assert.ok(updatePolicyControlId);
@@ -126,13 +127,14 @@ test("all-off is the only combination that disables remote acquisition and local
 
 test("failed update session creation exposes source settings and retry recovery", () => {
   const html = renderToStaticMarkup(React.createElement(ExtensionAcquisitionStartError, {
-    message: "ARTIFACT_PROVIDER_DISABLED",
+    error: { code: "ARTIFACT_PROVIDER_DISABLED", message: "The provider is disabled." },
     onOpenSources: () => undefined,
     onRetry: () => undefined,
     t,
   }));
   assert.match(html, /role="alert"/);
-  assert.ok(html.includes("ARTIFACT_PROVIDER_DISABLED"));
+  assert.ok(html.includes("extension.acquisition.error"));
+  assert.ok(html.includes("The provider is disabled."));
   assert.ok(html.includes("extension.acquisition.sources.open"));
   assert.ok(html.includes("extension.acquisition.results.retry"));
 });

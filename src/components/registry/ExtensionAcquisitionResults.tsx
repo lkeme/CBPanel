@@ -6,6 +6,7 @@ import {
   PackageSearch,
   RefreshCw,
   SearchX,
+  Settings2,
   Store,
 } from "lucide-react";
 import { useId } from "react";
@@ -20,9 +21,42 @@ import type {
 } from "../../shared/extensionAcquisition";
 import { StatusPill } from "../ui/StatusPill";
 import {
+  ExtensionAcquisitionErrorText,
   formatAcquisitionDateTime,
+  type ExtensionAcquisitionUiError,
   type ExtensionAcquisitionUiTranslator,
 } from "./extensionAcquisitionUi";
+
+export function ExtensionAcquisitionStartError({
+  error,
+  onOpenSources,
+  onRetry,
+  t,
+}: {
+  error: ExtensionAcquisitionUiError;
+  onOpenSources: () => void;
+  onRetry?: () => void;
+  t: ExtensionAcquisitionUiTranslator;
+}) {
+  return (
+    <div className="inline-error acquisition-session-start-error" role="alert">
+      <div>
+        <ExtensionAcquisitionErrorText error={error} t={t} />
+      </div>
+      <div className="acquisition-session-start-error-actions">
+        <button className="command subtle" onClick={onOpenSources} type="button">
+          <Settings2 aria-hidden="true" size={16} />
+          {t("extension.acquisition.sources.open")}
+        </button>
+        {onRetry && (
+          <button className="command subtle" onClick={onRetry} type="button">
+            {t("extension.acquisition.results.retry")}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export type ExtensionDiscoveryStatus =
   | "idle"
@@ -47,7 +81,7 @@ export function ExtensionCatalogResults({
   t,
 }: {
   discoveryKind?: "search" | "resolve";
-  error?: string;
+  error?: ExtensionAcquisitionUiError;
   locale: Locale;
   onCancel: () => void;
   onChoose: (item: ExtensionCatalogItem) => void;
@@ -60,11 +94,9 @@ export function ExtensionCatalogResults({
   t: ExtensionAcquisitionUiTranslator;
 }) {
   const headingId = useId();
-  const failureMessage = discoveryKind === "resolve"
-    ? error
-      ? `${t("extension.acquisition.error")}: ${error}`
-      : t("extension.acquisition.error")
-    : error || t("extension.acquisition.results.error", { message: "" });
+  const failureFallback = discoveryKind === "resolve"
+    ? "extension.acquisition.error" as const
+    : "extension.acquisition.results.errorTitle" as const;
   if (status === "idle") return null;
 
   if (status === "loading" && !page) {
@@ -96,7 +128,7 @@ export function ExtensionCatalogResults({
       <div className="module-empty acquisition-results-state">
         <div className="inline-error" role="alert">
           <CircleX aria-hidden="true" size={18} />
-          <span>{failureMessage}</span>
+          <ExtensionAcquisitionErrorText error={error} fallbackKey={failureFallback} t={t} />
         </div>
         <button className="command primary" onClick={onRetry} type="button">
           {t("extension.acquisition.results.retry")}
@@ -130,7 +162,7 @@ export function ExtensionCatalogResults({
       {status === "error" && (
         <div className="inline-error acquisition-results-inline-error" role="alert">
           <CircleX aria-hidden="true" size={16} />
-          <span>{failureMessage}</span>
+          <ExtensionAcquisitionErrorText error={error} fallbackKey={failureFallback} t={t} />
           <button className="command subtle" onClick={onRetry} type="button">
             {t("extension.acquisition.results.retry")}
           </button>
@@ -247,8 +279,7 @@ function CatalogResultCard({
   );
 }
 
-export type ExtensionArtifactProviderFailure = {
-  message: string;
+export type ExtensionArtifactProviderFailure = ExtensionAcquisitionUiError & {
   providerId: ExtensionArtifactProviderId;
 };
 
@@ -302,7 +333,7 @@ export function ExtensionArtifactChannelChoice({
       {providerFailure && (
         <div className="inline-error acquisition-provider-error" role="alert">
           <CircleX aria-hidden="true" size={16} />
-          <span>{t("extension.acquisition.channel.providerError", { message: providerFailure.message })}</span>
+          <ExtensionAcquisitionErrorText error={providerFailure} t={t} />
         </div>
       )}
 

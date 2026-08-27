@@ -25,6 +25,7 @@ import type { ExtensionModuleStat } from "./registryStats";
 import { RegistryListShell } from "./RegistryModuleShell";
 import { RegistryModuleShell } from "./RegistryModuleShell";
 import { Segmented } from "../ui/form-controls";
+import { ExtensionAcquisitionDialogLoading } from "./RegistryDialogs";
 import type { ExtensionAcquisitionUiTranslator } from "./extensionAcquisitionUi";
 import type { ArtifactProviderSettings, BrowserRuntimeIdentity } from "./ExtensionRegistryDetail";
 
@@ -33,6 +34,9 @@ const ExtensionCatalogResults = lazy(() => import("./ExtensionAcquisitionResults
 })));
 const ExtensionArtifactChannelChoice = lazy(() => import("./ExtensionAcquisitionResults").then((module) => ({
   default: module.ExtensionArtifactChannelChoice,
+})));
+const ExtensionAcquisitionStartError = lazy(() => import("./ExtensionAcquisitionResults").then((module) => ({
+  default: module.ExtensionAcquisitionStartError,
 })));
 const ExtensionAcquisitionSessionPanel = lazy(() => import("./ExtensionAcquisitionSessionPanel").then((module) => ({
   default: module.ExtensionAcquisitionSessionPanel,
@@ -331,75 +335,10 @@ export function ExtensionLocalImportActions({
   );
 }
 
-export function ExtensionAcquisitionStartError({
-  message,
-  onOpenSources,
-  onRetry,
-  t,
-}: {
-  message: string;
-  onOpenSources: () => void;
-  onRetry?: () => void;
-  t: Translate;
-}) {
-  return (
-    <div className="inline-error acquisition-session-start-error" role="alert">
-      <div>
-        <strong>{t("extension.acquisition.error")}</strong>
-        <span>{message}</span>
-      </div>
-      <div className="acquisition-session-start-error-actions">
-        <button className="command subtle" onClick={onOpenSources} type="button">
-          <Settings2 aria-hidden="true" size={16} />
-          {t("extension.acquisition.sources.open")}
-        </button>
-        {onRetry && (
-          <button className="command subtle" onClick={onRetry} type="button">
-            {t("extension.acquisition.results.retry")}
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function ExtensionAcquisitionContentLoading({ t }: { t: Translate }) {
   return (
     <div aria-live="polite" className="preflight-empty" role="status">
       {t("extension.acquisition.loading")}
-    </div>
-  );
-}
-
-function ExtensionAcquisitionDialogLoading({
-  close,
-  t,
-  title,
-}: {
-  close: () => void;
-  t: Translate;
-  title: string;
-}) {
-  return (
-    <div
-      aria-busy="true"
-      aria-labelledby="extension-acquisition-loading-title"
-      aria-modal="true"
-      className="modal-layer acquisition-modal-layer"
-      role="dialog"
-    >
-      <div aria-hidden="true" className="modal-scrim" />
-      <section className="modal-panel acquisition-modal-panel registry-editor-panel">
-        <header className="modal-header with-close">
-          <h2 id="extension-acquisition-loading-title">{title}</h2>
-          <button className="command subtle" onClick={close} type="button">
-            {t("actions.close")}
-          </button>
-        </header>
-        <div className="modal-body">
-          <ExtensionAcquisitionContentLoading t={t} />
-        </div>
-      </section>
     </div>
   );
 }
@@ -534,28 +473,17 @@ export function ExtensionRegistryPanel({
     const selection = acquisition.state.selection;
     if (!selection) return undefined;
     if (selection.resolution) return selection.resolution;
-    const offers = [
-      ...(acquisition.state.settings.googleArtifactEnabled ? [{
-        namespace: "chrome-web-store" as const,
-        storeId: selection.storeId,
-        artifactProviderId: "chrome-web-store" as const,
-        format: "crx3" as const,
-        providerLabel: "Google Chrome Web Store",
-      }] : []),
-      ...(acquisition.state.settings.crxsosoArtifactEnabled ? [{
-        namespace: "chrome-web-store" as const,
-        storeId: selection.storeId,
-        artifactProviderId: "crxsoso" as const,
-        format: "crx3" as const,
-        providerLabel: "CRX搜搜",
-      }] : []),
-    ];
-    return {
-      namespace: "chrome-web-store",
+    const offers = ([
+      ["chrome-web-store", "Google Chrome Web Store", acquisition.state.settings.googleArtifactEnabled],
+      ["crxsoso", "CRX搜搜", acquisition.state.settings.crxsosoArtifactEnabled],
+    ] as const).flatMap(([artifactProviderId, providerLabel, enabled]) => enabled ? [{
+      namespace: "chrome-web-store" as const,
       storeId: selection.storeId,
-      storeUrl: selection.storeUrl,
-      offers,
-    };
+      artifactProviderId,
+      format: "crx3" as const,
+      providerLabel,
+    }] : []);
+    return { namespace: "chrome-web-store", storeId: selection.storeId, storeUrl: selection.storeUrl, offers };
   }
 
   async function startOffer(providerId: ExtensionArtifactProviderId) {
@@ -589,7 +517,7 @@ export function ExtensionRegistryPanel({
       && session.lastRequest
       && session.error.code !== "ACQUISITION_REQUEST_CANCELLED"
       && session.error.code !== "ACQUISITION_CANCELLED"
-      ? { providerId: session.lastRequest.artifactProviderId, message: session.error.message }
+      ? { ...session.error, providerId: session.lastRequest.artifactProviderId }
       : undefined;
     const startingProviderId = session.operation === "starting" || session.operation === "polling"
       ? session.lastRequest?.artifactProviderId
@@ -679,9 +607,9 @@ export function ExtensionRegistryPanel({
             />
 
             <Suspense fallback={<ExtensionAcquisitionContentLoading t={t} />}>
-            <ExtensionCatalogResults
-              discoveryKind={acquisition.state.discovery.kind}
-              error={acquisition.state.discovery.error?.message}
+              <ExtensionCatalogResults
+                discoveryKind={acquisition.state.discovery.kind}
+                error={acquisition.state.discovery.error}
                 locale={locale as "zh-CN" | "en-US"}
                 onCancel={acquisition.cancelDiscovery}
                 onChoose={(item) => acquisition.selectCatalogItem(item)}
@@ -695,9 +623,9 @@ export function ExtensionRegistryPanel({
               />
 
               {resolution && (
-              <ExtensionArtifactChannelChoice
-                onCancel={async () => { await acquisition.cancelSession(); }}
-                onOpenListing={openListing}
+                <ExtensionArtifactChannelChoice
+                  onCancel={async () => { await acquisition.cancelSession(); }}
+                  onOpenListing={openListing}
                   onSelect={(providerId) => acquisition.selectProvider(providerId)}
                   onStart={(offer) => startOffer(offer.artifactProviderId)}
                   providerFailure={providerFailure}
@@ -707,22 +635,22 @@ export function ExtensionRegistryPanel({
                   t={acquisitionT}
                 />
               )}
-            </Suspense>
 
-            {session.error && !session.view && (!resolution || session.lastRequest?.purpose === "update") && (
-              <ExtensionAcquisitionStartError
-                message={session.error.message}
-                onOpenSources={() => setSourceSettingsOpen(true)}
-                onRetry={session.lastRequest ? () => { void acquisition.retrySession(); } : undefined}
-                t={t}
-              />
-            )}
+              {session.error && !session.view && (!resolution || session.lastRequest?.purpose === "update") && (
+                <ExtensionAcquisitionStartError
+                  error={session.error}
+                  onOpenSources={() => setSourceSettingsOpen(true)}
+                  onRetry={session.lastRequest ? () => { void acquisition.retrySession(); } : undefined}
+                  t={acquisitionT}
+                />
+              )}
+            </Suspense>
 
             {session.view && (
               <Suspense fallback={<ExtensionAcquisitionContentLoading t={t} />}>
                 <ExtensionAcquisitionSessionPanel
                   confirmedExtension={session.confirmation?.extension}
-                  error={session.error?.message}
+                  error={session.error}
                   locale={locale as "zh-CN" | "en-US"}
                   onCancel={async () => { await acquisition.cancelSession(); }}
                   onBindNext={() => {
@@ -735,7 +663,10 @@ export function ExtensionRegistryPanel({
                     setWorkspaceView("library");
                   }}
                   onRetry={async () => { await acquisition.retrySession(); }}
+                  onRetryStateRefresh={async () => { await acquisition.retryStateRefresh(); }}
                   operation={session.operation}
+                  refreshError={session.refreshError}
+                  refreshingState={session.refreshingState}
                   session={session.view}
                   t={acquisitionT}
                   targetExtensionId={session.lastRequest?.targetExtensionId}
@@ -749,7 +680,7 @@ export function ExtensionRegistryPanel({
           <Suspense fallback={(
             <ExtensionAcquisitionDialogLoading
               close={() => setSourceSettingsOpen(false)}
-              t={t}
+              t={acquisitionT}
               title={t("extension.acquisition.source.title")}
             />
           )}>
@@ -757,7 +688,7 @@ export function ExtensionRegistryPanel({
               busyCapabilityId={savingCapabilityId}
               capabilities={acquisition.state.capabilities.items}
               close={() => setSourceSettingsOpen(false)}
-              error={acquisition.state.capabilities.error?.message ?? acquisition.state.settingsRequest.error?.message}
+              error={acquisition.state.capabilities.error ?? acquisition.state.settingsRequest.error}
               loading={acquisition.state.capabilities.status === "loading"}
               locale={locale as "zh-CN" | "en-US"}
               onRefresh={() => acquisition.refreshCapabilities()}
@@ -771,13 +702,13 @@ export function ExtensionRegistryPanel({
           <Suspense fallback={(
             <ExtensionAcquisitionDialogLoading
               close={acquisition.dismissDisclosure}
-              t={t}
+              t={acquisitionT}
               title={t("extension.acquisition.disclosure.title")}
             />
           )}>
             <ExtensionAcquisitionDisclosureDialog
               busy={acquisition.state.settingsRequest.status === "saving"}
-              error={acquisition.state.settingsRequest.error?.message}
+              error={acquisition.state.settingsRequest.error}
               onAccept={async () => { await acquisition.acceptDisclosure(); }}
               onCancel={acquisition.dismissDisclosure}
               t={acquisitionT}

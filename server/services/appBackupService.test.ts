@@ -112,8 +112,6 @@ test("schema-v2 backup round-trips retained verified CRX evidence with receiving
   assert.equal(serialized.extensions[0].artifactArchivePath, `extension-artifacts/${extensionId}/current.crx`);
   assert.equal(serialized.extensions[0].localPath, undefined);
   assert.equal(JSON.stringify(serialized.extensions[0]).includes(sourceDirectory), false);
-  sourceRepository.close();
-
   const targetDirectory = await makeTempDir();
   const targetRepository = new SqlitePanelRepository({ dataDir: targetDirectory, seed: () => [] });
   await makeService(targetDirectory, targetRepository, new Set(), undefined, verifier.verifyFile)
@@ -125,6 +123,32 @@ test("schema-v2 backup round-trips retained verified CRX evidence with receiving
   assert.equal(restored?.provenance?.verification.developerKeySha256, fixture.developerSpkiSha256);
   assert.equal(JSON.stringify(restored).includes(sourceDirectory), false);
   targetRepository.close();
+
+  await fs.rm(extensionRoot, { recursive: true, force: true });
+  const artifactOnlyBackupPath = path.join(sourceDirectory, "artifact-only.cbpb");
+  await makeService(sourceDirectory, sourceRepository, new Set(), undefined, verifier.verifyFile)
+    .exportToBackup({ outputPath: artifactOnlyBackupPath });
+  const artifactOnlyArchive = unzipSync(await fs.readFile(artifactOnlyBackupPath));
+  assert.equal(Boolean(artifactOnlyArchive[`extensions/${extensionId}/manifest.json`]), false);
+  assert.ok(artifactOnlyArchive[`extension-artifacts/${extensionId}/current.crx`]);
+  const artifactOnlyDirectory = await makeTempDir();
+  const artifactOnlyRepository = new SqlitePanelRepository({ dataDir: artifactOnlyDirectory, seed: () => [] });
+  await makeService(artifactOnlyDirectory, artifactOnlyRepository, new Set(), undefined, verifier.verifyFile)
+    .restoreFromBackup({ inputPath: artifactOnlyBackupPath });
+  const missing = await artifactOnlyRepository.getExtension(extensionId);
+  assert.equal(missing?.installState, "local-missing");
+  assert.equal(missing?.localPath, undefined);
+  const localReinstall = new ExtensionService({
+    repository: artifactOnlyRepository,
+    extensionCacheDir: path.join(artifactOnlyDirectory, "extensions"),
+    extensionArtifactDir: path.join(artifactOnlyDirectory, "extension-artifacts"),
+    extensionAcquisitionDir: path.join(artifactOnlyDirectory, "extension-acquisitions"),
+    verifyStoreCrxFileForTesting: verifier.verifyFile,
+  });
+  await localReinstall.initialize();
+  assert.equal((await localReinstall.reinstall(extensionId)).installState, "installed");
+  artifactOnlyRepository.close();
+  sourceRepository.close();
 });
 
 test("schema-v1 backup restores legacy remote rows only through inert retirement provenance", async () => {

@@ -564,6 +564,15 @@ test("snapshot rejects a live-path overwrite and invalid databases without leavi
     (error: unknown) => error instanceof ExtensionSourceRetirementMigrationError
       && error.code === "EXTENSION_SOURCE_SNAPSHOT_PATH_INVALID",
   );
+  if (process.platform === "win32") {
+    const caseAlias = databasePath.toUpperCase();
+    assert.notEqual(caseAlias, databasePath);
+    await assert.rejects(
+      createWalAwareSqliteSnapshot({ databasePath, snapshotPath: caseAlias }),
+      (error: unknown) => error instanceof ExtensionSourceRetirementMigrationError
+        && error.code === "EXTENSION_SOURCE_SNAPSHOT_PATH_INVALID",
+    );
+  }
   const invalidPath = path.join(directory, "invalid.sqlite");
   await fs.writeFile(invalidPath, "not sqlite");
   await assert.rejects(
@@ -599,6 +608,153 @@ test("snapshot refuses a symlinked parent instead of publishing outside the data
       && error.code === "EXTENSION_SOURCE_SNAPSHOT_PATH_INVALID",
   );
   assert.deepEqual(await fs.readdir(outside), []);
+});
+
+test("snapshot rejects an existing hard-link alias of the live database", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const databasePath = path.join(directory, "live.sqlite");
+  const snapshotPath = path.join(directory, "snapshots", "before.sqlite");
+  const database = new DatabaseSync(databasePath);
+  database.exec("CREATE TABLE records(id TEXT PRIMARY KEY); INSERT INTO records VALUES ('before');");
+  database.close();
+  await fs.mkdir(path.dirname(snapshotPath), { recursive: true });
+  try {
+    await fs.link(databasePath, snapshotPath);
+  } catch {
+    return;
+  }
+  await assert.rejects(
+    createWalAwareSqliteSnapshot({ databasePath, snapshotPath }),
+    (error: unknown) => error instanceof ExtensionSourceRetirementMigrationError
+      && error.code === "EXTENSION_SOURCE_SNAPSHOT_INVALID",
+  );
+});
+
+test("malformed completion markers fail closed instead of skipping retirement", async () => {
+  const row = extensionFixture("marker-shape", {
+    sourceKind: "remote-zip",
+    sourceUrl: "https://legacy.example/marker-shape.zip",
+    installState: "metadata-only",
+  });
+  const store = new FakeRetirementStore([row]);
+  await store.writeMetadata(EXTENSION_SOURCE_RETIREMENT_MARKER_KEY, JSON.stringify({
+    schemaVersion: 1,
+    migrationVersion: 1,
+    completedAt: "2026-08-27T00:00:00.000Z",
+    report: {
+      schemaVersion: 1,
+      migrationVersion: 1,
+      markerKey: EXTENSION_SOURCE_RETIREMENT_MARKER_KEY,
+      startedAt: "not-a-date",
+      completedAt: "2026-08-27T00:00:01.000Z",
+      status: "completed",
+      counts: {
+        scanned: 1,
+        migrated: 1,
+        managedSnapshots: 0,
+        localMissing: 0,
+        pendingDisabled: 0,
+        metadataOnly: 1,
+        invalidId: 0,
+        duplicates: 0,
+        unchanged: 0,
+        issuesOmitted: 0,
+      },
+      issues: [{ extensionId: row.id, code: "NOT_A_REAL_ISSUE" }],
+    },
+  }));
+
+  await assert.rejects(
+    migrateLegacyExtensionSources({ store, now: monotonicClock() }),
+    (error: unknown) => error instanceof ExtensionSourceRetirementMigrationError
+      && error.code === "EXTENSION_SOURCE_MIGRATION_MARKER_INVALID",
+  );
+  assert.equal(store.rows[0]?.sourceKind, "remote-zip");
+});
+
+test("production retirement rejects a completed marker without rollback snapshot evidence", async () => {
+  const row = extensionFixture("marker-without-snapshot", {
+    sourceKind: "remote-zip",
+    sourceUrl: "https://legacy.example/marker-without-snapshot.zip",
+    installState: "metadata-only",
+  });
+  const store = new FakeRetirementStore([row]);
+  await migrateLegacyExtensionSources({
+    store,
+    probeLocalPackage: async () => ({ localPathExists: false, localPackageReadable: false }),
+    now: monotonicClock(),
+  });
+
+  await assert.rejects(
+    runExtensionSourceRetirement({
+      store,
+      databasePath: path.resolve("missing-live.sqlite"),
+      snapshotPath: path.resolve("missing-snapshot.sqlite"),
+      now: monotonicClock(),
+    }),
+    (error: unknown) => error instanceof ExtensionSourceRetirementMigrationError
+      && error.code === "EXTENSION_SOURCE_MIGRATION_MARKER_INVALID",
+  );
+});
+
+test("completion markers reject case-only source and snapshot path aliases on Windows", async (t) => {
+  if (process.platform !== "win32") return;
+  const directory = await temporaryDirectory(t);
+  const databasePath = path.join(directory, "live.sqlite");
+  const snapshotPath = path.join(directory, "before.sqlite");
+  const database = new DatabaseSync(databasePath);
+  database.exec("CREATE TABLE extensions(id TEXT PRIMARY KEY); CREATE TABLE storage_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);");
+  database.close();
+  const store = new FakeRetirementStore([]);
+  await runExtensionSourceRetirement({
+    store,
+    databasePath,
+    snapshotPath,
+    now: monotonicClock(),
+  });
+  const encoded = await store.readMetadata(EXTENSION_SOURCE_RETIREMENT_MARKER_KEY);
+  assert.ok(encoded);
+  const marker = JSON.parse(encoded) as {
+    report: { snapshot: { sourcePath: string; snapshotPath: string } };
+  };
+  marker.report.snapshot.snapshotPath = marker.report.snapshot.sourcePath.toUpperCase();
+  assert.notEqual(marker.report.snapshot.snapshotPath, marker.report.snapshot.sourcePath);
+  await store.writeMetadata(EXTENSION_SOURCE_RETIREMENT_MARKER_KEY, JSON.stringify(marker));
+
+  await assert.rejects(
+    migrateLegacyExtensionSources({ store, now: monotonicClock() }),
+    (error: unknown) => error instanceof ExtensionSourceRetirementMigrationError
+      && error.code === "EXTENSION_SOURCE_MIGRATION_MARKER_INVALID",
+  );
+});
+
+test("completion markers reject snapshot table counts that disagree with the migration report", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const databasePath = path.join(directory, "live.sqlite");
+  const snapshotPath = path.join(directory, "before.sqlite");
+  const database = new DatabaseSync(databasePath);
+  database.exec("CREATE TABLE extensions(id TEXT PRIMARY KEY); CREATE TABLE storage_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);");
+  database.close();
+  const store = new FakeRetirementStore([]);
+  await runExtensionSourceRetirement({
+    store,
+    databasePath,
+    snapshotPath,
+    now: monotonicClock(),
+  });
+  const encoded = await store.readMetadata(EXTENSION_SOURCE_RETIREMENT_MARKER_KEY);
+  assert.ok(encoded);
+  const marker = JSON.parse(encoded) as {
+    report: { snapshot: { tables: Record<string, number> } };
+  };
+  marker.report.snapshot.tables.extensions = 1;
+  await store.writeMetadata(EXTENSION_SOURCE_RETIREMENT_MARKER_KEY, JSON.stringify(marker));
+
+  await assert.rejects(
+    migrateLegacyExtensionSources({ store, now: monotonicClock() }),
+    (error: unknown) => error instanceof ExtensionSourceRetirementMigrationError
+      && error.code === "EXTENSION_SOURCE_MIGRATION_MARKER_INVALID",
+  );
 });
 
 test("a failed retirement retains its rollback image and a retry publishes a distinct snapshot", async (t) => {

@@ -239,6 +239,201 @@ test("one canonical metadata-only row upgrades in place after verified acquisiti
   repository.close();
 });
 
+test("verified update requires approval when optional permissions become required", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-permission-promotion-"));
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const signingKeys = createSyntheticCrx3SigningKeys();
+  const initialFixture = createSyntheticStoreCrx3({
+    name: "Permission Promotion",
+    version: "1.0.0",
+    permissions: ["storage"],
+    hostPermissions: [],
+    optionalPermissions: ["cookies"],
+    optionalHostPermissions: ["https://promoted.test/*"],
+    signingKeys,
+  });
+  const verifier = createCrx3VerifierForTesting(initialFixture.publisherSpkiSha256);
+  const service = new ExtensionService({
+    repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionArtifactDir: path.join(directory, "extension-artifacts"),
+    extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
+    readSettings: async () => normalizeSettings(),
+    verifyStoreCrxFileForTesting: verifier.verifyFile,
+    activeEnvironmentIds: () => new Set(),
+  });
+  await service.initialize();
+  const installed = await service.commitPreparedAcquisition(
+    await prepareAcquisition(directory, initialFixture.bytes, initialFixture.storeId, verifier.verifyFile),
+    { disposition: "create" },
+  );
+  const promotedFixture = createSyntheticStoreCrx3({
+    name: "Permission Promotion",
+    version: "2.0.0",
+    permissions: ["storage", "cookies"],
+    hostPermissions: ["https://promoted.test/*"],
+    optionalPermissions: [],
+    optionalHostPermissions: [],
+    signingKeys,
+  });
+  const promoted = await prepareAcquisition(
+    directory,
+    promotedFixture.bytes,
+    promotedFixture.storeId,
+    verifier.verifyFile,
+    "abcdefghijklmnopqrstuvwxyzABCDPR",
+  );
+  promoted.purpose = "update";
+  promoted.targetExtensionId = installed.id;
+  promoted.targetUpdatedAt = installed.updatedAt;
+  promoted.permissionApprovalToken = "abcdefghijklmnopqrstuvwxyzABCDPT";
+  promoted.addedPermissions = ["cookies", "https://promoted.test/*"];
+  promoted.conflictCandidates = [{
+    extensionId: installed.id,
+    name: installed.name,
+    version: installed.version,
+    installState: installed.installState,
+    matchBy: "store-identity",
+    eligible: true,
+  }];
+
+  await assert.rejects(
+    service.commitPreparedAcquisition(promoted, {
+      disposition: "upgrade",
+      targetExtensionId: installed.id,
+    }),
+    (error: unknown) => (error as { code?: string }).code === "ACQUISITION_PERMISSION_INCREASE",
+  );
+  const approved = await service.commitPreparedAcquisition(promoted, {
+    disposition: "upgrade",
+    targetExtensionId: installed.id,
+    permissionApprovalToken: promoted.permissionApprovalToken,
+  });
+  assert.deepEqual(approved.permissions.sort(), ["cookies", "storage"]);
+  assert.deepEqual(approved.hostPermissions, ["https://promoted.test/*"]);
+  repository.close();
+});
+
+test("disabling an update provider aborts its in-flight probe without changing the extension", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-provider-disable-"));
+  const setup = await committedStoreExtension(directory);
+  let settings = normalizeSettings();
+  let probeStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    probeStarted = resolve;
+  });
+  let observedSignal: AbortSignal | undefined;
+  const switching = new ExtensionService({
+    repository: setup.repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionArtifactDir: path.join(directory, "extension-artifacts"),
+    extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
+    readSettings: async () => settings,
+    verifyStoreCrxFileForTesting: setup.verifier.verifyFile,
+    probeArtifactProvider: async (_providerId, _storeId, _destinationPath, signal) => {
+      observedSignal = signal;
+      probeStarted?.();
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    },
+    activeEnvironmentIds: () => new Set(),
+  });
+  await switching.initialize();
+  const pending = switching.transitionUpdateProvider(setup.extension.id, "crxsoso");
+  await started;
+  settings = normalizeSettings({ extensionAcquisition: { crxsosoArtifactEnabled: false } });
+  switching.settingsChanged(settings);
+
+  await assert.rejects(
+    pending,
+    (error: unknown) => (error as { code?: string }).code === "ARTIFACT_PROVIDER_DISABLED",
+  );
+  assert.equal(observedSignal?.aborted, true);
+  const unchanged = await setup.repository.getExtension(setup.extension.id);
+  assert.equal(unchanged?.updateProviderId, "chrome-web-store");
+  assert.equal(unchanged?.updatePolicy, "auto");
+  assert.equal(
+    (await fs.readdir(path.join(directory, "extension-acquisitions")))
+      .some((name) => name.startsWith(".provider-probe-")),
+    false,
+  );
+  setup.repository.close();
+});
+
+test("provider disablement at the repository boundary prevents a stale provider write", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-provider-write-race-"));
+  const setup = await committedStoreExtension(directory);
+  let settings = normalizeSettings();
+  const originalUpdateExtension = setup.repository.updateExtension.bind(setup.repository);
+  let writeEntered: (() => void) | undefined;
+  const entered = new Promise<void>((resolve) => {
+    writeEntered = resolve;
+  });
+  let releaseWrite: (() => void) | undefined;
+  const released = new Promise<void>((resolve) => {
+    releaseWrite = resolve;
+  });
+  setup.repository.updateExtension = async (id, patch, beforeWrite) => {
+    if (patch.updateProviderId === "crxsoso") {
+      writeEntered?.();
+      await released;
+    }
+    return originalUpdateExtension(id, patch, beforeWrite);
+  };
+  const switching = new ExtensionService({
+    repository: setup.repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionArtifactDir: path.join(directory, "extension-artifacts"),
+    extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
+    readSettings: async () => settings,
+    verifyStoreCrxFileForTesting: setup.verifier.verifyFile,
+    probeArtifactProvider: async (providerId, storeId, destinationPath, signal) => {
+      if (signal.aborted) throw signal.reason;
+      await fs.copyFile(setup.extension.artifactArchivePath as string, destinationPath);
+      return {
+        namespace: "chrome-web-store",
+        storeId,
+        artifactProviderId: providerId,
+        format: "crx3",
+        download: {
+          path: destinationPath,
+          size: setup.extension.provenance!.artifact.size!,
+          sha256: setup.extension.provenance!.artifact.sha256!,
+          finalHost: "c2.crxsoso.com",
+          fetchedAt: new Date().toISOString(),
+        },
+      };
+    },
+    activeEnvironmentIds: () => new Set(),
+  });
+  await switching.initialize();
+  const pending = switching.transitionUpdateProvider(setup.extension.id, "crxsoso");
+  await entered;
+  settings = normalizeSettings({ extensionAcquisition: { crxsosoArtifactEnabled: false } });
+  switching.settingsChanged(settings);
+  releaseWrite?.();
+
+  await assert.rejects(
+    pending,
+    (error: unknown) => (error as { code?: string }).code === "ARTIFACT_PROVIDER_DISABLED",
+  );
+  const unchanged = await setup.repository.getExtension(setup.extension.id);
+  assert.equal(unchanged?.updatedAt, setup.extension.updatedAt);
+  assert.equal(unchanged?.updateProviderId, "chrome-web-store");
+  assert.equal(unchanged?.updatePolicy, "auto");
+  assert.equal(unchanged?.updateState?.status, setup.extension.updateState?.status);
+  assert.equal(unchanged?.updateState?.checkedAt, setup.extension.updateState?.checkedAt);
+  assert.equal(unchanged?.updateState?.availableVersion, setup.extension.updateState?.availableVersion);
+  assert.equal(unchanged?.updateState?.errorCode, setup.extension.updateState?.errorCode);
+  assert.equal(
+    (await fs.readdir(path.join(directory, "extension-acquisitions")))
+      .some((name) => name.startsWith(".provider-probe-")),
+    false,
+  );
+  setup.repository.close();
+});
+
 test("verified reinstall rebuilds a missing unpacked tree from the retained CRX without network access", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-retained-reinstall-"));
   const setup = await committedStoreExtension(directory);
@@ -336,6 +531,161 @@ test("verified reinstall rejects a tampered retained CRX and leaves the row loca
   assert.equal(failed?.installState, "local-missing");
   assert.equal(await exists(path.join(directory, "extensions", setup.extension.id)), false);
   assert.deepEqual(await fs.readdir(path.join(directory, "extension-acquisition-journal")), []);
+  setup.repository.close();
+});
+
+test("retained reinstall preserves journal staging for startup after secondary reconciliation failure", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-retained-startup-recovery-"));
+  const setup = await committedStoreExtension(directory);
+  const artifactPath = setup.extension.artifactArchivePath as string;
+  const artifactBytes = await fs.readFile(artifactPath);
+  await fs.rm(setup.extension.localPath as string, { recursive: true, force: true });
+  const originalGetExtension = setup.repository.getExtension.bind(setup.repository);
+  let failRecoveryReads = false;
+  let failedReads = 0;
+  setup.repository.getExtension = async (id: string) => {
+    if (failRecoveryReads && failedReads < 2) {
+      failedReads += 1;
+      throw new Error("transient repository read failure");
+    }
+    return originalGetExtension(id);
+  };
+  let injected = false;
+  const interrupted = new ExtensionService({
+    repository: setup.repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionArtifactDir: path.join(directory, "extension-artifacts"),
+    extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
+    readSettings: async () => normalizeSettings(),
+    verifyStoreCrxFileForTesting: setup.verifier.verifyFile,
+    acquisitionCommitFaultForTesting: (phase) => {
+      if (!injected && phase === "prepared") {
+        injected = true;
+        failRecoveryReads = true;
+        throw new Error("fault:prepared");
+      }
+    },
+    activeEnvironmentIds: () => new Set(),
+  });
+  await interrupted.initialize();
+
+  await assert.rejects(
+    interrupted.reinstall(setup.extension.id),
+    (error: unknown) => (error as { code?: string }).code === "ACQUISITION_RECONCILIATION_REQUIRED",
+  );
+  setup.repository.getExtension = originalGetExtension;
+  const beforeRestart = await setup.repository.getExtension(setup.extension.id);
+  assert.equal(beforeRestart?.installState, "local-missing");
+  const journals = await fs.readdir(path.join(directory, "extension-acquisition-journal"));
+  const recoveryRoots = await fs.readdir(path.join(directory, "extension-acquisitions"));
+  assert.equal(journals.length, 1);
+  assert.equal(recoveryRoots.filter((name) => name.startsWith("reinstall-")).length, 1);
+
+  const restarted = new ExtensionService({
+    repository: setup.repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionArtifactDir: path.join(directory, "extension-artifacts"),
+    extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
+    readSettings: async () => normalizeSettings(),
+    verifyStoreCrxFileForTesting: setup.verifier.verifyFile,
+    activeEnvironmentIds: () => new Set(),
+  });
+  await restarted.initialize();
+
+  assert.deepEqual(await fs.readFile(artifactPath), artifactBytes);
+  assert.equal(await exists(path.join(directory, "extensions", setup.extension.id)), false);
+  assert.deepEqual(await fs.readdir(path.join(directory, "extension-acquisition-journal")), []);
+  assert.equal(
+    (await fs.readdir(path.join(directory, "extension-acquisitions")))
+      .some((name) => name.startsWith("reinstall-")),
+    false,
+  );
+  assert.equal((await setup.repository.getExtension(setup.extension.id))?.updatedAt, beforeRestart?.updatedAt);
+  setup.repository.close();
+});
+
+test("retained reinstall preserves staging when journal directory sync fails after rename", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-retained-journal-sync-"));
+  const setup = await committedStoreExtension(directory);
+  const artifactPath = setup.extension.artifactArchivePath as string;
+  const artifactBytes = await fs.readFile(artifactPath);
+  await fs.rm(setup.extension.localPath as string, { recursive: true, force: true });
+  const originalGetExtension = setup.repository.getExtension.bind(setup.repository);
+  let failRecoveryReads = false;
+  let failedReads = 0;
+  setup.repository.getExtension = async (id: string) => {
+    if (failRecoveryReads && failedReads < 2) {
+      failedReads += 1;
+      throw new Error("transient repository read failure");
+    }
+    return originalGetExtension(id);
+  };
+  let syncFailed = false;
+  const interrupted = new ExtensionService({
+    repository: setup.repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionArtifactDir: path.join(directory, "extension-artifacts"),
+    extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
+    readSettings: async () => normalizeSettings(),
+    verifyStoreCrxFileForTesting: setup.verifier.verifyFile,
+    commitJournalSyncDirectoryForTesting: async () => {
+      if (syncFailed) return;
+      syncFailed = true;
+      failRecoveryReads = true;
+      throw new Error("injected journal directory sync failure");
+    },
+    activeEnvironmentIds: () => new Set(),
+  });
+  await interrupted.initialize();
+
+  await assert.rejects(
+    interrupted.reinstall(setup.extension.id),
+    (error: unknown) => (error as { code?: string }).code === "ACQUISITION_RECONCILIATION_REQUIRED",
+  );
+  setup.repository.getExtension = originalGetExtension;
+  const beforeRestart = await setup.repository.getExtension(setup.extension.id);
+  assert.equal(beforeRestart?.installState, "local-missing");
+  assert.equal((await fs.readdir(path.join(directory, "extension-acquisition-journal"))).length, 1);
+  assert.equal(
+    (await fs.readdir(path.join(directory, "extension-acquisitions")))
+      .filter((name) => name.startsWith("reinstall-")).length,
+    1,
+  );
+
+  const restarted = new ExtensionService({
+    repository: setup.repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionArtifactDir: path.join(directory, "extension-artifacts"),
+    extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
+    readSettings: async () => normalizeSettings(),
+    verifyStoreCrxFileForTesting: setup.verifier.verifyFile,
+    activeEnvironmentIds: () => new Set(),
+  });
+  await restarted.initialize();
+
+  assert.deepEqual(await fs.readFile(artifactPath), artifactBytes);
+  assert.equal(await exists(path.join(directory, "extensions", setup.extension.id)), false);
+  assert.deepEqual(await fs.readdir(path.join(directory, "extension-acquisition-journal")), []);
+  assert.equal(
+    (await fs.readdir(path.join(directory, "extension-acquisitions")))
+      .some((name) => name.startsWith("reinstall-")),
+    false,
+  );
+  assert.equal((await setup.repository.getExtension(setup.extension.id))?.updatedAt, beforeRestart?.updatedAt);
+  setup.repository.close();
+});
+
+test("deleting a verified extension removes its retained artifact directory", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-retained-delete-"));
+  const setup = await committedStoreExtension(directory);
+  const artifactDirectory = path.dirname(setup.extension.artifactArchivePath as string);
+  await setup.service.unbindFromEnvironments(setup.extension.id, [setup.environmentId]);
+
+  await setup.service.deleteExtension(setup.extension.id);
+
+  assert.equal(await setup.repository.getExtension(setup.extension.id), undefined);
+  assert.equal(await exists(setup.extension.localPath as string), false);
+  assert.equal(await exists(artifactDirectory), false);
   setup.repository.close();
 });
 

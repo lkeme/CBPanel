@@ -33,7 +33,11 @@ export interface ExtensionAcquisitionRouteService {
     sessionId: string,
     request: ExtensionAcquisitionSessionConfirmRequest,
   ): Promise<ExtensionAcquisitionConfirmationResult>;
-  transitionUpdateProvider(extensionId: string, providerId: ExtensionArtifactProviderId): Promise<ExtensionEntity>;
+  transitionUpdateProvider(
+    extensionId: string,
+    providerId: ExtensionArtifactProviderId,
+    signal?: AbortSignal,
+  ): Promise<ExtensionEntity>;
 }
 
 /** Mount at `/api/extension-acquisition`; the router intentionally owns no `/api/state` route. */
@@ -121,15 +125,22 @@ export function createExtensionAcquisitionRouter(service: ExtensionAcquisitionRo
   });
 
   router.put("/extensions/:extensionId/update-provider", async (request, response) => {
+    const requestAbort = requestAbortSignal(request, response);
     try {
       assertNoQuery(request);
       const body = strictBody(request.body, ["providerId"]);
       if (body.providerId !== "chrome-web-store" && body.providerId !== "crxsoso") {
         throw new ExtensionAcquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID");
       }
-      response.json(await service.transitionUpdateProvider(request.params.extensionId, body.providerId));
+      response.json(await service.transitionUpdateProvider(
+        request.params.extensionId,
+        body.providerId,
+        requestAbort.signal,
+      ));
     } catch (error) {
       sendRouteError(response, error);
+    } finally {
+      requestAbort.dispose();
     }
   });
 

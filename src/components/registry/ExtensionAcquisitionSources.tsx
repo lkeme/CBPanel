@@ -19,10 +19,12 @@ import type {
 } from "../../shared/extensionAcquisition";
 import { StatusPill } from "../ui/StatusPill";
 import { Switch } from "../ui/switch";
+import { ExtensionAcquisitionDialog } from "./RegistryDialogs";
 import {
-  ExtensionAcquisitionDialog,
+  ExtensionAcquisitionErrorText,
   formatAcquisitionDateTime,
   type ExtensionAcquisitionUiKey,
+  type ExtensionAcquisitionUiError,
   type ExtensionAcquisitionUiTranslator,
 } from "./extensionAcquisitionUi";
 
@@ -58,7 +60,7 @@ export type ExtensionAcquisitionSourceSettingsProps = {
   busyCapabilityId?: ExtensionAcquisitionCapabilityId;
   capabilities: ExtensionCapabilityView[];
   disabledReasons?: Partial<Record<ExtensionAcquisitionCapabilityId, string>>;
-  error?: string;
+  error?: ExtensionAcquisitionUiError;
   healthMessages?: Partial<Record<ExtensionAcquisitionCapabilityId, string>>;
   loading?: boolean;
   locale: Locale;
@@ -107,7 +109,7 @@ export function ExtensionAcquisitionSourceSettings({
       {error && (
         <div className="inline-error" role="alert">
           <CircleX aria-hidden="true" size={16} />
-          <span>{error}</span>
+          <ExtensionAcquisitionErrorText error={error} t={t} />
         </div>
       )}
 
@@ -280,7 +282,7 @@ export function ExtensionAcquisitionDisclosureDialog({
   t,
 }: {
   busy: boolean;
-  error?: string;
+  error?: ExtensionAcquisitionUiError;
   onAccept: () => void | Promise<void>;
   onCancel: () => void;
   t: ExtensionAcquisitionUiTranslator;
@@ -335,7 +337,7 @@ export function ExtensionAcquisitionDisclosureDialog({
         {error && (
           <div className="inline-error" role="alert">
             <CircleX aria-hidden="true" size={16} />
-            <span>{error}</span>
+            <ExtensionAcquisitionErrorText error={error} t={t} />
           </div>
         )}
       </div>

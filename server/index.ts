@@ -218,6 +218,7 @@ const appBackupService = new AppBackupService({
   settingsChanged: (settings) => {
     extensionAcquisitionService.settingsChanged(settings);
     extensionAcquisitionSessionService.settingsChanged(settings);
+    extensionService.settingsChanged(settings);
   },
   mutationCoordinator: dataMutationCoordinator,
 });
@@ -620,6 +621,7 @@ async function createApp(): Promise<express.Express> {
       const settings = await repository.saveSettings(request.body ?? {});
       extensionAcquisitionService.settingsChanged(settings);
       extensionAcquisitionSessionService.settingsChanged(settings);
+      extensionService.settingsChanged(settings);
       response.json(settings);
     } catch (error) {
       sendError(response, error);
@@ -637,8 +639,8 @@ async function createApp(): Promise<express.Express> {
       getSession: (sessionId) => extensionAcquisitionSessionService.get(sessionId),
       cancelSession: (sessionId) => extensionAcquisitionSessionService.cancel(sessionId),
       confirmSession: (sessionId, request) => extensionAcquisitionSessionService.confirm(sessionId, request),
-      transitionUpdateProvider: (extensionId, providerId) => (
-        extensionService.transitionUpdateProvider(extensionId, providerId)
+      transitionUpdateProvider: (extensionId, providerId, signal) => (
+        extensionService.transitionUpdateProvider(extensionId, providerId, signal)
       ),
     }),
   );

@@ -1,7 +1,16 @@
-import { useEffect, useId, useRef, type KeyboardEvent, type ReactNode } from "react";
-import { X } from "lucide-react";
-
 import type { Locale } from "../../i18n";
+import type { ExtensionAcquisitionErrorCode } from "../../shared/extensionAcquisition";
+
+export type ExtensionAcquisitionLocalizedErrorCode =
+  | ExtensionAcquisitionErrorCode
+  | "CATALOG_SEARCH_DISABLED"
+  | "ARTIFACT_CHANNEL_DISABLED"
+  | "ACQUISITION_PROVIDER_SELECTION_REQUIRED"
+  | "ACQUISITION_CONFIRMATION_NOT_READY"
+  | "ACQUISITION_SESSION_ACTIVE"
+  | "ACQUISITION_REQUEST_CANCELLED"
+  | "REMOTE_ACQUISITION_DISABLED"
+  | "ACQUISITION_STATE_REFRESH_FAILED";
 
 export type ExtensionAcquisitionUiKey =
   | "actions.bind"
@@ -9,6 +18,9 @@ export type ExtensionAcquisitionUiKey =
   | "actions.cancelOperation"
   | "actions.close"
   | "actions.install"
+  | "actions.importCrx"
+  | "actions.importDirectory"
+  | "actions.importZip"
   | "actions.open"
   | "actions.refresh"
   | "actions.update"
@@ -64,6 +76,7 @@ export type ExtensionAcquisitionUiKey =
   | "extension.acquisition.discrepancies"
   | "extension.acquisition.done"
   | "extension.acquisition.error"
+  | `extension.acquisition.errorCode.${ExtensionAcquisitionLocalizedErrorCode}`
   | "extension.acquisition.health.checkedAt"
   | "extension.acquisition.health.healthy"
   | "extension.acquisition.health.notChecked"
@@ -74,6 +87,8 @@ export type ExtensionAcquisitionUiKey =
   | "extension.acquisition.identity.requestedId"
   | "extension.acquisition.loadMore"
   | "extension.acquisition.loading"
+  | "extension.acquisition.local.description"
+  | "extension.acquisition.local.title"
   | "extension.acquisition.openWebStore"
   | "extension.acquisition.package"
   | "extension.acquisition.package.description"
@@ -109,6 +124,7 @@ export type ExtensionAcquisitionUiKey =
   | "extension.acquisition.results.emptyBody"
   | "extension.acquisition.results.emptyTitle"
   | "extension.acquisition.results.error"
+  | "extension.acquisition.results.errorTitle"
   | "extension.acquisition.results.loading"
   | "extension.acquisition.results.loadingMore"
   | "extension.acquisition.results.retry"
@@ -148,8 +164,11 @@ export type ExtensionAcquisitionUiKey =
   | "extension.acquisition.source.title"
   | "extension.acquisition.source.trust.google"
   | "extension.acquisition.source.trust.thirdParty"
+  | "extension.acquisition.sources.open"
   | "extension.acquisition.storeId"
   | "extension.acquisition.success.description"
+  | "extension.acquisition.success.retryRefresh"
+  | "extension.acquisition.success.retryingRefresh"
   | "extension.acquisition.success.title"
   | "extension.acquisition.transport"
   | "extension.acquisition.transport.duration"
@@ -169,6 +188,71 @@ export type ExtensionAcquisitionUiTranslator = (
   params?: Record<string, string | number>,
 ) => string;
 
+export interface ExtensionAcquisitionUiError {
+  code?: string;
+  message?: string;
+}
+
+export interface ExtensionAcquisitionErrorCopy {
+  primary: string;
+  detail?: string;
+}
+
+function acquisitionErrorCopyKey(code: string | undefined): ExtensionAcquisitionUiKey | undefined {
+  if (!code || !/^[A-Z][A-Z0-9_]{1,80}$/.test(code)) return undefined;
+  return `extension.acquisition.errorCode.${code as ExtensionAcquisitionLocalizedErrorCode}`;
+}
+
+export function formatExtensionAcquisitionError(
+  error: ExtensionAcquisitionUiError | undefined,
+  t: ExtensionAcquisitionUiTranslator,
+  options: {
+    fallbackKey?: ExtensionAcquisitionUiKey;
+  } = {},
+): ExtensionAcquisitionErrorCopy {
+  const candidateKey = acquisitionErrorCopyKey(error?.code);
+  const candidatePrimary = candidateKey ? t(candidateKey) : undefined;
+  const key = candidatePrimary && candidatePrimary !== candidateKey ? candidateKey : undefined;
+  const primary = key && candidatePrimary
+    ? candidatePrimary
+    : t(options.fallbackKey ?? "extension.acquisition.error");
+  const rawDetail = boundedAcquisitionErrorDetail(error?.message);
+  const detail = rawDetail
+    && !key
+    && rawDetail !== primary
+    && rawDetail !== error?.code
+    ? rawDetail
+    : undefined;
+  return { primary, ...(detail ? { detail } : {}) };
+}
+
+export function ExtensionAcquisitionErrorText({
+  error,
+  fallbackKey,
+  t,
+}: {
+  error?: ExtensionAcquisitionUiError;
+  fallbackKey?: ExtensionAcquisitionUiKey;
+  t: ExtensionAcquisitionUiTranslator;
+}) {
+  const copy = formatExtensionAcquisitionError(error, t, { fallbackKey });
+  return (
+    <span className="acquisition-error-copy">
+      <strong>{copy.primary}</strong>
+      {copy.detail && <small>{copy.detail}</small>}
+    </span>
+  );
+}
+
+function boundedAcquisitionErrorDetail(message: string | undefined): string | undefined {
+  const normalized = message
+    ?.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return undefined;
+  return normalized.length > 300 ? `${normalized.slice(0, 299)}…` : normalized;
+}
+
 export function formatAcquisitionBytes(bytes: number, locale: Locale): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "-";
   if (bytes < 1024) return `${bytes} B`;
@@ -186,171 +270,4 @@ export function formatAcquisitionDateTime(value: string, locale: Locale): string
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return value;
   return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(timestamp);
-}
-
-const FOCUSABLE_SELECTOR = [
-  "a[href]",
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  "[tabindex]:not([tabindex='-1'])",
-].join(",");
-
-export interface ExtensionAcquisitionDialogFocusTarget {
-  focus(): void;
-}
-
-export function handleExtensionAcquisitionDialogKey({
-  activeElement,
-  closeDisabled,
-  event,
-  focusable,
-  onClose,
-  panel,
-}: {
-  activeElement: unknown;
-  closeDisabled: boolean;
-  event: {
-    key: string;
-    shiftKey: boolean;
-    preventDefault(): void;
-    stopPropagation(): void;
-  };
-  focusable: readonly ExtensionAcquisitionDialogFocusTarget[];
-  onClose: () => void;
-  panel?: ExtensionAcquisitionDialogFocusTarget | null;
-}): void {
-  if (event.key === "Escape") {
-    event.preventDefault();
-    event.stopPropagation();
-    if (!closeDisabled) onClose();
-    return;
-  }
-  if (event.key !== "Tab") return;
-  if (focusable.length === 0) {
-    event.preventDefault();
-    panel?.focus();
-    return;
-  }
-  const first = focusable[0]!;
-  const last = focusable.at(-1)!;
-  if (event.shiftKey && (activeElement === first || activeElement === panel)) {
-    event.preventDefault();
-    last.focus();
-  } else if (!event.shiftKey && activeElement === last) {
-    event.preventDefault();
-    first.focus();
-  }
-}
-
-export function restoreExtensionAcquisitionDialogFocus(
-  target: (ExtensionAcquisitionDialogFocusTarget & { isConnected: boolean }) | null,
-): void {
-  if (target?.isConnected) target.focus();
-}
-
-/**
- * Registry acquisition dialogs are intentionally local to the feature. They retain the project's
- * existing modal classes while adding the focus trap, Escape handling, description linkage and
- * focus return that the older shell cannot currently guarantee.
- */
-export function ExtensionAcquisitionDialog({
-  actions,
-  children,
-  closeDisabled = false,
-  closeLabel,
-  description,
-  onClose,
-  panelClassName = "registry-editor-panel",
-  showCloseButton = true,
-  title,
-}: {
-  actions?: ReactNode;
-  children: ReactNode;
-  closeDisabled?: boolean;
-  closeLabel: string;
-  description?: ReactNode;
-  onClose: () => void;
-  panelClassName?: string;
-  showCloseButton?: boolean;
-  title: ReactNode;
-}) {
-  const titleId = useId();
-  const descriptionId = useId();
-  const layerRef = useRef<HTMLDivElement>(null);
-  const panelRef = useRef<HTMLElement>(null);
-  const returnFocusRef = useRef<HTMLElement | null>(null);
-
-  useEffect(() => {
-    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const frame = window.requestAnimationFrame(() => {
-      const requested = layerRef.current?.querySelector<HTMLElement>("[data-acquisition-autofocus]");
-      (requested ?? panelRef.current)?.focus();
-    });
-    return () => {
-      window.cancelAnimationFrame(frame);
-      restoreExtensionAcquisitionDialogFocus(returnFocusRef.current);
-    };
-  }, []);
-
-  function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    const focusable = [...(layerRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? [])]
-      .filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
-    handleExtensionAcquisitionDialogKey({
-      activeElement: document.activeElement,
-      closeDisabled,
-      event,
-      focusable,
-      onClose,
-      panel: panelRef.current,
-    });
-  }
-
-  return (
-    <div
-      aria-describedby={description ? descriptionId : undefined}
-      aria-labelledby={titleId}
-      aria-modal="true"
-      className="modal-layer acquisition-modal-layer"
-      onKeyDown={handleKeyDown}
-      ref={layerRef}
-      role="dialog"
-    >
-      <div
-        aria-hidden="true"
-        className="modal-scrim"
-        onMouseDown={(event) => {
-          if (!closeDisabled && event.currentTarget === event.target) onClose();
-        }}
-      />
-      <section
-        aria-busy={closeDisabled || undefined}
-        className={`modal-panel acquisition-modal-panel ${panelClassName}`.trim()}
-        ref={panelRef}
-        tabIndex={-1}
-      >
-        <header className={`modal-header ${showCloseButton ? "with-close" : ""}`}>
-          <div className="modal-title-block">
-            <h2 id={titleId}>{title}</h2>
-            {description && <p id={descriptionId}>{description}</p>}
-          </div>
-          {showCloseButton && (
-            <button
-              aria-label={closeLabel}
-              className="icon-button modal-close-button"
-              disabled={closeDisabled}
-              onClick={onClose}
-              title={closeLabel}
-              type="button"
-            >
-              <X aria-hidden="true" size={16} />
-            </button>
-          )}
-        </header>
-        <div className="modal-body">{children}</div>
-        {actions && <footer className="modal-footer">{actions}</footer>}
-      </section>
-    </div>
-  );
 }

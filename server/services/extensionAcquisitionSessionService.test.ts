@@ -220,7 +220,12 @@ test("startup sweep treats disk sessions as non-authoritative derived work", asy
 
 test("update observation refreshes the commit CAS token after its own row write", async () => {
   const directory = await makeTempDir();
-  const fixture = createSyntheticStoreCrx3({ name: "Update Candidate", version: "2.0.0" });
+  const fixture = createSyntheticStoreCrx3({
+    name: "Update Candidate",
+    version: "2.0.0",
+    permissions: ["storage", "cookies"],
+    hostPermissions: ["https://example.test/*", "https://promoted.test/*"],
+  });
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
   const target = await repository.createExtension({
     id: "extension-update-target",
@@ -230,6 +235,8 @@ test("update observation refreshes the commit CAS token after its own row write"
     version: "1.0.0",
     permissions: ["storage"],
     hostPermissions: ["https://example.test/*"],
+    optionalPermissions: ["cookies"],
+    optionalHostPermissions: ["https://promoted.test/*"],
     installState: "installed",
     storeId: fixture.storeId,
     storeUrl: `https://chromewebstore.google.com/detail/${fixture.storeId}`,
@@ -306,9 +313,13 @@ test("update observation refreshes the commit CAS token after its own row write"
   const ready = await waitForStatus(service, created.sessionId, "ready");
   assert.equal(ready.status, "ready");
   assert.ok(observedUpdatedAt);
+  assert.deepEqual(ready.report?.permissionApproval?.added, ["cookies", "https://promoted.test/*"]);
+  const permissionApprovalToken = ready.report?.permissionApproval?.token;
+  assert.ok(permissionApprovalToken);
   await service.confirm(created.sessionId, {
     disposition: "upgrade",
     targetExtensionId: target.id,
+    permissionApprovalToken,
   });
   assert.equal(commitTargetUpdatedAt, observedUpdatedAt);
 

@@ -38,16 +38,38 @@ export interface ExtensionCommitReconciler {
   cleanupSession?(record: ExtensionCommitJournalRecord): Promise<void>;
 }
 
+/**
+ * The journal file is visible at its canonical name, but directory durability
+ * could not be confirmed. Callers must treat the attached record as owning its
+ * staging until reconciliation removes the canonical journal.
+ */
+export class ExtensionCommitJournalCreateError extends Error {
+  constructor(
+    readonly record: ExtensionCommitJournalRecord,
+    options: { cause: unknown },
+  ) {
+    super("Extension commit journal publication could not be confirmed durable.", options);
+    this.name = "ExtensionCommitJournalCreateError";
+  }
+}
+
 export class ExtensionAcquisitionCommitJournal {
   private readonly journalRoot: string;
 
   private readonly allowedRoots: string[];
 
+  private readonly syncJournalDirectory: (directory: string) => Promise<void>;
+
   private initialized = false;
 
-  constructor(options: { journalRoot: string; allowedRoots: string[] }) {
+  constructor(options: {
+    journalRoot: string;
+    allowedRoots: string[];
+    syncDirectoryForTesting?: (directory: string) => Promise<void>;
+  }) {
     this.journalRoot = path.resolve(options.journalRoot);
     this.allowedRoots = [...new Set(options.allowedRoots.map((root) => path.resolve(root)))];
+    this.syncJournalDirectory = options.syncDirectoryForTesting ?? syncDirectory;
     if (this.allowedRoots.length === 0) throw new TypeError("Commit journal requires managed path roots.");
   }
 
@@ -94,7 +116,7 @@ export class ExtensionAcquisitionCommitJournal {
     this.assertInitialized();
     const id = typeof recordOrId === "string" ? normalizeId(recordOrId, "Journal id") : normalizeRecord(recordOrId).id;
     await fs.rm(this.recordPath(id), { force: true });
-    await syncDirectory(this.journalRoot);
+    await this.syncJournalDirectory(this.journalRoot);
   }
 
   async list(): Promise<ExtensionCommitJournalRecord[]> {
@@ -172,7 +194,14 @@ export class ExtensionAcquisitionCommitJournal {
     try {
       if (options.createOnly && await pathExists(target)) throw new Error("Extension commit journal already exists.");
       await fs.rename(temporary, target);
-      await syncDirectory(this.journalRoot);
+      try {
+        await this.syncJournalDirectory(this.journalRoot);
+      } catch (error) {
+        if (options.createOnly) {
+          throw new ExtensionCommitJournalCreateError(record, { cause: error });
+        }
+        throw error;
+      }
     } finally {
       await fs.rm(temporary, { force: true }).catch(() => undefined);
     }

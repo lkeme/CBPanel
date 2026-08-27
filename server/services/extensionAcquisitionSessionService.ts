@@ -37,6 +37,7 @@ import {
   type ExtensionPackagePreflightResult,
 } from "./extensionPackagePreflight";
 import { ExtensionProviderError } from "./providerHttpClient";
+import { extensionPermissionIncreases } from "./extensionPermissionDiff";
 
 const DEFAULT_SESSION_TTL_MS = 15 * 60_000;
 const DEFAULT_MAX_SESSIONS = 8;
@@ -983,18 +984,7 @@ function computeAddedPermissions(
   target: ExtensionEntity,
   packageFacts: ExtensionPackagePreflightResult,
 ): string[] {
-  const before = new Set([
-    ...target.permissions,
-    ...target.hostPermissions,
-    ...(target.optionalPermissions ?? []),
-    ...(target.optionalHostPermissions ?? []),
-  ]);
-  return [...new Set([
-    ...packageFacts.permissions,
-    ...packageFacts.hostPermissions,
-    ...packageFacts.optionalPermissions,
-    ...packageFacts.optionalHostPermissions,
-  ].filter((permission) => !before.has(permission)))].sort();
+  return extensionPermissionIncreases(target, packageFacts);
 }
 
 function compareExtensionVersions(left: string, right: string): number {

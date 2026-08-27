@@ -506,7 +506,9 @@ export class EnvironmentPackageService {
         artifactPath: canonicalPath,
         expectedSha256: fingerprint,
         validationDir: path.join(validationRoot, "unpacked"),
-        unpackedRoot: extension.localPath,
+        unpackedRoot: extension.localPath && await pathExists(extension.localPath)
+          ? extension.localPath
+          : undefined,
         verifyFile: this.verifyStoreCrxFile,
         preflightPackage: this.preflightPackage,
       }).finally(() => fs.rm(validationRoot, { recursive: true, force: true }).catch(() => undefined));

@@ -806,8 +806,16 @@ export class SqlitePanelRepository implements PanelRepository {
     return extension;
   }
 
-  async updateExtension(id: string, patch: Partial<ExtensionEntity>): Promise<ExtensionEntity> {
+  async updateExtension(
+    id: string,
+    patch: Partial<ExtensionEntity>,
+    beforeWrite?: () => void,
+  ): Promise<ExtensionEntity> {
     await this.initialize();
+    // The caller may have awaited external policy immediately before this
+    // method. Recheck its synchronous guard after our final async boundary and
+    // before any SQLite projection becomes visible.
+    beforeWrite?.();
     const existing = this.getExtensionOrThrow(id);
     const updated = normalizeExtensionEntity({
       ...existing,

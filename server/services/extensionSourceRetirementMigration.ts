@@ -25,6 +25,15 @@ const MAX_METADATA_BYTES = 4 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 512 * 1024 * 1024;
 const MAX_REPORTED_ISSUES = 5_000;
 const MAX_LEGACY_SOURCE_URL_BYTES = 8 * 1024;
+const RETIREMENT_ISSUE_CODES = new Set<ExtensionSourceRetirementIssueCode>([
+  "LEGACY_SOURCE_MIGRATED",
+  "LEGACY_SOURCE_LOCAL_MISSING",
+  "LEGACY_SOURCE_NOT_INSTALLED",
+  "LEGACY_SOURCE_INVALID_ID",
+  "LEGACY_SOURCE_DUPLICATE_STORE_ID",
+  "LEGACY_SOURCE_UNREADABLE_PATH",
+  "LEGACY_SOURCE_UNSUPPORTED_STATE",
+]);
 const LEGACY_SOURCE_KINDS = new Set<ExtensionSourceKind>(["remote-zip", "remote-crx", "chrome-web-store"]);
 const INSTALLED_STATES = new Set<ExtensionInstallState>(["installed", "update-available"]);
 const NOT_YET_INSTALLED_STATES = new Set<ExtensionInstallState>([
@@ -189,7 +198,7 @@ export async function createWalAwareSqliteSnapshot(
 ): Promise<SqliteSnapshotReport> {
   const sourcePath = validateDatabasePath(options.databasePath, "source");
   const snapshotPath = validateDatabasePath(options.snapshotPath, "snapshot");
-  if (sourcePath === snapshotPath) {
+  if (sameResolvedPath(sourcePath, snapshotPath)) {
     throw new ExtensionSourceRetirementMigrationError(
       "EXTENSION_SOURCE_SNAPSHOT_PATH_INVALID",
       "SQLite snapshot path must differ from the live database path.",
@@ -211,9 +220,10 @@ export async function createWalAwareSqliteSnapshot(
     if (
       !sourceStat?.isFile()
       || sourceStat.isSymbolicLink()
-      || (walStat && (!walStat.isFile() || walStat.isSymbolicLink()))
-      || (shmStat && (!shmStat.isFile() || shmStat.isSymbolicLink()))
-      || (journalStat && (!journalStat.isFile() || journalStat.isSymbolicLink()))
+      || sourceStat.nlink !== 1
+      || (walStat && (!walStat.isFile() || walStat.isSymbolicLink() || walStat.nlink !== 1))
+      || (shmStat && (!shmStat.isFile() || shmStat.isSymbolicLink() || shmStat.nlink !== 1))
+      || (journalStat && (!journalStat.isFile() || journalStat.isSymbolicLink() || journalStat.nlink !== 1))
       || sourceBytes > MAX_SNAPSHOT_BYTES
     ) {
       throw new ExtensionSourceRetirementMigrationError(
@@ -223,7 +233,12 @@ export async function createWalAwareSqliteSnapshot(
     }
     const existingSnapshot = await fs.lstat(snapshotPath).catch(() => undefined);
     if (existingSnapshot) {
-      if (!existingSnapshot.isFile() || existingSnapshot.isSymbolicLink()) {
+      if (
+        !existingSnapshot.isFile()
+        || existingSnapshot.isSymbolicLink()
+        || existingSnapshot.nlink !== 1
+        || sameFileIdentity(existingSnapshot, sourceStat)
+      ) {
         throw new ExtensionSourceRetirementMigrationError(
           "EXTENSION_SOURCE_SNAPSHOT_PATH_INVALID",
           "SQLite snapshot target already exists but is not an ordinary file.",
@@ -420,7 +435,7 @@ export async function runExtensionSourceRetirement(
   options: RunExtensionSourceRetirementOptions,
 ): Promise<ExtensionSourceRetirementReport> {
   const existingMarker = await options.store.readMetadata(EXTENSION_SOURCE_RETIREMENT_MARKER_KEY);
-  if (existingMarker) return decodeCompletedMarker(existingMarker).report;
+  if (existingMarker) return requireProductionSnapshot(decodeCompletedMarker(existingMarker).report);
   // A prior attempt may have committed only its recovery image before the
   // SQLite transaction rolled back. Never compare a post-rollback page image
   // byte-for-byte with that old snapshot (WAL checkpointing can legitimately
@@ -435,7 +450,7 @@ export async function runExtensionSourceRetirement(
     now: options.now,
     validate: validatePreRetirementDatabase,
   });
-  return migrateLegacyExtensionSources({ ...options, snapshot });
+  return requireProductionSnapshot(await migrateLegacyExtensionSources({ ...options, snapshot }));
 }
 
 async function pathExists(value: string): Promise<boolean> {
@@ -1088,9 +1103,11 @@ function decodeCompletedMarker(value: string): ExtensionSourceRetirementMarker {
     if (
       parsed.schemaVersion !== 1
       || parsed.migrationVersion !== EXTENSION_SOURCE_RETIREMENT_MIGRATION_VERSION
+      || !isIsoTimestamp(parsed.completedAt)
       || !parsed.report
       || parsed.report.markerKey !== EXTENSION_SOURCE_RETIREMENT_MARKER_KEY
       || parsed.report.status !== "completed"
+      || parsed.completedAt !== parsed.report.completedAt
     ) throw new Error("marker shape");
     validateCompletedReport(parsed.report);
     return parsed as ExtensionSourceRetirementMarker;
@@ -1109,8 +1126,9 @@ function validateCompletedReport(report: ExtensionSourceRetirementReport): void 
     || report.migrationVersion !== EXTENSION_SOURCE_RETIREMENT_MIGRATION_VERSION
     || report.markerKey !== EXTENSION_SOURCE_RETIREMENT_MARKER_KEY
     || report.status !== "completed"
-    || typeof report.startedAt !== "string"
-    || typeof report.completedAt !== "string"
+    || !isIsoTimestamp(report.startedAt)
+    || !isIsoTimestamp(report.completedAt)
+    || report.startedAt > report.completedAt
     || !report.counts
     || !Array.isArray(report.issues)
     || report.issues.length > MAX_REPORTED_ISSUES
@@ -1141,20 +1159,38 @@ function validateCompletedReport(report: ExtensionSourceRetirementReport): void 
   ) throw new Error("report migration categories");
   if (report.counts.duplicates > report.counts.migrated) throw new Error("report duplicate count");
   for (const issue of report.issues) {
-    if (!issue || typeof issue !== "object" || typeof issue.extensionId !== "string" || typeof issue.code !== "string") {
+    if (
+      !issue
+      || typeof issue !== "object"
+      || typeof issue.extensionId !== "string"
+      || !issue.extensionId
+      || issue.extensionId.length > 256
+      || /[\u0000-\u001f\u007f]/.test(issue.extensionId)
+      || !RETIREMENT_ISSUE_CODES.has(issue.code)
+      || (issue.detail !== undefined && (
+        typeof issue.detail !== "string"
+        || Buffer.byteLength(issue.detail, "utf8") > MAX_LEGACY_SOURCE_URL_BYTES
+        || /[\u0000-\u001f\u007f]/.test(issue.detail)
+      ))
+      || (issue.storeId !== undefined && !CHROME_EXTENSION_ID_PATTERN.test(issue.storeId))
+    ) {
       throw new Error("report issue shape");
     }
   }
   if (report.snapshot) {
     if (
       report.snapshot.schemaVersion !== 1
-      || typeof report.snapshot.sourcePath !== "string"
-      || typeof report.snapshot.snapshotPath !== "string"
+      || !isBoundedAbsolutePath(report.snapshot.sourcePath)
+      || !isBoundedAbsolutePath(report.snapshot.snapshotPath)
+      || sameResolvedPath(report.snapshot.sourcePath, report.snapshot.snapshotPath)
+      || !isIsoTimestamp(report.snapshot.createdAt)
       || !SHA256_PATTERN.test(report.snapshot.sha256)
       || !Number.isSafeInteger(report.snapshot.sizeBytes)
       || report.snapshot.sizeBytes < SQLITE_HEADER.byteLength
+      || report.snapshot.sizeBytes > MAX_SNAPSHOT_BYTES
       || report.snapshot.integrityCheck !== "ok"
-      || !report.snapshot.tables
+      || report.snapshot.foreignKeyViolations !== 0
+      || !isValidSnapshotTableCounts(report.snapshot.tables, report.counts.scanned)
     ) throw new Error("report snapshot shape");
   }
 }
@@ -1252,9 +1288,15 @@ async function inspectExistingSnapshot(
   validate?: (database: DatabaseSync) => void,
 ): Promise<SqliteSnapshotReport> {
   const stats = await fs.lstat(snapshotPath);
+  const sourceStats = await fs.lstat(sourcePath);
   if (
     !stats.isFile()
     || stats.isSymbolicLink()
+    || stats.nlink !== 1
+    || !sourceStats.isFile()
+    || sourceStats.isSymbolicLink()
+    || sourceStats.nlink !== 1
+    || sameFileIdentity(stats, sourceStats)
     || stats.size < SQLITE_HEADER.byteLength
     || stats.size > MAX_SNAPSHOT_BYTES
   ) {
@@ -1316,6 +1358,48 @@ async function inspectExistingSnapshot(
     database?.close();
     source?.close();
   }
+}
+
+function sameFileIdentity(left: import("node:fs").Stats, right: import("node:fs").Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameResolvedPath(left: string, right: string): boolean {
+  return process.platform === "win32"
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
+}
+
+function requireProductionSnapshot(report: ExtensionSourceRetirementReport): ExtensionSourceRetirementReport {
+  if (report.snapshot) return report;
+  throw new ExtensionSourceRetirementMigrationError(
+    "EXTENSION_SOURCE_MIGRATION_MARKER_INVALID",
+    "Production legacy source retirement requires retained SQLite rollback evidence.",
+  );
+}
+
+function isBoundedAbsolutePath(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 32_768
+    && path.isAbsolute(value)
+    && path.resolve(value) === value;
+}
+
+function isValidTableCounts(value: unknown): value is Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.entries(value as Record<string, unknown>).every(([table, count]) => (
+    /^[A-Za-z_][A-Za-z0-9_]*$/.test(table)
+    && Number.isSafeInteger(count)
+    && Number(count) >= 0
+  ));
+}
+
+function isValidSnapshotTableCounts(value: unknown, scannedExtensions: number): value is Record<string, number> {
+  return isValidTableCounts(value)
+    && Object.prototype.hasOwnProperty.call(value, "extensions")
+    && Object.prototype.hasOwnProperty.call(value, "storage_metadata")
+    && value.extensions === scannedExtensions;
 }
 
 function readTableCounts(database: DatabaseSync): Record<string, number> {

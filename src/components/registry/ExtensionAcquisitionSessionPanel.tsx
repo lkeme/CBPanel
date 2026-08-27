@@ -24,9 +24,11 @@ import type {
 import { KeyValueList, type KeyValueItem } from "../ui/KeyValueList";
 import { StatusPill } from "../ui/StatusPill";
 import {
+  ExtensionAcquisitionErrorText,
   formatAcquisitionBytes,
   formatAcquisitionDateTime,
   type ExtensionAcquisitionUiKey,
+  type ExtensionAcquisitionUiError,
   type ExtensionAcquisitionUiTranslator,
 } from "./extensionAcquisitionUi";
 
@@ -105,25 +107,31 @@ export function ExtensionAcquisitionSessionPanel({
   onConfirm,
   onDone,
   onRetry,
+  onRetryStateRefresh,
   operation,
+  refreshError,
+  refreshingState = false,
   session,
   t,
   targetExtensionId,
 }: {
   confirmedExtension?: Pick<ExtensionEntity, "id" | "name" | "version">;
-  error?: string;
+  error?: ExtensionAcquisitionUiError;
   locale: Locale;
   onBindNext?: (extensionId: string) => void;
   onCancel: () => void | Promise<void>;
   onConfirm: (request: ExtensionAcquisitionSessionConfirmRequest) => void | Promise<void>;
   onDone: () => void;
   onRetry: () => void | Promise<void>;
+  onRetryStateRefresh?: () => void | Promise<void>;
   operation: ExtensionAcquisitionSessionOperation;
+  refreshError?: ExtensionAcquisitionUiError;
+  refreshingState?: boolean;
   session: ExtensionAcquisitionSessionView;
   t: ExtensionAcquisitionUiTranslator;
   targetExtensionId?: string;
 }) {
-  const message = error ?? session.error?.message;
+  const failure = error ?? session.error;
   if (session.status === "consumed") {
     return (
       <div aria-live="polite" className="module-empty acquisition-success" role="status">
@@ -133,6 +141,27 @@ export function ExtensionAcquisitionSessionPanel({
           name: confirmedExtension?.name ?? session.storeId,
           version: confirmedExtension?.version ?? "-",
         })}</span>
+        {refreshError && (
+          <div className="diagnostic-note warning acquisition-refresh-warning" role="alert">
+            <CircleAlert aria-hidden="true" size={18} />
+            <ExtensionAcquisitionErrorText
+              error={refreshError}
+              t={t}
+            />
+            {onRetryStateRefresh && (
+              <button
+                className="command subtle"
+                disabled={refreshingState}
+                onClick={() => void onRetryStateRefresh()}
+                type="button"
+              >
+                {refreshingState
+                  ? t("extension.acquisition.success.retryingRefresh")
+                  : t("extension.acquisition.success.retryRefresh")}
+              </button>
+            )}
+          </div>
+        )}
         <div className="acquisition-success-actions">
           {confirmedExtension && onBindNext && (
             <button className="command subtle" onClick={() => onBindNext(confirmedExtension.id)} type="button">
@@ -159,7 +188,7 @@ export function ExtensionAcquisitionSessionPanel({
           {session.status === "cancelled"
             ? <CircleAlert aria-hidden="true" size={18} />
             : <CircleX aria-hidden="true" size={18} />}
-          <span><strong>{t(statusKey)}</strong>{message && <small>{message}</small>}</span>
+          <ExtensionAcquisitionErrorText error={failure} fallbackKey={statusKey} t={t} />
         </div>
         <button className="command primary" disabled={operation === "starting"} onClick={() => void onRetry()} type="button">
           {t("extension.acquisition.session.retry")}
@@ -171,11 +200,11 @@ export function ExtensionAcquisitionSessionPanel({
     return <ExtensionAcquisitionProgress locale={locale} onCancel={onCancel} operation={operation} session={session} t={t} />;
   }
   if (!session.report) {
-    return <div className="inline-error" role="alert"><CircleX aria-hidden="true" size={18} /><span>{message || t("extension.acquisition.error")}</span></div>;
+    return <div className="inline-error" role="alert"><CircleX aria-hidden="true" size={18} /><ExtensionAcquisitionErrorText error={failure} t={t} /></div>;
   }
   return (
     <ExtensionAcquisitionPreflight
-      error={message}
+      error={failure}
       locale={locale}
       onCancel={onCancel}
       onConfirm={onConfirm}
@@ -242,7 +271,7 @@ function ExtensionAcquisitionPreflight({
   t,
   targetExtensionId,
 }: {
-  error?: string;
+  error?: ExtensionAcquisitionUiError;
   locale: Locale;
   onCancel: () => void | Promise<void>;
   onConfirm: (request: ExtensionAcquisitionSessionConfirmRequest) => void | Promise<void>;
@@ -274,7 +303,7 @@ function ExtensionAcquisitionPreflight({
         </div>
         <StatusPill tone="running"><ShieldCheck aria-hidden="true" size={14} />{t("extension.acquisition.verification.evidenceOnly")}</StatusPill>
       </header>
-      {error && <div className="inline-error" role="alert"><CircleX aria-hidden="true" size={16} /><span>{error}</span></div>}
+      {error && <div className="inline-error" role="alert"><CircleX aria-hidden="true" size={16} /><ExtensionAcquisitionErrorText error={error} t={t} /></div>}
       <div className="acquisition-preflight-grid">
         <FactSection icon={<PackageCheck aria-hidden="true" size={17} />} items={identityFacts(report, t)} title={t("extension.acquisition.identity")} />
         <FactSection icon={<FileCheck2 aria-hidden="true" size={17} />} items={packageFacts(report, locale, t)} title={t("extension.acquisition.package")} />
