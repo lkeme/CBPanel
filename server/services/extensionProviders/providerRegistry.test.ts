@@ -20,7 +20,7 @@ test("ExtensionProviderRegistry exposes only the reviewed built-in provider slot
   assert.equal(registry.artifact("crxsoso"), crxsoso);
 });
 
-test("ExtensionProviderRegistry returns enabled offers in fixed Google-first order", () => {
+test("ExtensionProviderRegistry returns only the canonically selected artifact offer", () => {
   const registry = new ExtensionProviderRegistry({
     crxsosoSearch: fakeSearchProvider(),
     googleArtifact: fakeArtifactProvider("chrome-web-store", "Chrome Web Store"),
@@ -29,27 +29,15 @@ test("ExtensionProviderRegistry returns enabled offers in fixed Google-first ord
 
   assert.deepEqual(
     registry.artifactOffers(TAMPERMONKEY_ID, {
-      crxsosoSearchEnabled: false,
-      googleArtifactEnabled: true,
-      crxsosoArtifactEnabled: true,
+      artifactProviderId: "chrome-web-store",
     }).map((offer) => offer.artifactProviderId),
-    ["chrome-web-store", "crxsoso"],
+    ["chrome-web-store"],
   );
   assert.deepEqual(
     registry.artifactOffers(TAMPERMONKEY_ID, {
-      crxsosoSearchEnabled: true,
-      googleArtifactEnabled: false,
-      crxsosoArtifactEnabled: true,
+      artifactProviderId: "crxsoso",
     }).map((offer) => offer.artifactProviderId),
     ["crxsoso"],
-  );
-  assert.deepEqual(
-    registry.artifactOffers(TAMPERMONKEY_ID, {
-      crxsosoSearchEnabled: true,
-      googleArtifactEnabled: false,
-      crxsosoArtifactEnabled: false,
-    }),
-    [],
   );
 });
 
@@ -70,9 +58,7 @@ test("ExtensionProviderRegistry rejects arbitrary provider registration and inva
   });
   assert.throws(
     () => registry.artifactOffers("youxiaohoubox", {
-      crxsosoSearchEnabled: true,
-      googleArtifactEnabled: true,
-      crxsosoArtifactEnabled: true,
+      artifactProviderId: "crxsoso",
     }),
     (error: unknown) => error instanceof ExtensionProviderError
       && error.code === "ACQUISITION_INPUT_UNSUPPORTED",

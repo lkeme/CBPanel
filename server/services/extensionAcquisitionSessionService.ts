@@ -12,6 +12,7 @@ import {
   type ExtensionAcquisitionSessionCreateRequest,
   type ExtensionAcquisitionSessionView,
   type ExtensionArtifactProviderId,
+  selectedExtensionArtifactProvider,
   type ExtensionPreflightReport,
 } from "../../src/shared/extensionAcquisition";
 import { normalizeSettings, type AppSettings } from "../../src/shared/settings";
@@ -404,7 +405,12 @@ export class ExtensionAcquisitionSessionService {
     const settings = normalizeSettings(settingsInput);
     for (const session of this.sessions.values()) {
       if (
-        (session.view.status === "created" || session.view.status === "downloading")
+        (
+          session.view.status === "created"
+          || session.view.status === "downloading"
+          || session.view.status === "verifying"
+          || session.view.status === "analyzing"
+        )
         && !artifactProviderEnabled(settings, session.view.selectedProviderId)
         && !session.controller.signal.aborted
       ) {
@@ -512,8 +518,19 @@ export class ExtensionAcquisitionSessionService {
         permissionApprovalToken: session.permissionApprovalToken,
         addedPermissions,
       });
+      // Conflict resolution and update-observation bookkeeping above contain
+      // several awaits. A channel change can therefore abort the session after
+      // the previous stop check but before the report is published. Re-check at
+      // this final synchronous boundary so an overtaken session can never enter
+      // `ready` with bytes from a channel that is no longer selected.
+      this.throwIfStopped(session);
       await this.withSessionLock(session, async () => {
         if (isTerminal(session.view.status) || session.view.status === "committing") return;
+        // The lock may have been occupied by an earlier operation after the
+        // check above. Settings can switch the selected channel during that
+        // wait, so guard again as the first synchronous statement in the
+        // critical section, immediately before publishing the ready report.
+        this.throwIfStopped(session);
         session.view.report = report;
         this.transition(session, "ready", { error: undefined });
       });
@@ -1000,9 +1017,7 @@ function compareExtensionVersions(left: string, right: string): number {
 }
 
 function artifactProviderEnabled(settings: AppSettings, providerId: ExtensionArtifactProviderId): boolean {
-  return providerId === "chrome-web-store"
-    ? settings.extensionAcquisition.googleArtifactEnabled
-    : settings.extensionAcquisition.crxsosoArtifactEnabled;
+  return selectedExtensionArtifactProvider(settings.extensionAcquisition) === providerId;
 }
 
 function assertArtifactProviderEnabled(settings: AppSettings, providerId: ExtensionArtifactProviderId): void {

@@ -16,7 +16,10 @@ import {
   type ExtensionPermissionRiskReasonKey,
   isPreserveLifecycleRevision,
 } from "../../src/shared/entities";
-import { chromeWebStoreListingUrl } from "../../src/shared/extensionAcquisition";
+import {
+  chromeWebStoreListingUrl,
+  selectedExtensionArtifactProvider,
+} from "../../src/shared/extensionAcquisition";
 import { createId, nowIso } from "../../src/shared/profile";
 import { normalizeSettings, type AppSettings } from "../../src/shared/settings";
 import type { PanelRepository } from "../storage/types";
@@ -466,11 +469,19 @@ export class ExtensionService {
     targetId: string,
   ): Promise<ExtensionEntity> {
     await assertPreparedAcquisitionPaths(acquisition, this.extensionAcquisitionDir);
-    // The provider gate is required before and during network I/O. Once this session has a
-    // complete, verified local artifact, disabling a source must not strand a user-confirmed
-    // package; no network request occurs below. The current setting is still read as a
-    // synchronization point for callers that update settings concurrently.
-    await this.options.readSettings?.();
+    // The selected download channel is a single global choice. Reject a ready
+    // session if the choice changed, then enforce the same expectation inside
+    // the SQLite transaction below so a concurrent settings write cannot race
+    // a stale package into persistence after this asynchronous check.
+    // Remote acquisition confirmation always has a settings source. Fall back
+    // to the repository itself for embedded/test constructions so the final
+    // SQLite CAS can never be skipped merely because the optional service
+    // callback was omitted. (The separate retained-artifact reinstall path
+    // intentionally does not use this remote-channel gate.)
+    const settings = normalizeSettings(await (this.options.readSettings?.() ?? this.options.repository.getSettings()));
+    if (!isArtifactProviderEnabled(settings, acquisition.selectedProviderId)) {
+      throw acquisitionError("ARTIFACT_PROVIDER_DISABLED", "The selected extension download channel changed before confirmation.");
+    }
 
     const currentExtensions = await this.options.repository.listExtensions();
     const existing = request.disposition === "create"
@@ -772,6 +783,7 @@ export class ExtensionService {
       await this.options.acquisitionCommitFaultForTesting?.("files-published");
       await this.options.repository.commitExtensionAcquisition({
         extension: entity,
+        expectedArtifactProviderId: acquisition.selectedProviderId,
         expectedExistingUpdatedAt: existing?.updatedAt,
         expectedEnvironmentBindings: existingBindings,
         environmentBindings: newBindings,
@@ -804,6 +816,7 @@ export class ExtensionService {
         const committed = await this.options.repository.getExtension(targetId);
         if (committed) return committed;
       }
+      if ((error as { code?: unknown }).code === "ARTIFACT_PROVIDER_DISABLED") throw error;
       throw acquisitionError("ACQUISITION_COMMIT_FAILED", "The extension commit was rolled back safely.", error);
     }
   }
@@ -1371,10 +1384,10 @@ export class ExtensionService {
       ) {
         throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "The retained package no longer matches its verified evidence.");
       }
-      const settings = this.options.readSettings
-        ? normalizeSettings(await this.options.readSettings())
-        : undefined;
-      if (settings && !isArtifactProviderEnabled(settings, providerId)) {
+      const settings = normalizeSettings(await (
+        this.options.readSettings?.() ?? this.options.repository.getSettings()
+      ));
+      if (!isArtifactProviderEnabled(settings, providerId)) {
         throw acquisitionError("ARTIFACT_PROVIDER_DISABLED", "Enable the selected package provider before switching updates.");
       }
       if (extension.updateProviderId === providerId) return extension;
@@ -1417,11 +1430,11 @@ export class ExtensionService {
         ) {
           throw acquisitionError("ACQUISITION_UPDATE_PROVIDER_INVALID", "The provider probe failed its CRX3 verification.");
         }
-        const latestSettings = this.options.readSettings
-          ? normalizeSettings(await this.options.readSettings())
-          : undefined;
+        const latestSettings = normalizeSettings(await (
+          this.options.readSettings?.() ?? this.options.repository.getSettings()
+        ));
         throwIfProviderProbeAborted(signal);
-        if (latestSettings && !isArtifactProviderEnabled(latestSettings, providerId)) {
+        if (!isArtifactProviderEnabled(latestSettings, providerId)) {
           throw acquisitionError("ARTIFACT_PROVIDER_DISABLED", "The selected update provider was disabled during verification.");
         }
         // Await inside the try so the registered probe remains cancellable
@@ -2960,9 +2973,7 @@ function isArtifactProviderEnabled(
   settings: AppSettings,
   providerId: PreparedExtensionAcquisition["selectedProviderId"],
 ): boolean {
-  return providerId === "chrome-web-store"
-    ? settings.extensionAcquisition.googleArtifactEnabled
-    : settings.extensionAcquisition.crxsosoArtifactEnabled;
+  return selectedExtensionArtifactProvider(settings.extensionAcquisition) === providerId;
 }
 
 function acquisitionError(code: string, message: string, cause?: unknown): Error {

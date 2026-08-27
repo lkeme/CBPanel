@@ -858,6 +858,17 @@ export class SqlitePanelRepository implements PanelRepository {
     const db = this.database();
     db.exec("BEGIN IMMEDIATE");
     try {
+      if (input.expectedArtifactProviderId !== undefined) {
+        const settingsRow = db.prepare("SELECT settings_json FROM app_settings WHERE id = 'default'")
+          .get() as SettingsRow | undefined;
+        const settings = settingsRow ? parseSettings(settingsRow.settings_json) : DEFAULT_APP_SETTINGS;
+        if (settings.extensionAcquisition.artifactProviderId !== input.expectedArtifactProviderId) {
+          throw Object.assign(new Error("The selected extension download channel changed before commit."), {
+            status: 409,
+            code: "ARTIFACT_PROVIDER_DISABLED",
+          });
+        }
+      }
       if (input.expectedEnvironmentBindings !== undefined) {
         const expected = normalizeExtensionBindingMetadata(input.expectedEnvironmentBindings) ?? [];
         const current = db.prepare(`

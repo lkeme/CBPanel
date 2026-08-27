@@ -11,7 +11,7 @@ import type {
   ExtensionReferenceResolution,
   ExtensionReferenceResolveRequest,
 } from "../shared/extensionAcquisition";
-import type { AppSettings, ExtensionAcquisitionSettings } from "../shared/settings";
+import type { AppSettings, ExtensionAcquisitionSettingsPatch } from "../shared/settings";
 
 export interface ExtensionAcquisitionConfirmationResult {
   session: ExtensionAcquisitionSessionView;
@@ -36,7 +36,7 @@ export interface ExtensionAcquisitionClient {
     signal?: AbortSignal,
   ): Promise<ExtensionAcquisitionConfirmationResult>;
   saveSettings(
-    patch: Partial<ExtensionAcquisitionSettings>,
+    patch: ExtensionAcquisitionSettingsPatch,
     signal?: AbortSignal,
   ): Promise<AppSettings>;
   transitionUpdateProvider(

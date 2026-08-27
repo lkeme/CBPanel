@@ -56,18 +56,34 @@ test("typing and disclosure dismissal make no catalog request, and acceptance pe
   assert.deepEqual(events, ["persist:1", "search:privacy tools"]);
   assert.equal(controller.getState().settings.crxsosoDisclosureVersionAccepted, 1);
   assert.equal(controller.getState().disclosure.open, false);
+
+  await controller.submit();
+  assert.deepEqual(events, ["persist:1", "search:privacy tools", "search:privacy tools"]);
+  assert.equal(controller.getState().disclosure.open, false, "accepted disclosure is not shown again");
 });
 
-test("unsupported URLs and locally disabled remote combinations fail without an API request", async () => {
+test("persisted acquisition settings fail safe when the disclosure version is outside the known range", async () => {
+  const controller = createExtensionAcquisitionController({
+    settings: settings({ artifactProviderId: "crxsoso", crxsosoDisclosureVersionAccepted: 0 }),
+    persistSettings: async () => ({
+      artifactProviderId: "chrome-web-store",
+      crxsosoDisclosureVersionAccepted: 99,
+    }),
+    reloadState: async () => undefined,
+  });
+
+  assert.equal(await controller.setArtifactProvider("chrome-web-store"), true);
+  assert.deepEqual(controller.getState().settings, {
+    artifactProviderId: "chrome-web-store",
+    crxsosoDisclosureVersionAccepted: 0,
+  });
+});
+
+test("unsupported URLs stay local while built-in search and the selected channel remain available", async () => {
   let searchCalls = 0;
   let resolveCalls = 0;
   const controller = createExtensionAcquisitionController({
-    settings: settings({
-      crxsosoSearchEnabled: false,
-      googleArtifactEnabled: false,
-      crxsosoArtifactEnabled: false,
-      crxsosoDisclosureVersionAccepted: 1,
-    }),
+    settings: settings({ artifactProviderId: "crxsoso", crxsosoDisclosureVersionAccepted: 1 }),
     client: stubClient({
       search: async () => {
         searchCalls += 1;
@@ -75,7 +91,12 @@ test("unsupported URLs and locally disabled remote combinations fail without an 
       },
       resolve: async () => {
         resolveCalls += 1;
-        throw new Error("must not resolve");
+        return {
+          namespace: "chrome-web-store",
+          storeId: STORE_ID,
+          storeUrl: chromeWebStoreListingUrl(STORE_ID),
+          offers: [],
+        };
       },
     }),
     reloadState: async () => undefined,
@@ -87,27 +108,18 @@ test("unsupported URLs and locally disabled remote combinations fail without an 
 
   controller.setInput("privacy");
   await controller.submit();
-  assert.equal(controller.getState().discovery.error?.code, "CATALOG_SEARCH_DISABLED");
 
   controller.setInput(STORE_ID);
   await controller.submit();
-  assert.equal(controller.getState().discovery.error?.code, "REMOTE_ACQUISITION_DISABLED");
-  assert.deepEqual({ searchCalls, resolveCalls }, { searchCalls: 0, resolveCalls: 0 });
+  assert.deepEqual({ searchCalls, resolveCalls }, { searchCalls: 1, resolveCalls: 1 });
 });
 
-test("all eight capability combinations gate keyword search and exact resolution independently", async () => {
-  for (let mask = 0; mask < 8; mask += 1) {
-    const crxsosoSearchEnabled = Boolean(mask & 1);
-    const googleArtifactEnabled = Boolean(mask & 2);
-    const crxsosoArtifactEnabled = Boolean(mask & 4);
+test("both canonical channel choices keep keyword search and exact resolution available", async () => {
+  for (const artifactProviderId of ["crxsoso", "chrome-web-store"] as const) {
     let searchCalls = 0;
     let resolveCalls = 0;
     const controller = createExtensionAcquisitionController({
-      settings: settings({
-        crxsosoSearchEnabled,
-        googleArtifactEnabled,
-        crxsosoArtifactEnabled,
-      }),
+      settings: settings({ artifactProviderId }),
       client: stubClient({
         search: async ({ query }) => {
           searchCalls += 1;
@@ -131,13 +143,48 @@ test("all eight capability combinations gate keyword search and exact resolution
     controller.setInput(STORE_ID);
     await controller.submit();
 
-    assert.equal(searchCalls, crxsosoSearchEnabled ? 1 : 0, `search mask ${mask}`);
-    assert.equal(
-      resolveCalls,
-      googleArtifactEnabled || crxsosoArtifactEnabled ? 1 : 0,
-      `resolve mask ${mask}`,
-    );
+    assert.equal(searchCalls, 1, `search via ${artifactProviderId}`);
+    assert.equal(resolveCalls, 1, `resolve via ${artifactProviderId}`);
   }
+});
+
+test("an exact selection starts through the newly persisted channel without resolving again", async () => {
+  let resolveCalls = 0;
+  const sessionProviders: string[] = [];
+  const controller = createExtensionAcquisitionController({
+    settings: settings({ artifactProviderId: "chrome-web-store" }),
+    client: stubClient({
+      resolve: async () => {
+        resolveCalls += 1;
+        return {
+          namespace: "chrome-web-store",
+          storeId: STORE_ID,
+          storeUrl: chromeWebStoreListingUrl(STORE_ID),
+          offers: [{
+            namespace: "chrome-web-store",
+            storeId: STORE_ID,
+            artifactProviderId: "chrome-web-store",
+            format: "crx3",
+            providerLabel: "Chrome Web Store",
+          }],
+        };
+      },
+      createSession: async (request) => {
+        sessionProviders.push(request.artifactProviderId);
+        return session("created", request.artifactProviderId);
+      },
+    }),
+    persistSettings: async () => settings({ artifactProviderId: "crxsoso" }),
+    reloadState: async () => undefined,
+  });
+
+  controller.setInput(STORE_ID);
+  await controller.submit();
+  assert.equal(await controller.setArtifactProvider("crxsoso"), true);
+  await controller.startSelectedSession();
+
+  assert.equal(resolveCalls, 1);
+  assert.deepEqual(sessionProviders, ["crxsoso"]);
 });
 
 test("a disabled artifact channel retains the attempted request for an explicit retry after enablement", async () => {
@@ -150,12 +197,15 @@ test("a disabled artifact channel retains the attempted request for an explicit 
     targetExtensionId: "extension-1",
   };
   const controller = createExtensionAcquisitionController({
-    settings: settings({ googleArtifactEnabled: false }),
+    settings: settings({ artifactProviderId: "crxsoso" }),
     client: stubClient({
       createSession: async (input) => {
         createCalls += 1;
         return { ...session("rejected", input.artifactProviderId), purpose: input.purpose };
       },
+    }),
+    persistSettings: async (patch) => settings({
+      artifactProviderId: patch.artifactProviderId ?? "crxsoso",
     }),
     reloadState: async () => undefined,
   });
@@ -165,7 +215,7 @@ test("a disabled artifact channel retains the attempted request for an explicit 
   assert.deepEqual(controller.getState().session.lastRequest, request);
   assert.equal(createCalls, 0);
 
-  assert.equal(await controller.setCapabilityEnabled("google-artifact", true), true);
+  assert.equal(await controller.setArtifactProvider("chrome-web-store"), true);
   await controller.retrySession();
   assert.equal(createCalls, 1);
 });
@@ -174,7 +224,7 @@ test("a newer explicit submission aborts and rejects a late stale search respons
   const searches = new Map<string, ReturnType<typeof deferred<ExtensionCatalogSearchPage>>>();
   const signals = new Map<string, AbortSignal | undefined>();
   const controller = createExtensionAcquisitionController({
-    settings: settings(),
+    settings: settings({ artifactProviderId: "chrome-web-store" }),
     client: stubClient({
       search: (request, signal) => {
         const pending = deferred<ExtensionCatalogSearchPage>();
@@ -235,6 +285,16 @@ test("pagination accumulates canonical results and reducer sequencing rejects st
   assert.equal(result?.items.length, 2);
   assert.equal(result?.items[0]?.name, "Updated");
   assert.equal(result?.excludedNonCanonicalCount, 5);
+  const selected = result?.items[0];
+  assert.ok(selected);
+  assert.equal(controller.selectCatalogItem(selected), true);
+  assert.equal(controller.getState().discovery.page, result, "opening details preserves the accumulated search page");
+  assert.equal(controller.getState().selection?.storeId, STORE_ID);
+  assert.equal(call, 2, "opening details makes no additional catalog request");
+  controller.clearSelection();
+  assert.equal(controller.getState().selection, undefined);
+  assert.equal(controller.getState().discovery.page, result, "back keeps the accumulated search page");
+  assert.equal(call, 2, "back makes no additional catalog request");
 
   const initial = createInitialExtensionAcquisitionState(settings());
   const pending = extensionAcquisitionReducer(initial, {
@@ -251,12 +311,62 @@ test("pagination accumulates canonical results and reducer sequencing rejects st
     append: false,
   });
   assert.equal(stale, pending);
+
+  const loaded = extensionAcquisitionReducer(pending, {
+    type: "search-loaded",
+    sequence: 2,
+    page: page("new", [catalogItem(STORE_ID, "Selected")]),
+    append: false,
+  });
+  const withSelection = extensionAcquisitionReducer(loaded, {
+    type: "catalog-item-selected",
+    item: loaded.discovery.page!.items[0]!,
+    selectedProviderId: "crxsoso",
+  });
+  const updating = extensionAcquisitionReducer(withSelection, {
+    type: "session-requested",
+    sequence: 3,
+    request: {
+      namespace: "chrome-web-store",
+      storeId: SECOND_STORE_ID,
+      artifactProviderId: "crxsoso",
+      purpose: "update",
+      targetExtensionId: "extension-2",
+    },
+  });
+  assert.equal(updating.selection, undefined, "an installed-row update cannot inherit another catalog result");
+  assert.equal(updating.discovery.page, withSelection.discovery.page, "clearing identity preserves the search snapshot");
+});
+
+test("expired pagination retry restarts the keyword search with a fresh cursor", async () => {
+  const requests: Array<string | undefined> = [];
+  let call = 0;
+  const controller = createExtensionAcquisitionController({
+    settings: settings(),
+    client: stubClient({
+      search: async ({ query, cursor }) => {
+        requests.push(cursor);
+        call += 1;
+        if (call === 2) throw Object.assign(new Error("expired"), { code: "EXTENSION_CATALOG_CURSOR_EXPIRED" });
+        return { ...page(query, [catalogItem(STORE_ID, "Fresh")]), cursor: "fresh_cursor", hasMore: true };
+      },
+    }),
+    reloadState: async () => undefined,
+  });
+  controller.setInput("privacy");
+  await controller.submit();
+  await controller.loadMore();
+  assert.equal(controller.getState().discovery.error?.code, "EXTENSION_CATALOG_CURSOR_EXPIRED");
+  assert.ok(controller.getState().discovery.page?.hasMore);
+  await controller.retryDiscovery();
+  assert.equal(controller.getState().discovery.error, undefined);
+  assert.deepEqual(requests, [undefined, "fresh_cursor", undefined]);
 });
 
 test("Google remains selected after failure and mirror acquisition starts only after an explicit switch", async () => {
   const providers: string[] = [];
   const controller = createExtensionAcquisitionController({
-    settings: settings(),
+    settings: settings({ artifactProviderId: "chrome-web-store" }),
     client: stubClient({
       createSession: async (request) => {
         providers.push(request.artifactProviderId);
@@ -269,6 +379,9 @@ test("Google remains selected after failure and mirror acquisition starts only a
     }),
     reloadState: async () => undefined,
     pollDelay: async () => undefined,
+    persistSettings: async (patch) => settings({
+      artifactProviderId: patch.artifactProviderId ?? "chrome-web-store",
+    }),
   });
 
   await controller.startSession({
@@ -284,6 +397,7 @@ test("Google remains selected after failure and mirror acquisition starts only a
   await until(() => providers.length === 2 && controller.getState().session.view?.status === "rejected");
   assert.deepEqual(providers, ["chrome-web-store", "chrome-web-store"]);
 
+  assert.equal(await controller.setArtifactProvider("crxsoso"), true);
   assert.equal(controller.selectProvider("crxsoso"), true);
   await controller.restartWithSelectedProvider();
   await until(() => providers.length === 3 && controller.getState().session.view?.status === "rejected");
@@ -295,7 +409,7 @@ test("session polling reaches preflight and duplicate confirmation refreshes glo
   let reloadCalls = 0;
   const confirmation = deferred<ExtensionAcquisitionConfirmationResult>();
   const controller = createExtensionAcquisitionController({
-    settings: settings(),
+    settings: settings({ artifactProviderId: "chrome-web-store" }),
     client: stubClient({
       createSession: async (request) => session("created", request.artifactProviderId),
       getSession: async (sessionId) => session("ready", "chrome-web-store", sessionId),
@@ -336,7 +450,7 @@ test("a post-confirm state refresh failure preserves acquisition success as a se
   let refreshAvailable = false;
   let reloadCalls = 0;
   const controller = createExtensionAcquisitionController({
-    settings: settings(),
+    settings: settings({ artifactProviderId: "chrome-web-store" }),
     client: stubClient({
       createSession: async () => session("ready", "chrome-web-store"),
       confirmSession: async () => result,
@@ -371,11 +485,11 @@ test("a post-confirm state refresh failure preserves acquisition success as a se
   assert.equal(controller.getState().session.view?.status, "consumed");
 });
 
-test("disabling catalog search aborts the active request and discards its late response", async () => {
+test("changing the package channel does not cancel an active built-in catalog search", async () => {
   const pending = deferred<ExtensionCatalogSearchPage>();
   let searchSignal: AbortSignal | undefined;
   const controller = createExtensionAcquisitionController({
-    settings: settings(),
+    settings: settings({ artifactProviderId: "crxsoso" }),
     client: stubClient({
       search: async (_request, signal) => {
         searchSignal = signal;
@@ -387,25 +501,20 @@ test("disabling catalog search aborts the active request and discards its late r
   });
   controller.setInput("privacy");
   const searching = controller.submit();
-  const disabling = controller.setCapabilityEnabled("crxsoso-search", false);
-  await disabling;
-  assert.equal(searchSignal?.aborted, true);
+  await controller.setArtifactProvider("chrome-web-store");
+  assert.equal(searchSignal?.aborted, false);
   pending.resolve(page("privacy", [catalogItem(STORE_ID, "Late")]));
   await searching;
 
-  assert.equal(controller.getState().settings.crxsosoSearchEnabled, false);
-  assert.equal(controller.getState().discovery.status, "cancelled");
-  assert.equal(controller.getState().discovery.page, undefined);
+  assert.equal(controller.getState().discovery.status, "ready");
+  assert.equal(controller.getState().discovery.page?.items[0]?.name, "Late");
 });
 
-test("retry and pagination recheck disclosure and current capability settings before every request", async () => {
+test("retry and pagination recheck disclosure while search remains built in", async () => {
   let searchCalls = 0;
   let resolveCalls = 0;
   const controller = createExtensionAcquisitionController({
-    settings: settings({
-      crxsosoSearchEnabled: false,
-      crxsosoDisclosureVersionAccepted: 0,
-    }),
+    settings: settings({ crxsosoDisclosureVersionAccepted: 0 }),
     client: stubClient({
       search: async ({ query }) => {
         searchCalls += 1;
@@ -426,35 +535,26 @@ test("retry and pagination recheck disclosure and current capability settings be
 
   controller.setInput("privacy");
   await controller.submit();
-  assert.equal(controller.getState().discovery.error?.code, "CATALOG_SEARCH_DISABLED");
-  await controller.setCapabilityEnabled("crxsoso-search", true);
-  await controller.retryDiscovery();
   assert.equal(searchCalls, 0);
   assert.equal(controller.getState().disclosure.open, true);
 
   controller.syncSettings(settings({ crxsosoDisclosureVersionAccepted: 1 }));
-  await controller.retryDiscovery();
+  await controller.submit();
   assert.equal(searchCalls, 1);
-  const retainedPage = controller.getState().discovery.page;
-  await controller.setCapabilityEnabled("crxsoso-search", false);
   await controller.loadMore();
-  assert.equal(searchCalls, 1);
-  assert.equal(controller.getState().discovery.error?.code, "CATALOG_SEARCH_DISABLED");
-  assert.equal(controller.getState().discovery.page, retainedPage);
+  assert.equal(searchCalls, 2);
 
   controller.setInput(STORE_ID);
   await controller.submit();
   assert.equal(resolveCalls, 1);
-  await controller.setCapabilityEnabled("google-artifact", false);
-  await controller.setCapabilityEnabled("crxsoso-artifact", false);
+  await controller.setArtifactProvider("chrome-web-store");
   await controller.retryDiscovery();
-  assert.equal(resolveCalls, 1);
-  assert.equal(controller.getState().discovery.error?.code, "REMOTE_ACQUISITION_DISABLED");
+  assert.equal(resolveCalls, 2);
 });
 
 test("local selection, active-session, and confirmation guards expose distinct stable codes", async () => {
   const controller = createExtensionAcquisitionController({
-    settings: settings(),
+    settings: settings({ artifactProviderId: "chrome-web-store" }),
     client: stubClient({
       createSession: async (request) => session("ready", request.artifactProviderId),
     }),
@@ -492,7 +592,7 @@ test("rejected single-flight cleanup emits no detached unhandled rejection and r
     purpose: "install" as const,
   };
   const controller = createExtensionAcquisitionController({
-    settings: settings(),
+    settings: settings({ artifactProviderId: "chrome-web-store" }),
     client: stubClient({
       createSession: async () => session("ready", "chrome-web-store"),
       confirmSession: async () => result,
@@ -522,6 +622,7 @@ test("rejected single-flight cleanup emits no detached unhandled rejection and r
     assert.notEqual(nextRefresh, rejectedRefresh);
     assert.equal(await nextRefresh, false);
 
+    controller.syncSettings(settings({ artifactProviderId: "crxsoso" }));
     unsubscribe = controller.subscribe(() => { throw failure; });
     const rejectedTransition = controller.transitionUpdateProvider(
       "extension-1",

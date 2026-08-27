@@ -1,8 +1,9 @@
-import { lazy, Suspense, useEffect, useMemo, useState, type FormEvent } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ChevronDown, ChevronRight, MoreHorizontal, Plus, Puzzle, Search, Settings2 } from "lucide-react";
 
 import type { Locale, TranslationKey } from "../../i18n";
 import { forgetExtensionIcon, loadExtensionIcon, peekExtensionIcon } from "../../lib/extensionIcons";
+import { openExtensionListing } from "../../lib/extensionExternalNavigation";
 import { shortExtensionId } from "../../lib/utils";
 import type {
   ExtensionEntity,
@@ -10,14 +11,20 @@ import type {
   ExtensionSourceKind,
   ExtensionUpdatePolicy,
 } from "../../shared/entities";
-import type { AppSettings, ExtensionAcquisitionSettings } from "../../shared/settings";
+import type { AppSettings } from "../../shared/settings";
 import { DEFAULT_APP_SETTINGS } from "../../shared/settings";
 import type {
   ExtensionArtifactProviderId,
+  ExtensionCatalogItem,
   ExtensionReferenceResolution,
 } from "../../shared/extensionAcquisition";
-import { chromeWebStoreListingUrl } from "../../shared/extensionAcquisition";
-import type { ExtensionUpdateProviderTransitionState } from "../../hooks/extensionAcquisitionState";
+import { chromeWebStoreListingUrl, selectedExtensionArtifactProvider } from "../../shared/extensionAcquisition";
+import {
+  sessionViewNeedsPolling,
+  type ExtensionAcquisitionSelection,
+  type ExtensionAcquisitionSessionState,
+  type ExtensionUpdateProviderTransitionState,
+} from "../../hooks/extensionAcquisitionState";
 import { useExtensionAcquisition } from "../../hooks/useExtensionAcquisition";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui/dropdown-menu";
 import { Switch } from "../ui/switch";
@@ -27,7 +34,8 @@ import { RegistryModuleShell } from "./RegistryModuleShell";
 import { Segmented } from "../ui/form-controls";
 import { ExtensionAcquisitionDialogLoading } from "./RegistryDialogs";
 import type { ExtensionAcquisitionUiTranslator } from "./extensionAcquisitionUi";
-import type { ArtifactProviderSettings, BrowserRuntimeIdentity } from "./ExtensionRegistryDetail";
+import type { BrowserRuntimeIdentity } from "./ExtensionRegistryDetail";
+import { ChromeMark } from "./ChromeMark";
 
 const ExtensionCatalogResults = lazy(() => import("./ExtensionAcquisitionResults").then((module) => ({
   default: module.ExtensionCatalogResults,
@@ -269,10 +277,63 @@ export function canonicalExtensionListingUrl(value: { storeId: string }): string
   return chromeWebStoreListingUrl(value.storeId);
 }
 
-export function allExtensionRemoteCapabilitiesDisabled(settings: ExtensionAcquisitionSettings): boolean {
-  return !settings.crxsosoSearchEnabled
-    && !settings.googleArtifactEnabled
-    && !settings.crxsosoArtifactEnabled;
+/** Restore the scroll position captured before entering a catalog detail view. */
+export function restoreExtensionAcquisitionScrollPosition(
+  scroller: HTMLElement | null | undefined,
+  scrollTop: number,
+): void {
+  if (!scroller || !Number.isFinite(scrollTop)) return;
+  scroller.scrollTop = Math.max(0, scrollTop);
+}
+
+/**
+ * Project a preserved canonical selection onto the currently selected built-in
+ * artifact channel. A server resolution is authoritative for the channel it
+ * returned; when that channel is stale after an explicit settings change, the
+ * provider is still a reviewed fixed enum and the session endpoint remains the
+ * final availability/verification gate. An originally empty or malformed
+ * server response stays empty so the UI never invents a package offer out of
+ * missing facts.
+ */
+export function extensionResolutionForSelectedProvider(
+  selection: ExtensionAcquisitionSelection | undefined,
+  providerId: ExtensionArtifactProviderId,
+  providerLabel: string,
+): ExtensionReferenceResolution | undefined {
+  if (!selection) return undefined;
+  if (selection.source === "reference" && selection.resolution) {
+    const reviewedOffers = selection.resolution.offers.filter((offer) => (
+      offer.namespace === "chrome-web-store"
+      && offer.storeId === selection.storeId
+      && offer.format === "crx3"
+      && (offer.artifactProviderId === "chrome-web-store" || offer.artifactProviderId === "crxsoso")
+    ));
+    const existingOffer = reviewedOffers.find((offer) => offer.artifactProviderId === providerId);
+    if (existingOffer) {
+      return {
+        ...selection.resolution,
+        offers: [{ ...existingOffer }],
+      };
+    }
+    if (reviewedOffers.length === 0) {
+      return {
+        ...selection.resolution,
+        offers: [],
+      };
+    }
+  }
+  return {
+    namespace: "chrome-web-store",
+    storeId: selection.storeId,
+    storeUrl: selection.storeUrl,
+    offers: [{
+      namespace: "chrome-web-store",
+      storeId: selection.storeId,
+      artifactProviderId: providerId,
+      format: "crx3",
+      providerLabel,
+    }],
+  };
 }
 
 export function usesTrustedExtensionAcquisitionUpdate(extension: ExtensionEntity): boolean {
@@ -284,55 +345,66 @@ export function canStartTrustedExtensionAcquisitionUpdate(extension: ExtensionEn
     && Boolean(extension.updateProviderId);
 }
 
-export function ExtensionRemoteDisabledNotice({
-  onOpenSources,
-  t,
+/**
+ * Align an installed extension's persisted update authority with the one
+ * global download channel before creating an update session. The transition
+ * is an explicit consequence of the user's update action and stays
+ * server-owned: it downloads, verifies, and CAS-writes the provider before
+ * this helper accepts the returned projection.
+ */
+export async function extensionForSelectedUpdateProvider({
+  extension,
+  selectedProviderId,
+  transitionUpdateProvider,
 }: {
-  onOpenSources: () => void;
-  t: Translate;
-}) {
-  return (
-    <div className="acquisition-remote-disabled" id="extension-acquisition-all-off" role="status">
-      <div>
-        <strong>{t("extension.acquisition.source.allOff")}</strong>
-        <span>{t("extension.acquisition.source.allOffHelp")}</span>
-      </div>
-      <button className="command subtle" onClick={onOpenSources} type="button">
-        <Settings2 aria-hidden="true" size={16} />
-        {t("extension.acquisition.sources.open")}
-      </button>
-    </div>
+  extension: ExtensionEntity;
+  selectedProviderId: ExtensionArtifactProviderId;
+  transitionUpdateProvider: (
+    extensionId: string,
+    previousProviderId: ExtensionArtifactProviderId,
+    requestedProviderId: ExtensionArtifactProviderId,
+  ) => Promise<ExtensionEntity | undefined>;
+}): Promise<ExtensionEntity | undefined> {
+  const previousProviderId = extension.updateProviderId;
+  const storeId = extension.storeIdentity?.namespace === "chrome-web-store"
+    ? extension.storeIdentity.storeId
+    : undefined;
+  if (!previousProviderId || !storeId) return undefined;
+  if (previousProviderId === selectedProviderId) return extension;
+  const transitioned = await transitionUpdateProvider(
+    extension.id,
+    previousProviderId,
+    selectedProviderId,
   );
+  if (
+    transitioned?.id !== extension.id
+    || transitioned.updateProviderId !== selectedProviderId
+    || transitioned.storeIdentity?.namespace !== "chrome-web-store"
+    || transitioned.storeIdentity.storeId !== storeId
+  ) return undefined;
+  return transitioned;
 }
 
-export function ExtensionLocalImportActions({
-  importExtensionArchive,
-  importExtensionDirectory,
-  t,
-}: {
-  importExtensionArchive: (kind: "zip" | "crx") => void | Promise<void>;
-  importExtensionDirectory: () => void | Promise<void>;
-  t: Translate;
-}) {
-  return (
-    <section className="acquisition-local-import" aria-labelledby="acquisition-local-title">
-      <div>
-        <h3 id="acquisition-local-title">{t("extension.acquisition.local.title")}</h3>
-        <p>{t("extension.acquisition.local.description")}</p>
-      </div>
-      <div className="acquisition-local-actions">
-        <button className="command subtle" onClick={() => void importExtensionDirectory()} type="button">
-          {t("actions.importDirectory")}
-        </button>
-        <button className="command subtle" onClick={() => void importExtensionArchive("zip")} type="button">
-          {t("actions.importZip")}
-        </button>
-        <button className="command subtle" onClick={() => void importExtensionArchive("crx")} type="button">
-          {t("actions.importCrx")}
-        </button>
-      </div>
-    </section>
-  );
+/** Active work owns one store ID; terminal history must not contaminate another detail page. */
+export function extensionSessionBlocksOtherStore(
+  session: ExtensionAcquisitionSessionState,
+  storeId: string,
+): boolean {
+  if (!session.lastRequest || session.lastRequest.storeId === storeId) return false;
+  if (
+    session.operation === "starting"
+    || session.operation === "cancelling"
+    || session.operation === "confirming"
+  ) return true;
+  return Boolean(session.view && (sessionViewNeedsPolling(session.view) || session.view.status === "ready"));
+}
+
+/** Associate session feedback only with the canonical result that started it. */
+export function extensionSessionMatchesResolution(
+  session: ExtensionAcquisitionSessionState,
+  resolution: ExtensionReferenceResolution | undefined,
+): boolean {
+  return !resolution || session.lastRequest?.storeId === resolution.storeId;
 }
 
 function ExtensionAcquisitionContentLoading({ t }: { t: Translate }) {
@@ -369,9 +441,12 @@ export function ExtensionRegistryPanel({
   const [workspaceView, setWorkspaceView] = useState<"library" | "get">("library");
   const [libraryQuery, setLibraryQuery] = useState("");
   const [sourceSettingsOpen, setSourceSettingsOpen] = useState(false);
-  const [savingCapabilityId, setSavingCapabilityId] = useState<
-    "crxsoso-search" | "google-artifact" | "crxsoso-artifact" | undefined
-  >();
+  const [savingCapabilityId, setSavingCapabilityId] = useState<ExtensionArtifactProviderId | undefined>();
+  const [catalogViewMode, setCatalogViewMode] = useState<"list" | "two" | "four">("two");
+  const [catalogDetail, setCatalogDetail] = useState<ExtensionCatalogItem | undefined>();
+  const acquisitionWorkspaceRef = useRef<HTMLDivElement>(null);
+  const catalogScrollContainerRef = useRef<HTMLElement | null>(null);
+  const catalogScrollTopRef = useRef(0);
   const acquisition = useExtensionAcquisition({
     settings: settings?.extensionAcquisition ?? DEFAULT_APP_SETTINGS.extensionAcquisition,
     reloadState,
@@ -453,41 +528,43 @@ export function ExtensionRegistryPanel({
     />
   );
 
-  async function toggleCapability(
-    capabilityId: "crxsoso-search" | "google-artifact" | "crxsoso-artifact",
-    enabled: boolean,
-  ) {
-    setSavingCapabilityId(capabilityId);
+  async function selectArtifactProvider(providerId: ExtensionArtifactProviderId) {
+    setSavingCapabilityId(providerId);
     try {
-      await acquisition.setCapabilityEnabled(capabilityId, enabled);
+      await acquisition.setArtifactProvider(providerId);
     } finally {
       setSavingCapabilityId(undefined);
     }
   }
 
-  function openListing(value: { storeId: string }) {
-    window.open(canonicalExtensionListingUrl(value), "_blank", "noopener,noreferrer");
+  function openListing(value: { storeId: string }, providerId = selectedExtensionArtifactProvider(acquisition.state.settings)) {
+    void openExtensionListing({ storeId: value.storeId, artifactProviderId: providerId }).catch(() => {
+      toast("error", t("extension.acquisition.openListingFailed"));
+    });
   }
 
   function selectedResolution(): ExtensionReferenceResolution | undefined {
     const selection = acquisition.state.selection;
     if (!selection) return undefined;
-    if (selection.resolution) return selection.resolution;
-    const offers = ([
-      ["chrome-web-store", "Google Chrome Web Store", acquisition.state.settings.googleArtifactEnabled],
-      ["crxsoso", "CRX搜搜", acquisition.state.settings.crxsosoArtifactEnabled],
-    ] as const).flatMap(([artifactProviderId, providerLabel, enabled]) => enabled ? [{
-      namespace: "chrome-web-store" as const,
-      storeId: selection.storeId,
+    const artifactProviderId = selectedExtensionArtifactProvider(acquisition.state.settings);
+    return extensionResolutionForSelectedProvider(
+      selection,
       artifactProviderId,
-      format: "crx3" as const,
-      providerLabel,
-    }] : []);
-    return { namespace: "chrome-web-store", storeId: selection.storeId, storeUrl: selection.storeUrl, offers };
+      artifactProviderId === "crxsoso"
+        ? t("extension.detail.provider.crxsoso")
+        : t("extension.detail.provider.google"),
+    );
   }
 
   async function startOffer(providerId: ExtensionArtifactProviderId) {
-    if (!acquisition.selectProvider(providerId)) return;
+    // The normal offer is the persisted channel. A mirror offer can appear
+    // only as an explicit fallback after a failed selected-channel attempt;
+    // clicking it intentionally switches and persists the single channel
+    // before starting a new server session. There is no silent provider hop.
+    if (!acquisition.selectProvider(providerId)) {
+      if (!await acquisition.setArtifactProvider(providerId)) return;
+      if (!acquisition.selectProvider(providerId)) return;
+    }
     await acquisition.startSelectedSession();
   }
 
@@ -497,13 +574,24 @@ export function ExtensionRegistryPanel({
         toast("error", t("extension.detail.updateProvider.incomplete"));
         return;
       }
+      const selectedProviderId = selectedExtensionArtifactProvider(acquisition.state.settings);
+      const updateTarget = await extensionForSelectedUpdateProvider({
+        extension,
+        selectedProviderId,
+        transitionUpdateProvider: acquisition.transitionUpdateProvider,
+      });
+      if (!updateTarget?.storeIdentity) {
+        toast("error", t("extension.acquisition.error"));
+        return;
+      }
+      setCatalogDetail(undefined);
       setWorkspaceView("get");
       await acquisition.startSession({
         namespace: "chrome-web-store",
-        storeId: extension.storeIdentity.storeId,
-        artifactProviderId: extension.updateProviderId,
+        storeId: updateTarget.storeIdentity.storeId,
+        artifactProviderId: selectedProviderId,
         purpose: "update",
-        targetExtensionId: extension.id,
+        targetExtensionId: updateTarget.id,
       });
       return;
     }
@@ -513,29 +601,116 @@ export function ExtensionRegistryPanel({
   if (workspaceView === "get") {
     const resolution = selectedResolution();
     const session = acquisition.state.session;
-    const providerFailure = session.error
+    const sessionMatchesResolution = extensionSessionMatchesResolution(session, resolution);
+    const providerFailure = sessionMatchesResolution
+      && session.error
       && session.lastRequest
       && session.error.code !== "ACQUISITION_REQUEST_CANCELLED"
       && session.error.code !== "ACQUISITION_CANCELLED"
       ? { ...session.error, providerId: session.lastRequest.artifactProviderId }
       : undefined;
-    const startingProviderId = session.operation === "starting" || session.operation === "polling"
+    const startingProviderId = sessionMatchesResolution
+      && (session.operation === "starting" || session.operation === "polling")
       ? session.lastRequest?.artifactProviderId
       : undefined;
     const classification = acquisition.state.classification;
-    const allRemoteCapabilitiesOff = allExtensionRemoteCapabilitiesDisabled(acquisition.state.settings);
-    const inputHint = acquisition.state.input.trim()
-      ? classification.kind === "canonical"
-        ? t("extension.acquisition.search.exact")
-        : classification.kind === "keyword"
-          ? t("extension.acquisition.search.keyword")
-          : t("extension.acquisition.search.invalid")
+    // The placeholder already explains keyword/ID input. Only invalid URL-like
+    // text gets a persistent hint; the old “requests are sent on submit” copy
+    // was repetitive noise on every search.
+    const inputHint = acquisition.state.input.trim() && classification.kind === "invalid"
+      ? t("extension.acquisition.search.invalid")
       : "";
+    const channelChoice = resolution ? (
+      <ExtensionArtifactChannelChoice
+        embedded={Boolean(catalogDetail)}
+        onCancel={async () => { await acquisition.cancelSession(); }}
+        onOpenListing={openListing}
+        onSelect={(providerId) => acquisition.selectProvider(providerId)}
+        onStart={(offer) => startOffer(offer.artifactProviderId)}
+        providerFailure={providerFailure}
+        resolution={resolution}
+        selectedProviderId={acquisition.state.selectedProviderId}
+        startingProviderId={startingProviderId}
+        t={acquisitionT}
+      />
+    ) : undefined;
 
     function submitDiscovery(event: FormEvent<HTMLFormElement>) {
       event.preventDefault();
+      setCatalogDetail(undefined);
       void acquisition.submit();
     }
+
+    function openCatalogDetail(item: ExtensionCatalogItem) {
+      if (extensionSessionBlocksOtherStore(session, item.storeId)) {
+        toast("info", t("extension.acquisition.errorCode.ACQUISITION_SESSION_ACTIVE"));
+        return;
+      }
+      const scroller = acquisitionWorkspaceRef.current?.closest<HTMLElement>(".module-surface-body");
+      catalogScrollContainerRef.current = scroller ?? null;
+      catalogScrollTopRef.current = scroller?.scrollTop ?? 0;
+      if (acquisition.selectCatalogItem(item)) {
+        // The result can be several viewports down. Reusing that scroll offset
+        // for the child page can hide both Back and the primary preflight CTA.
+        restoreExtensionAcquisitionScrollPosition(scroller, 0);
+        setCatalogDetail(item);
+      }
+    }
+
+    function closeCatalogDetail() {
+      acquisition.clearSelection();
+      setCatalogDetail(undefined);
+      const scroller = catalogScrollContainerRef.current;
+      const scrollTop = catalogScrollTopRef.current;
+      if (scroller) {
+        if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+          window.requestAnimationFrame(() => restoreExtensionAcquisitionScrollPosition(scroller, scrollTop));
+        } else {
+          restoreExtensionAcquisitionScrollPosition(scroller, scrollTop);
+        }
+      }
+    }
+
+    const sessionPanel = session.view && sessionMatchesResolution ? (
+      <Suspense fallback={<ExtensionAcquisitionContentLoading t={t} />}>
+        <ExtensionAcquisitionSessionPanel
+          confirmedExtension={session.confirmation?.extension}
+          error={session.error}
+          locale={locale as "zh-CN" | "en-US"}
+          onCancel={async () => { await acquisition.cancelSession(); }}
+          onBindNext={() => {
+            setCatalogDetail(undefined);
+            acquisition.reset();
+            showProfiles();
+          }}
+          onConfirm={async (request) => { await acquisition.confirm(request); }}
+          onDone={() => {
+            setCatalogDetail(undefined);
+            acquisition.reset();
+            setWorkspaceView("library");
+          }}
+          onRetry={async () => { await acquisition.retrySession(); }}
+          onRetryStateRefresh={async () => { await acquisition.retryStateRefresh(); }}
+          operation={session.operation}
+          refreshError={session.refreshError}
+          refreshingState={session.refreshingState}
+          session={session.view}
+          t={acquisitionT}
+          targetExtensionId={session.lastRequest?.targetExtensionId}
+        />
+      </Suspense>
+    ) : undefined;
+    const sessionStartError = session.error
+      && !session.view
+      && sessionMatchesResolution
+      && (!resolution || session.lastRequest?.purpose === "update") ? (
+        <ExtensionAcquisitionStartError
+          error={session.error}
+          onOpenSources={() => setSourceSettingsOpen(true)}
+          onRetry={session.lastRequest ? () => { void acquisition.retrySession(); } : undefined}
+          t={acquisitionT}
+        />
+      ) : undefined;
 
     return (
       <>
@@ -546,6 +721,26 @@ export function ExtensionRegistryPanel({
           toolbar={
             <>
               {viewSwitch}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="command primary" disabled={importBusy} type="button">
+                    <Plus aria-hidden="true" size={16} />
+                    {t("actions.addExtension")}
+                    <ChevronDown aria-hidden="true" size={14} />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  <DropdownMenuItem disabled={busy === "extension-import-directory"} onSelect={() => void importExtensionDirectory()}>
+                    {t("actions.importDirectory")}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem disabled={busy === "extension-import-zip"} onSelect={() => void importExtensionArchive("zip")}>
+                    {t("actions.importZip")}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem disabled={busy === "extension-import-crx"} onSelect={() => void importExtensionArchive("crx")}>
+                    {t("actions.importCrx")}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <button className="command subtle" onClick={() => setSourceSettingsOpen(true)} type="button">
                 <Settings2 aria-hidden="true" size={16} />
                 {t("extension.acquisition.sources.open")}
@@ -553,19 +748,15 @@ export function ExtensionRegistryPanel({
             </>
           }
         >
-          <div className="extension-acquisition-workspace">
+          <div className="extension-acquisition-workspace" ref={acquisitionWorkspaceRef}>
             <form className="acquisition-search-form" onSubmit={submitDiscovery}>
-              <label htmlFor="extension-acquisition-query">{t("extension.acquisition.search.label")}</label>
               <div className="acquisition-search-control">
-                <Search aria-hidden="true" size={17} />
+                <ChromeMark size={18} />
                 <input
-                  aria-describedby={[
-                    allRemoteCapabilitiesOff ? "extension-acquisition-all-off" : undefined,
-                    inputHint ? "extension-acquisition-query-hint" : undefined,
-                  ].filter(Boolean).join(" ") || undefined}
+                  aria-describedby={inputHint ? "extension-acquisition-query-hint" : undefined}
                   aria-invalid={classification.kind === "invalid" || undefined}
+                  aria-label={t("extension.acquisition.search.label")}
                   autoComplete="off"
-                  disabled={allRemoteCapabilitiesOff}
                   id="extension-acquisition-query"
                   onChange={(event) => acquisition.setInput(event.target.value)}
                   placeholder={t("extension.acquisition.search.placeholder")}
@@ -574,12 +765,12 @@ export function ExtensionRegistryPanel({
                 <button
                   className="command primary"
                   disabled={
-                    allRemoteCapabilitiesOff
-                    || !acquisition.state.input.trim()
+                    !acquisition.state.input.trim()
                     || acquisition.state.discovery.status === "loading"
                   }
                   type="submit"
                 >
+                  <Search aria-hidden="true" size={16} />
                   {t("extension.acquisition.search.submit")}
                 </button>
               </div>
@@ -593,86 +784,48 @@ export function ExtensionRegistryPanel({
               )}
             </form>
 
-            {allRemoteCapabilitiesOff && (
-              <ExtensionRemoteDisabledNotice
-                onOpenSources={() => setSourceSettingsOpen(true)}
-                t={t}
-              />
+            {/* Installed-row updates are launched from the library rather
+                than from the retained catalog selection. Keep their progress
+                and preflight above an old result snapshot so the active
+                operation is visible in the first viewport. */}
+            {session.lastRequest?.purpose === "update" && sessionPanel}
+            {session.lastRequest?.purpose === "update" && sessionStartError && (
+              <Suspense fallback={<ExtensionAcquisitionContentLoading t={t} />}>
+                {sessionStartError}
+              </Suspense>
             )}
-
-            <ExtensionLocalImportActions
-              importExtensionArchive={importExtensionArchive}
-              importExtensionDirectory={importExtensionDirectory}
-              t={t}
-            />
 
             <Suspense fallback={<ExtensionAcquisitionContentLoading t={t} />}>
               <ExtensionCatalogResults
+                detailItem={catalogDetail}
+                detailProviderId={selectedExtensionArtifactProvider(acquisition.state.settings)}
+                detailFooter={catalogDetail ? channelChoice : undefined}
                 discoveryKind={acquisition.state.discovery.kind}
                 error={acquisition.state.discovery.error}
                 locale={locale as "zh-CN" | "en-US"}
                 onCancel={acquisition.cancelDiscovery}
                 onChoose={(item) => acquisition.selectCatalogItem(item)}
+                onOpenDetail={(item) => {
+                  openCatalogDetail(item);
+                }}
+                onBackDetail={closeCatalogDetail}
                 onLoadMore={() => void acquisition.loadMore()}
                 onOpenListing={openListing}
+                onViewModeChange={setCatalogViewMode}
                 onRetry={() => void acquisition.retryDiscovery()}
                 page={acquisition.state.discovery.page}
                 selectedStoreId={acquisition.state.selection?.storeId}
                 status={acquisition.state.discovery.status}
+                viewMode={catalogViewMode}
                 t={acquisitionT}
               />
 
-              {resolution && (
-                <ExtensionArtifactChannelChoice
-                  onCancel={async () => { await acquisition.cancelSession(); }}
-                  onOpenListing={openListing}
-                  onSelect={(providerId) => acquisition.selectProvider(providerId)}
-                  onStart={(offer) => startOffer(offer.artifactProviderId)}
-                  providerFailure={providerFailure}
-                  resolution={resolution}
-                  selectedProviderId={acquisition.state.selectedProviderId}
-                  startingProviderId={startingProviderId}
-                  t={acquisitionT}
-                />
-              )}
+              {!catalogDetail && channelChoice}
 
-              {session.error && !session.view && (!resolution || session.lastRequest?.purpose === "update") && (
-                <ExtensionAcquisitionStartError
-                  error={session.error}
-                  onOpenSources={() => setSourceSettingsOpen(true)}
-                  onRetry={session.lastRequest ? () => { void acquisition.retrySession(); } : undefined}
-                  t={acquisitionT}
-                />
-              )}
+              {session.lastRequest?.purpose !== "update" && sessionStartError}
             </Suspense>
 
-            {session.view && (
-              <Suspense fallback={<ExtensionAcquisitionContentLoading t={t} />}>
-                <ExtensionAcquisitionSessionPanel
-                  confirmedExtension={session.confirmation?.extension}
-                  error={session.error}
-                  locale={locale as "zh-CN" | "en-US"}
-                  onCancel={async () => { await acquisition.cancelSession(); }}
-                  onBindNext={() => {
-                    acquisition.reset();
-                    showProfiles();
-                  }}
-                  onConfirm={async (request) => { await acquisition.confirm(request); }}
-                  onDone={() => {
-                    acquisition.reset();
-                    setWorkspaceView("library");
-                  }}
-                  onRetry={async () => { await acquisition.retrySession(); }}
-                  onRetryStateRefresh={async () => { await acquisition.retryStateRefresh(); }}
-                  operation={session.operation}
-                  refreshError={session.refreshError}
-                  refreshingState={session.refreshingState}
-                  session={session.view}
-                  t={acquisitionT}
-                  targetExtensionId={session.lastRequest?.targetExtensionId}
-                />
-              </Suspense>
-            )}
+            {session.lastRequest?.purpose !== "update" && sessionPanel}
           </div>
         </RegistryModuleShell>
 
@@ -685,15 +838,11 @@ export function ExtensionRegistryPanel({
             />
           )}>
             <ExtensionAcquisitionSourceSettingsDialog
-              busyCapabilityId={savingCapabilityId}
-              capabilities={acquisition.state.capabilities.items}
+              busyProviderId={savingCapabilityId}
               close={() => setSourceSettingsOpen(false)}
-              error={acquisition.state.capabilities.error ?? acquisition.state.settingsRequest.error}
-              loading={acquisition.state.capabilities.status === "loading"}
-              locale={locale as "zh-CN" | "en-US"}
-              onRefresh={() => acquisition.refreshCapabilities()}
-              onToggle={toggleCapability}
-              refreshing={acquisition.state.capabilities.status === "loading"}
+              error={acquisition.state.settingsRequest.error}
+              onSelectProvider={selectArtifactProvider}
+              selectedProviderId={selectedExtensionArtifactProvider(acquisition.state.settings)}
               t={acquisitionT}
             />
           </Suspense>
@@ -745,29 +894,7 @@ export function ExtensionRegistryPanel({
       filterEmptyBody={t("module.filterEmptyBody")}
       filterResetLabel={t("actions.clearSearch")}
       action={
-        <>
-          {viewSwitch}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button className="command primary" disabled={importBusy} type="button">
-                <Plus size={16} aria-hidden="true" />
-                {t("actions.addExtension")}
-                <ChevronDown size={14} aria-hidden="true" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start">
-              <DropdownMenuItem disabled={busy === "extension-import-directory"} onSelect={() => void importExtensionDirectory()}>
-                {t("actions.importDirectory")}
-              </DropdownMenuItem>
-              <DropdownMenuItem disabled={busy === "extension-import-zip"} onSelect={() => void importExtensionArchive("zip")}>
-                {t("actions.importZip")}
-              </DropdownMenuItem>
-              <DropdownMenuItem disabled={busy === "extension-import-crx"} onSelect={() => void importExtensionArchive("crx")}>
-                {t("actions.importCrx")}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </>
+        viewSwitch
       }
       renderItem={(row) => (
         <ExtensionRow
@@ -788,9 +915,7 @@ export function ExtensionRegistryPanel({
           toast={toast}
           toggleExpanded={toggleExpanded}
           toggleExtensionStatus={toggleExtensionStatus}
-          transitionUpdateProvider={acquisition.transitionUpdateProvider}
           updateExtension={updateExtension}
-          updateProviderSettings={acquisition.state.settings}
           updateProviderTransition={acquisition.state.updateProvider}
         />
       )}
@@ -815,9 +940,7 @@ function ExtensionRow({
   toast,
   toggleExpanded,
   toggleExtensionStatus,
-  transitionUpdateProvider,
   updateExtension,
-  updateProviderSettings,
   updateProviderTransition,
 }: ExtensionActions & {
   browserRuntimeIdentity: BrowserRuntimeIdentity;
@@ -828,12 +951,6 @@ function ExtensionRow({
   t: Translate;
   toast: Notify;
   toggleExpanded: (id: string) => void;
-  transitionUpdateProvider: (
-    extensionId: string,
-    previousProviderId: ExtensionArtifactProviderId,
-    requestedProviderId: ExtensionArtifactProviderId,
-  ) => Promise<ExtensionEntity | undefined>;
-  updateProviderSettings: ArtifactProviderSettings;
   updateProviderTransition: ExtensionUpdateProviderTransitionState;
 }) {
   const { duplicated, extension, failing, highRiskCount, kindLabel, mediumRiskCount, refCount, stateLabel } = row;
@@ -1018,8 +1135,6 @@ function ExtensionRow({
             setExtensionUpdatePolicy={setExtensionUpdatePolicy}
             t={t}
             toast={toast}
-            transitionUpdateProvider={transitionUpdateProvider}
-            updateProviderSettings={updateProviderSettings}
             updateProviderTransition={updateProviderTransition}
           />
         </Suspense>

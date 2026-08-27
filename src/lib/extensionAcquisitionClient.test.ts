@@ -53,7 +53,7 @@ test("the acquisition client sends only normalized feature payloads to fixed rou
     disposition: "create",
     environmentIds: ["environment-1"],
   }, signal);
-  await client.saveSettings({ crxsosoSearchEnabled: false }, signal);
+  await client.saveSettings({ artifactProviderId: "crxsoso" }, signal);
   await client.transitionUpdateProvider("extension/unsafe", "crxsoso", signal);
 
   assert.deepEqual(calls.map((call) => [call.url, call.init?.method]), [
@@ -81,7 +81,7 @@ test("the acquisition client sends only normalized feature payloads to fixed rou
     environmentIds: ["environment-1"],
   });
   assert.deepEqual(JSON.parse(String(calls[7]?.init?.body)), {
-    extensionAcquisition: { crxsosoSearchEnabled: false },
+    extensionAcquisition: { artifactProviderId: "crxsoso" },
   });
   assert.deepEqual(JSON.parse(String(calls[8]?.init?.body)), { providerId: "crxsoso" });
   assert.equal(calls.every((call) => call.init?.signal === signal), true);
@@ -136,9 +136,7 @@ function settingsResponse(): AppSettings {
   return {
     ...DEFAULT_APP_SETTINGS,
     extensionAcquisition: {
-      crxsosoSearchEnabled: true,
-      googleArtifactEnabled: true,
-      crxsosoArtifactEnabled: true,
+      artifactProviderId: "crxsoso",
       crxsosoDisclosureVersionAccepted: 1,
     },
   };

@@ -354,14 +354,12 @@ test("app backup restore warns that a reference-mode extension is re-homed into 
   repository.close();
 });
 
-test("app backup restore publishes replaced settings to in-flight acquisition gates", async () => {
+test("app backup restore publishes replaced canonical acquisition settings to in-flight gates", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
   await repository.saveSettings({
     extensionAcquisition: {
-      crxsosoSearchEnabled: false,
-      googleArtifactEnabled: true,
-      crxsosoArtifactEnabled: true,
+      artifactProviderId: "chrome-web-store",
       crxsosoDisclosureVersionAccepted: 0,
     },
   });
@@ -369,9 +367,7 @@ test("app backup restore publishes replaced settings to in-flight acquisition ga
   await makeService(directory, repository).exportToBackup({ outputPath: backupPath });
   await repository.saveSettings({
     extensionAcquisition: {
-      crxsosoSearchEnabled: true,
-      googleArtifactEnabled: true,
-      crxsosoArtifactEnabled: true,
+      artifactProviderId: "crxsoso",
       crxsosoDisclosureVersionAccepted: 1,
     },
   });
@@ -396,23 +392,26 @@ test("app backup restore publishes replaced settings to in-flight acquisition ga
     readSettings: () => repository.getSettings(),
     providerRegistry,
   });
-  const notifications: boolean[] = [];
+  const notifications: Array<{ provider: string; disclosure: number }> = [];
   const restore = makeService(directory, repository, new Set(), (settings) => {
-    notifications.push(settings.extensionAcquisition.crxsosoSearchEnabled);
+    notifications.push({
+      provider: settings.extensionAcquisition.artifactProviderId,
+      disclosure: settings.extensionAcquisition.crxsosoDisclosureVersionAccepted,
+    });
     acquisition.settingsChanged(settings);
   });
 
   const searchRejected = assert.rejects(
     acquisition.search({ query: "tampermonkey" }),
-    (error: unknown) => (error as { code?: string }).code === "CATALOG_PROVIDER_DISABLED",
+    (error: unknown) => (error as { code?: string }).code === "CATALOG_DISCLOSURE_REQUIRED",
   );
   await searchStarted;
 
   await restore.restoreFromBackup({ inputPath: backupPath });
   await searchRejected;
 
-  assert.deepEqual(notifications, [false]);
-  assert.equal((await repository.getSettings()).extensionAcquisition.crxsosoSearchEnabled, false);
+  assert.deepEqual(notifications, [{ provider: "chrome-web-store", disclosure: 0 }]);
+  assert.equal((await repository.getSettings()).extensionAcquisition.artifactProviderId, "chrome-web-store");
   repository.close();
 });
 

@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { createPortal } from "react-dom";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { X } from "lucide-react";
 
@@ -49,7 +50,7 @@ export function ExtensionAcquisitionDialog({
   const descriptionId = React.useId();
   const { handleKeyDown, layerRef, panelRef } = useExtensionAcquisitionDialogFocus({ closeDisabled, onClose });
 
-  return (
+  const dialog = (
     <div
       aria-describedby={description ? descriptionId : undefined}
       aria-labelledby={titleId}
@@ -95,6 +96,13 @@ export function ExtensionAcquisitionDialog({
       </section>
     </div>
   );
+  // Registry views enter through a transformed animation container. A fixed
+  // descendant of that container is fixed to the module body instead of the
+  // viewport, which leaves the workspace header/sidebar uncovered by the
+  // scrim. Portalling the modal to <body> restores a true viewport boundary.
+  // Keep the inline fallback for SSR component tests where `document` does not
+  // exist.
+  return typeof document === "undefined" ? dialog : createPortal(dialog, document.body);
 }
 
 export function ExtensionAcquisitionDialogLoading({
@@ -108,37 +116,26 @@ export function ExtensionAcquisitionDialogLoading({
 }) {
   const titleId = React.useId();
   const descriptionId = `${titleId}-loading`;
-  const returnFocus = typeof document !== "undefined" && document.activeElement instanceof HTMLElement
-    ? document.activeElement
-    : null;
+  const { handleKeyDown, layerRef, panelRef } = useExtensionAcquisitionDialogFocus({
+    closeDisabled: false,
+    onClose: close,
+  });
 
-  React.useEffect(() => () => { if (returnFocus?.isConnected) returnFocus.focus(); }, []);
-
-  function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
-    if (event.key !== "Escape" && event.key !== "Tab") return;
-    event.preventDefault();
-    if (event.key === "Escape") {
-      event.stopPropagation();
-      close();
-    } else {
-      event.currentTarget.querySelector<HTMLElement>("button")?.focus();
-    }
-  }
-
-  return (
+  const dialog = (
     <div
       aria-describedby={descriptionId}
       aria-labelledby={titleId}
       aria-modal="true"
       className="modal-layer acquisition-modal-layer"
       onKeyDown={handleKeyDown}
+      ref={layerRef}
       role="dialog"
     >
       <div aria-hidden="true" className="modal-scrim" />
-      <section aria-busy="true" className="modal-panel acquisition-modal-panel registry-editor-panel">
+      <section aria-busy="true" className="modal-panel acquisition-modal-panel registry-editor-panel" ref={panelRef} tabIndex={-1}>
         <header className="modal-header with-close">
           <h2 id={titleId}>{title}</h2>
-          <button autoFocus className="command subtle" onClick={close} type="button">
+          <button data-acquisition-autofocus className="command subtle" onClick={close} type="button">
             {t("actions.close")}
           </button>
         </header>
@@ -153,6 +150,7 @@ export function ExtensionAcquisitionDialogLoading({
       </section>
     </div>
   );
+  return typeof document === "undefined" ? dialog : createPortal(dialog, document.body);
 }
 
 export type TextInputDialogState = {

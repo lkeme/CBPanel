@@ -80,7 +80,8 @@
 .extension-acquisition-workspace {
   display: grid;
   gap: 16px;
-  max-width: 1120px;
+  width: 100%;
+  max-width: none;
   margin: 0 auto;
 }
 
@@ -90,7 +91,6 @@
 }
 
 .acquisition-search-form,
-.acquisition-local-import,
 .acquisition-results,
 .acquisition-channel-choice,
 .acquisition-session-progress,
@@ -104,9 +104,18 @@
   border-radius: var(--radius);
 }
 
+/* Keep one visible boundary around the search control. The workspace itself is
+   already inside the module surface, so a second card border around the form
+   made the input look double-framed at narrow widths. */
+.acquisition-search-form {
+  position: relative;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
 .acquisition-search-form > label,
 .acquisition-section-header h3,
-.acquisition-local-import h3,
 .acquisition-preflight h3,
 .acquisition-confirmation h3 {
   margin: 0;
@@ -143,7 +152,6 @@
 
 .acquisition-input-hint,
 .acquisition-section-header p,
-.acquisition-local-import p,
 .acquisition-result-copy p,
 .acquisition-channel-copy small,
 .acquisition-source-copy p {
@@ -152,7 +160,6 @@
   line-height: 1.5;
 }
 
-.acquisition-local-import,
 .acquisition-section-header {
   display: flex;
   flex-wrap: wrap;
@@ -161,8 +168,8 @@
   justify-content: space-between;
 }
 
-.acquisition-local-actions,
 .acquisition-result-actions,
+.acquisition-section-actions,
 .acquisition-success-actions,
 .acquisition-confirmation-actions,
 .acquisition-session-start-error-actions {
@@ -171,7 +178,10 @@
   gap: 8px;
 }
 
-.acquisition-remote-disabled,
+.acquisition-section-actions {
+  justify-content: flex-end;
+}
+
 .acquisition-session-start-error {
   display: flex;
   flex-wrap: wrap;
@@ -180,22 +190,12 @@
   justify-content: space-between;
 }
 
-.acquisition-remote-disabled {
-  padding: 12px 16px;
-  color: var(--foreground);
-  background: var(--warning-soft);
-  border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border));
-  border-radius: var(--radius);
-}
-
-.acquisition-remote-disabled > div,
 .acquisition-session-start-error > div:first-child {
   display: grid;
   gap: 3px;
   min-width: 0;
 }
 
-.acquisition-remote-disabled span,
 .acquisition-session-start-error span {
   overflow-wrap: anywhere;
 }
@@ -241,6 +241,18 @@
   border: 0;
 }
 
+.acquisition-result-list {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.acquisition-result-list.view-two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.acquisition-result-list.view-four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .acquisition-result-card,
 .acquisition-source-card,
 .acquisition-channel-card,
@@ -255,6 +267,219 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
   transition: border-color 160ms ease, background-color 160ms ease;
+}
+
+.acquisition-result-list.view-four .acquisition-result-card {
+  grid-template-columns: 1fr;
+  align-items: start;
+  min-height: 260px;
+  padding: 12px;
+}
+
+.acquisition-result-list.view-four .acquisition-result-icon {
+  width: 100%;
+  height: 86px;
+  border-radius: var(--radius-control);
+}
+
+.acquisition-result-list.view-four .acquisition-result-actions {
+  align-self: end;
+}
+
+.acquisition-result-list.view-two .acquisition-result-card {
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.acquisition-result-list.view-two .acquisition-result-actions {
+  align-self: center;
+}
+
+.acquisition-result-list.view-two .acquisition-result-store-id,
+.acquisition-result-list.view-four .acquisition-result-store-id {
+  display: none;
+}
+
+.acquisition-result-store-id {
+  overflow-wrap: anywhere;
+}
+
+.acquisition-result-list.view-four .acquisition-result-actions,
+.acquisition-result-list.view-four .acquisition-result-actions .command {
+  width: 100%;
+}
+
+.acquisition-result-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  color: var(--foreground-muted);
+}
+
+.acquisition-result-metrics span,
+.acquisition-detail-facts dd {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.acquisition-view-switch {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+
+.acquisition-view-switch .icon-button[aria-pressed="true"] {
+  color: var(--primary-strong);
+  background: var(--primary-soft);
+  border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
+}
+
+.acquisition-channel-settings-list {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.acquisition-channel-settings-list legend {
+  margin-bottom: 2px;
+  color: var(--foreground-muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.acquisition-channel-setting-card {
+  grid-template-columns: auto 38px minmax(0, 1fr) auto;
+  cursor: pointer;
+}
+
+.acquisition-channel-setting-card > input {
+  width: 18px;
+  height: 18px;
+}
+
+.acquisition-selected-channel {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 10px 12px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+
+.acquisition-channel-selected-mark {
+  color: var(--success);
+}
+
+.acquisition-source-footnote {
+  margin: 0;
+  color: var(--foreground-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.extension-update-provider-readonly {
+  display: grid;
+  gap: 3px;
+}
+
+.extension-update-provider-readonly small {
+  color: var(--foreground-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.acquisition-result-detail {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.acquisition-detail-header,
+.acquisition-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.acquisition-detail-breadcrumb {
+  color: var(--foreground-muted);
+  font-size: 12px;
+}
+
+.acquisition-detail-hero {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  min-width: 0;
+}
+
+.acquisition-detail-hero h3 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.acquisition-detail-hero p {
+  margin: 5px 0 0;
+  color: var(--foreground-muted);
+  overflow-wrap: anywhere;
+}
+
+.acquisition-detail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.acquisition-detail-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.acquisition-detail-facts > div {
+  min-width: 0;
+  padding: 10px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+
+.acquisition-detail-facts dt {
+  color: var(--foreground-soft);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.acquisition-detail-facts dd {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.acquisition-results-inline-error {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
 }
 
 .acquisition-result-card.selected,
@@ -507,21 +732,46 @@
   min-height: 120px;
 }
 
-.acquisition-modal-panel {
-  width: min(760px, calc(100vw - 32px));
-  max-height: min(760px, calc(100vh - 32px));
+.modal-panel.acquisition-modal-panel {
+  width: min(760px, 100%);
+  max-height: min(760px, 100%);
+}
+
+.modal-layer.acquisition-modal-layer {
+  /* The panel's percentage dimensions resolve against this grid's content
+     box, so the scrim remains viewport-sized while the panel stays inside the
+     available area after padding. */
+  padding: min(24px, 4dvh) min(24px, 4dvw);
 }
 
 .acquisition-modal-panel .modal-body {
   overflow: auto;
 }
 
+@media (max-width: 1024px) {
+  /* Four literal tracks are too narrow once the responsive workspace and its
+     padding are accounted for. Keep the requested compact-card treatment but
+     flow it through two usable columns at tablet widths. */
+  .acquisition-result-list.view-four {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 760px) {
+  .acquisition-result-list.view-two,
+  .acquisition-result-list.view-four {
+    grid-template-columns: 1fr;
+  }
+
   .acquisition-result-card,
   .acquisition-source-card,
   .acquisition-channel-card,
   .confirm-choice {
     grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .acquisition-channel-setting-card {
+    grid-template-columns: auto 38px minmax(0, 1fr) auto;
   }
 
   .acquisition-result-actions,
@@ -547,11 +797,39 @@
     min-height: 44px;
   }
 
+  .acquisition-result-list.view-four .acquisition-result-card {
+    min-height: 0;
+  }
+
+  .acquisition-result-list.view-two .acquisition-result-card {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .acquisition-result-list.view-two .acquisition-result-actions {
+    grid-column: 1 / -1;
+  }
+
+  .acquisition-detail-hero {
+    grid-template-columns: 48px minmax(0, 1fr);
+  }
+
   .acquisition-progress-steps {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .diagnostic-note.acquisition-refresh-warning > .command {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  /* Keep an expired/failed pagination message readable when translated copy
+     wraps. The retry action must not be squeezed into a third, sub-pixel grid
+     track beside a long error on narrow viewports. */
+  .acquisition-results-inline-error {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .acquisition-results-inline-error > .command {
     grid-column: 1 / -1;
     justify-self: start;
   }
@@ -3606,7 +3884,10 @@ textarea {
 }
 
 .desktop-custom-chrome .modal-layer {
-  top: var(--titlebar-height);
+  /* Modal overlays belong to the viewport, including the custom title bar.
+     Offsetting this layer leaves an uncovered strip above the scrim in the
+     desktop build. */
+  inset: 0;
 }
 
 .modal-scrim {

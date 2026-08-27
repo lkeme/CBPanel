@@ -6,6 +6,7 @@ import {
   classifyExtensionReference,
   extensionCapabilityDescriptors,
   isCanonicalChromeExtensionId,
+  selectedExtensionArtifactProvider,
   type ExtensionAcquisitionCapabilityId,
   type ExtensionAcquisitionErrorCode,
   type ExtensionCapabilityHealth,
@@ -157,7 +158,10 @@ export class ExtensionAcquisitionService {
     const settings = await this.readSettings();
     this.observeSearchGates(settings);
     return extensionCapabilityDescriptors(settings.extensionAcquisition).map((descriptor) => {
-      const health = this.health.get(descriptor.id);
+      // Artifact channels are configuration-only; they are never probed in
+      // the background and therefore have no health state.  Search health is
+      // retained only as evidence from the most recent explicit request.
+      const health = descriptor.id === "crxsoso-search" ? this.health.get(descriptor.id) : undefined;
       return {
         ...descriptor,
         operations: [...descriptor.operations],
@@ -274,11 +278,24 @@ export class ExtensionAcquisitionService {
     }
 
     const acquisition = settings.extensionAcquisition;
+    const selectedProviderId = selectedExtensionArtifactProvider(acquisition);
+    // The registry is a reviewed built-in boundary, but keep the single-choice
+    // invariant at this orchestration boundary too so a test/custom adapter can
+    // never accidentally expose two download channels to the client.
+    const offers = this.options.providerRegistry
+      .artifactOffers(reference.storeId, acquisition)
+      .filter((offer) => (
+        offer.namespace === "chrome-web-store"
+        && offer.storeId === reference.storeId
+        && offer.artifactProviderId === selectedProviderId
+        && offer.format === "crx3"
+      ))
+      .slice(0, 1);
     return {
       namespace: "chrome-web-store",
       storeId: reference.storeId,
       storeUrl: reference.storeUrl,
-      offers: this.options.providerRegistry.artifactOffers(reference.storeId, acquisition),
+      offers,
     };
   }
 
@@ -287,12 +304,6 @@ export class ExtensionAcquisitionService {
   }
 
   private observeSearchGates(settings: AppSettings): void {
-    if (!settings.extensionAcquisition.crxsosoSearchEnabled) {
-      this.cancelActiveSearch(new ExtensionAcquisitionError("CATALOG_PROVIDER_DISABLED"));
-      this.deleteCursors("crxsoso");
-      this.observations.clear();
-      return;
-    }
     if (
       settings.extensionAcquisition.crxsosoDisclosureVersionAccepted
       < EXTENSION_ACQUISITION_DISCLOSURE_VERSION
@@ -479,9 +490,6 @@ function normalizeReferenceInput(request: ExtensionReferenceResolveRequest): str
 }
 
 function assertSearchAllowed(settings: AppSettings): void {
-  if (!settings.extensionAcquisition.crxsosoSearchEnabled) {
-    throw new ExtensionAcquisitionError("CATALOG_PROVIDER_DISABLED");
-  }
   if (
     settings.extensionAcquisition.crxsosoDisclosureVersionAccepted
     < EXTENSION_ACQUISITION_DISCLOSURE_VERSION

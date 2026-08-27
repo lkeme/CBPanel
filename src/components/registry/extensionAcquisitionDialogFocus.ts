@@ -1,6 +1,10 @@
 import { useEffect, useRef, type KeyboardEvent } from "react";
 
-const FOCUSABLE_SELECTOR = "a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex='-1'])";
+// `:disabled` also matches controls disabled by an ancestor <fieldset>;
+// `[disabled]` does not. Source-channel saves disable the whole fieldset, so
+// using the attribute selector would let Tab escape through radios that the
+// browser itself no longer considers focusable.
+const FOCUSABLE_SELECTOR = "a[href],button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex]:not([tabindex='-1'])";
 
 export interface ExtensionAcquisitionDialogFocusTarget {
   focus(): void;

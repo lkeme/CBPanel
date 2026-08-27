@@ -50,6 +50,8 @@ const ENVIRONMENT_PACKAGE_EXTENSIONS: &[&str] = &["cbpe"];
 const APP_BACKUP_EXTENSIONS: &[&str] = &["cbpb"];
 const EXTENSION_ZIP_EXTENSIONS: &[&str] = &["zip"];
 const EXTENSION_CRX_EXTENSIONS: &[&str] = &["crx"];
+const CHROME_WEB_STORE_LISTING_BASE: &str = "https://chromewebstore.google.com/detail/";
+const CRXSOSO_LISTING_BASE: &str = "https://www.crxsoso.com/webstore/detail/";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -608,6 +610,52 @@ async fn cbpanel_open_directory(app: tauri::AppHandle, path: String) -> Result<(
     .map_err(|error| format!("Open directory task failed: {error}."))?
 }
 
+/// Builds the only two public extension listing URLs the desktop shell may open.
+///
+/// The command intentionally accepts a provider id and canonical store id rather than a URL.
+/// This keeps the webview from turning the shell's browser-opening capability into an arbitrary
+/// navigation primitive.  Keep this validation local to the shell as well as in the TypeScript
+/// helper: invoke arguments are still webview input and must not be trusted merely because the
+/// normal UI supplied them.
+fn extension_listing_url(provider_id: &str, store_id: &str) -> Result<String, String> {
+    if !is_canonical_extension_id(store_id) {
+        return Err("Extension listing requires a canonical extension id.".into());
+    }
+
+    let base = match provider_id {
+        "chrome-web-store" => CHROME_WEB_STORE_LISTING_BASE,
+        "crxsoso" => CRXSOSO_LISTING_BASE,
+        _ => return Err("Extension listing provider is not supported.".into()),
+    };
+    Ok(format!("{base}{store_id}"))
+}
+
+fn is_canonical_extension_id(store_id: &str) -> bool {
+    store_id.len() == 32 && store_id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+}
+
+/// Opens a verified extension listing in the user's system browser.
+///
+/// Only the provider and canonical id cross the Tauri IPC boundary.  The URL is reconstructed and
+/// validated above before the shell plugin receives it; no caller-provided URL or authority is
+/// ever passed to `shell().open`.
+#[tauri::command]
+async fn cbpanel_open_extension_listing(
+    app: tauri::AppHandle,
+    provider_id: String,
+    store_id: String,
+) -> Result<(), String> {
+    let url = extension_listing_url(&provider_id, &store_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        #[allow(deprecated)]
+        app.shell()
+            .open(url, None)
+            .map_err(|error| format!("Failed to open extension listing: {error}."))
+    })
+    .await
+    .map_err(|error| format!("Open extension listing task failed: {error}."))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let runtime_state = Mutex::new(RuntimeState {
@@ -641,6 +689,7 @@ pub fn run() {
             cbpanel_select_extension_directory,
             cbpanel_select_extension_archive_path,
             cbpanel_open_directory,
+            cbpanel_open_extension_listing,
             cbpanel_update_tray_state,
             cbpanel_window_close,
             cbpanel_window_hide_to_tray,
@@ -1648,5 +1697,37 @@ mod tests {
 
         let _ = child.kill();
         assert!(wait_for_child_exit(&mut child, SIDECAR_FORCED_EXIT_WAIT));
+    }
+
+    #[test]
+    fn extension_listing_url_rebuilds_only_supported_provider_hosts() {
+        let store_id = "dhdgffkkebhmkfjojejmpbldmpobfkfo";
+
+        assert_eq!(
+            extension_listing_url("chrome-web-store", store_id).expect("Google URL should build"),
+            format!("https://chromewebstore.google.com/detail/{store_id}"),
+        );
+        assert_eq!(
+            extension_listing_url("crxsoso", store_id).expect("CRX搜搜 URL should build"),
+            format!("https://www.crxsoso.com/webstore/detail/{store_id}"),
+        );
+    }
+
+    #[test]
+    fn extension_listing_url_rejects_untrusted_authority_and_id_shapes() {
+        let store_id = "dhdgffkkebhmkfjojejmpbldmpobfkfo";
+
+        for provider in ["", "attacker", "chrome-web-store.evil"] {
+            assert!(extension_listing_url(provider, store_id).is_err());
+        }
+        for invalid_id in [
+            "not-canonical",
+            "DHDGFFKKEBHMKFOJEJMPBLDMPobfkfo",
+            "dhdgffkkebhmkfjojejmpbldmpobfkfo/extra",
+            "dhdgffkkebhmkfjojejmpbldmpobfkfo?next=https://evil.invalid",
+            "dhdgffkkebhmkfjojejmpbldmpobfkf\u{0}",
+        ] {
+            assert!(extension_listing_url("crxsoso", invalid_id).is_err());
+        }
     }
 }

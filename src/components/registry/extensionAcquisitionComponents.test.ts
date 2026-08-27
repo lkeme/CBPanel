@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -7,7 +8,6 @@ import { extensionAcquisitionEnUS } from "../../locales/extensionAcquisition.en-
 import { extensionAcquisitionZhCN } from "../../locales/extensionAcquisition.zh-CN";
 import type {
   ExtensionAcquisitionSessionView,
-  ExtensionCapabilityView,
   ExtensionPreflightReport,
 } from "../../shared/extensionAcquisition";
 import { ExtensionArtifactChannelChoice, ExtensionCatalogResults } from "./ExtensionAcquisitionResults";
@@ -32,45 +32,35 @@ const t: ExtensionAcquisitionUiTranslator = (key, params) => (
   params ? `${key}:${Object.entries(params).map(([name, value]) => `${name}=${value}`).join(",")}` : key
 );
 
-test("source switches expose names, descriptions, health and the all-off remote-only state", () => {
-  const capabilities: ExtensionCapabilityView[] = [
-    capability("crxsoso-search", "catalog-search", "crxsoso", "third-party", ["search"]),
-    capability("google-artifact", "artifact", "chrome-web-store", "google-hosted", ["download-current"]),
-    capability("crxsoso-artifact", "artifact", "crxsoso", "third-party", ["download-current"]),
-  ];
+test("source settings expose exactly two mutually exclusive package channels and no search toggle or health probe", () => {
   const html = renderToStaticMarkup(React.createElement(ExtensionAcquisitionSourceSettings, {
-    capabilities,
-    locale: "en-US",
-    onToggle: () => undefined,
+    onSelectProvider: () => undefined,
+    selectedProviderId: "crxsoso",
     t,
   }));
 
-  assert.equal((html.match(/role="switch"/g) ?? []).length, 3);
+  assert.equal((html.match(/type="radio"/g) ?? []).length, 2);
+  assert.equal((html.match(/checked=""/g) ?? []).length, 1);
   assert.match(html, /aria-labelledby="[^"]+"/);
   assert.match(html, /aria-describedby="[^"]+"/);
-  assert.ok(html.includes("extension.acquisition.source.allOff"));
-  assert.ok(html.includes("extension.acquisition.source.allOffHelp"));
-  assert.ok(html.includes("extension.acquisition.health.notChecked"));
+  assert.ok(html.includes("extension.acquisition.source.channelLegend"));
+  assert.ok(html.includes("extension.acquisition.source.singleChannelHelp"));
+  assert.ok(!html.includes("extension.acquisition.source.crxsosoSearchName"));
+  assert.ok(!html.includes("extension.acquisition.health.notChecked"));
+  assert.ok(!html.includes("actions.refresh"));
 });
 
-test("a capability save locks every source switch until the serialized setting write settles", () => {
-  const capabilities: ExtensionCapabilityView[] = [
-    capability("crxsoso-search", "catalog-search", "crxsoso", "third-party", ["search"]),
-    capability("google-artifact", "artifact", "chrome-web-store", "google-hosted", ["download-current"]),
-    capability("crxsoso-artifact", "artifact", "crxsoso", "third-party", ["download-current"]),
-  ];
+test("a channel save locks the mutually exclusive radio group until the serialized write settles", () => {
   const html = renderToStaticMarkup(React.createElement(ExtensionAcquisitionSourceSettings, {
-    busyCapabilityId: "google-artifact",
-    capabilities,
-    locale: "en-US",
-    onToggle: () => undefined,
+    busyProviderId: "chrome-web-store",
+    onSelectProvider: () => undefined,
+    selectedProviderId: "crxsoso",
     t,
   }));
 
-  const switches = html.match(/<button[^>]*role="switch"[^>]*>/g) ?? [];
-  assert.equal(switches.length, 3);
-  assert.ok(switches.every((control) => control.includes("disabled=\"\"")));
-  assert.ok(html.includes("extension.acquisition.source.saving"));
+  assert.equal((html.match(/type="radio"/g) ?? []).length, 2);
+  assert.match(html, /<fieldset[^>]*disabled=""/);
+  assert.ok(!html.includes("role=\"switch\""));
 });
 
 test("third-party disclosure is a named modal whose safe default is Cancel", () => {
@@ -105,23 +95,49 @@ test("the cold-loading fallback is a named busy dialog with one safe close actio
   assert.ok(attribute(dialog, "aria-describedby"));
   assert.match(html, /<section[^>]*aria-busy="true"/);
   assert.equal((html.match(/<button/g) ?? []).length, 1);
-  assert.match(html, /<button[^>]*autofocus=""[^>]*>actions\.close<\/button>/);
+  assert.match(html, /<button[^>]*data-acquisition-autofocus="true"[^>]*>actions\.close<\/button>/);
   assert.ok(html.includes("extension.acquisition.loading"));
+});
+
+test("acquisition modal CSS outranks the generic layer and remains inside short viewports", () => {
+  const styles = readFileSync(new URL("../../styles.css", import.meta.url), "utf8");
+  assert.match(
+    styles,
+    /\.modal-panel\.acquisition-modal-panel\s*\{[^}]*max-height:\s*min\(760px,\s*100%\)/s,
+  );
+  assert.match(
+    styles,
+    /\.modal-layer\.acquisition-modal-layer\s*\{[^}]*padding:\s*min\(24px,\s*4dvh\)\s+min\(24px,\s*4dvw\)/s,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width:\s*1024px\)\s*\{[\s\S]*?\.acquisition-result-list\.view-four\s*\{[^}]*grid-template-columns:\s*repeat\(2,/,
+  );
+});
+
+test("Get extensions owns the single local-import entry and keeps the redundant search label nonvisual", () => {
+  const source = readFileSync(new URL("./ExtensionRegistryPanel.tsx", import.meta.url), "utf8");
+  assert.equal((source.match(/t\("actions\.addExtension"\)/g) ?? []).length, 1);
+  assert.equal((source.match(/importExtensionDirectory\(\)/g) ?? []).length, 1);
+  assert.equal((source.match(/importExtensionArchive\("zip"\)/g) ?? []).length, 1);
+  assert.equal((source.match(/importExtensionArchive\("crx"\)/g) ?? []).length, 1);
+  assert.ok(source.includes('aria-label={t("extension.acquisition.search.label")}'));
+  assert.ok(!source.includes('className="acquisition-search-label"'));
 });
 
 test("stable acquisition error codes produce localized primary copy and bounded raw diagnostics", () => {
   const zhT = localeTranslator(extensionAcquisitionZhCN);
   const enT = localeTranslator(extensionAcquisitionEnUS);
   const clientError = {
-    code: "CATALOG_SEARCH_DISABLED",
-    message: "Keyword search is disabled. Enable a provider.",
+    code: "ARTIFACT_CHANNEL_DISABLED",
+    message: "The package channel changed.",
   };
 
   assert.deepEqual(formatExtensionAcquisitionError(clientError, zhT), {
-    primary: extensionAcquisitionZhCN["extension.acquisition.errorCode.CATALOG_SEARCH_DISABLED"],
+    primary: extensionAcquisitionZhCN["extension.acquisition.errorCode.ARTIFACT_CHANNEL_DISABLED"],
   });
   assert.deepEqual(formatExtensionAcquisitionError(clientError, enT), {
-    primary: extensionAcquisitionEnUS["extension.acquisition.errorCode.CATALOG_SEARCH_DISABLED"],
+    primary: extensionAcquisitionEnUS["extension.acquisition.errorCode.ARTIFACT_CHANNEL_DISABLED"],
   });
 
   const unknown = formatExtensionAcquisitionError({
@@ -198,12 +214,13 @@ test("acquisition dialogs trap Tab, honor Escape locking, and restore only conne
   assert.equal(closed, 1);
 });
 
-test("catalog rendering announces omitted aliases and requires explicit listing/result actions", () => {
+test("catalog rendering announces omitted aliases and routes the single card action to details", () => {
   const html = renderToStaticMarkup(React.createElement(ExtensionCatalogResults, {
     locale: "en-US",
     onCancel: () => undefined,
     onChoose: () => undefined,
     onLoadMore: () => undefined,
+    onOpenDetail: () => undefined,
     onOpenListing: () => undefined,
     onRetry: () => undefined,
     page: {
@@ -224,10 +241,69 @@ test("catalog rendering announces omitted aliases and requires explicit listing/
   }));
 
   assert.ok(html.includes("extension.acquisition.aliasesExcluded:count=2"));
-  assert.ok(html.includes("extension.acquisition.openWebStore"));
-  assert.ok(html.includes("extension.acquisition.results.choose"));
+  assert.ok(html.includes("extension.acquisition.results.details"));
+  assert.ok(!html.includes("extension.acquisition.openWebStore"));
   assert.ok(html.includes("extension.acquisition.loadMore"));
   assert.match(html, /role="status"/);
+});
+
+test("catalog supports four-column cards with Chrome marks and a detail child view without observation timestamps", () => {
+  const item = {
+    namespace: "chrome-web-store" as const,
+    storeId: "a".repeat(32),
+    storeUrl: `https://chromewebstore.google.com/detail/${"a".repeat(32)}`,
+    catalogProviderId: "crxsoso" as const,
+    observedAt: "2026-08-27T00:00:00.000Z",
+    name: "Example",
+    description: "Useful extension",
+    category: "Productivity",
+    rating: 4.8,
+    userCount: 1_200_000,
+  };
+  const grid = renderToStaticMarkup(React.createElement(ExtensionCatalogResults, {
+    locale: "en-US",
+    onCancel: () => undefined,
+    onChoose: () => undefined,
+    onLoadMore: () => undefined,
+    onOpenDetail: () => undefined,
+    onOpenListing: () => undefined,
+    onRetry: () => undefined,
+    onViewModeChange: () => undefined,
+    page: { query: "example", items: [item], excludedNonCanonicalCount: 0, hasMore: false },
+    status: "ready",
+    t,
+    viewMode: "four",
+  }));
+
+  assert.ok(grid.includes("acquisition-result-list view-four"));
+  assert.ok(grid.includes("lucide-package-search"));
+  assert.ok(grid.includes("extension.acquisition.results.details"));
+  assert.equal((grid.match(/extension\.acquisition\.results\.details/g) ?? []).length, 1);
+  assert.ok(!grid.includes("extension.acquisition.openWebStore"));
+  assert.match(grid, /aria-label="extension\.acquisition\.results\.viewFour"[^>]*aria-pressed="true"/);
+  assert.ok(!grid.includes(item.observedAt));
+
+  const detail = renderToStaticMarkup(React.createElement(ExtensionCatalogResults, {
+    detailItem: item,
+    detailFooter: React.createElement("button", { type: "button" }, "channel-action"),
+    detailProviderId: "crxsoso",
+    locale: "en-US",
+    onBackDetail: () => undefined,
+    onCancel: () => undefined,
+    onChoose: () => undefined,
+    onLoadMore: () => undefined,
+    onOpenListing: () => undefined,
+    onRetry: () => undefined,
+    page: { query: "example", items: [item], excludedNonCanonicalCount: 0, hasMore: false },
+    status: "ready",
+    t,
+  }));
+  assert.ok(detail.includes("extension.acquisition.results.back"));
+  assert.ok(detail.includes("channel-action"));
+  assert.ok(!detail.includes("extension.acquisition.openWebStore"), "an embedded channel owns the selected-channel listing action");
+  assert.ok(!detail.includes("extension.acquisition.results.choose"));
+  assert.ok(detail.includes(item.storeId));
+  assert.ok(!detail.includes(item.observedAt));
 });
 
 test("cancelling pagination retains results but exposes one explicit retry instead of an active load-more path", () => {
@@ -305,6 +381,51 @@ test("a Google failure keeps Google selected and exposes mirror only as an expli
   assert.ok(html.includes("extension.acquisition.channel.mirrorDescription"));
   assert.ok(html.includes("extension.acquisition.channel.tryMirror"));
   assert.match(html, /role="alert"/);
+});
+
+test("a Google failure still offers an explicit CRX搜搜 action when the server returned only the selected channel", () => {
+  const html = renderToStaticMarkup(React.createElement(ExtensionArtifactChannelChoice, {
+    onOpenListing: () => undefined,
+    onSelect: () => undefined,
+    onStart: () => undefined,
+    providerFailure: { providerId: "chrome-web-store", message: "offline" },
+    resolution: {
+      namespace: "chrome-web-store",
+      storeId: "b".repeat(32),
+      storeUrl: `https://chromewebstore.google.com/detail/${"b".repeat(32)}`,
+      offers: [{
+        namespace: "chrome-web-store",
+        storeId: "b".repeat(32),
+        artifactProviderId: "chrome-web-store",
+        format: "crx3",
+        providerLabel: "Chrome Web Store",
+      }],
+    },
+    selectedProviderId: "chrome-web-store",
+    t,
+  }));
+  assert.ok(html.includes("extension.acquisition.channel.tryMirror"));
+});
+
+test("an originally empty exact-resolution offer list never invents a fallback channel", () => {
+  const html = renderToStaticMarkup(React.createElement(ExtensionArtifactChannelChoice, {
+    onOpenListing: () => undefined,
+    onSelect: () => undefined,
+    onStart: () => undefined,
+    providerFailure: { providerId: "chrome-web-store", message: "offline" },
+    resolution: {
+      namespace: "chrome-web-store",
+      storeId: "b".repeat(32),
+      storeUrl: `https://chromewebstore.google.com/detail/${"b".repeat(32)}`,
+      offers: [],
+    },
+    selectedProviderId: "chrome-web-store",
+    t,
+  }));
+
+  assert.ok(html.includes("extension.acquisition.channel.noneTitle"));
+  assert.ok(!html.includes("extension.acquisition.channel.tryMirror"));
+  assert.ok(!html.includes("extension.acquisition.channel.tryGoogle"));
 });
 
 test("session creation exposes a safe cancellation action while the chosen channel is starting", () => {
@@ -436,16 +557,6 @@ test("consumed acquisition keeps success visible while refresh failure offers an
   assert.ok(html.includes(extensionAcquisitionEnUS["extension.acquisition.success.retryRefresh"]));
   assert.match(html, /role="alert"/);
 });
-
-function capability(
-  id: ExtensionCapabilityView["id"],
-  kind: ExtensionCapabilityView["kind"],
-  providerId: ExtensionCapabilityView["providerId"],
-  trust: ExtensionCapabilityView["trust"],
-  operations: ExtensionCapabilityView["operations"],
-): ExtensionCapabilityView {
-  return { id, kind, providerId, trust, operations, enabled: false };
-}
 
 function readySession(report: ExtensionPreflightReport): ExtensionAcquisitionSessionView {
   return {

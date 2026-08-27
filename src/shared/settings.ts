@@ -1,5 +1,8 @@
 import type { BrowserCoreUpdateCheck } from "./browserCore";
-import { EXTENSION_ACQUISITION_DISCLOSURE_VERSION } from "./extensionAcquisition";
+import {
+  EXTENSION_ACQUISITION_DISCLOSURE_VERSION,
+  type ExtensionArtifactProviderId,
+} from "./extensionAcquisition";
 
 export type ShellMode = "web" | "desktop";
 export type PlatformChrome = "native" | "custom";
@@ -38,7 +41,9 @@ export interface AppSettings {
 }
 
 export type AppSettingsPatch = {
-  [Key in keyof AppSettings]?: Partial<AppSettings[Key]>;
+  [Key in Exclude<keyof AppSettings, "extensionAcquisition">]?: Partial<AppSettings[Key]>;
+} & {
+  extensionAcquisition?: ExtensionAcquisitionSettingsPatch;
 };
 
 export interface AppearanceSettings {
@@ -85,12 +90,31 @@ export interface StorageSettings {
   autoMigrateLegacyJson: boolean;
 }
 
+/**
+ * The catalog search provider is built in and always available once the
+ * disclosure has been accepted.  Only one artifact channel can be selected.
+ *
+ * The legacy three-boolean shape is accepted only by
+ * ExtensionAcquisitionSettingsPatch while decoding old settings. It is not
+ * part of the normalized output and must never be used as runtime authority.
+ */
 export interface ExtensionAcquisitionSettings {
-  crxsosoSearchEnabled: boolean;
-  googleArtifactEnabled: boolean;
-  crxsosoArtifactEnabled: boolean;
+  artifactProviderId: ExtensionArtifactProviderId;
   crxsosoDisclosureVersionAccepted: number;
 }
+
+/** Settings patch/decoded shape accepted at the compatibility boundary. */
+export type ExtensionAcquisitionSettingsPatch = Partial<ExtensionAcquisitionSettings> & {
+  /** @deprecated legacy input only; use artifactProviderId. */
+  crxsosoSearchEnabled?: boolean;
+  /** @deprecated legacy input only; use artifactProviderId. */
+  googleArtifactEnabled?: boolean;
+  /** @deprecated legacy input only; use artifactProviderId. */
+  crxsosoArtifactEnabled?: boolean;
+};
+
+/** A normalized settings input may be a full current object or a legacy row. */
+type ExtensionAcquisitionSettingsInput = ExtensionAcquisitionSettingsPatch;
 
 export interface BrowserCoreEnvVarSetting {
   id: string;
@@ -761,9 +785,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     customGithubMirrorPrefix: "",
   },
   extensionAcquisition: {
-    crxsosoSearchEnabled: true,
-    googleArtifactEnabled: true,
-    crxsosoArtifactEnabled: true,
+    artifactProviderId: "crxsoso",
     crxsosoDisclosureVersionAccepted: 0,
   },
 };
@@ -776,7 +798,7 @@ export function normalizeSettings(input: AppSettingsPatch = {}): AppSettings {
   const storage: Partial<StorageSettings> = input.storage ?? {};
   const binary: Partial<BinarySettings> = input.binary ?? {};
   const networkTrace: Partial<NetworkTraceSettings> = input.networkTrace ?? {};
-  const extensionAcquisition: Partial<ExtensionAcquisitionSettings> = input.extensionAcquisition ?? {};
+  const extensionAcquisition: ExtensionAcquisitionSettingsInput = input.extensionAcquisition ?? {};
   const closeBehavior = normalizeDesktopCloseBehavior(
     desktop.closeBehavior,
     desktop.closeToTray,
@@ -851,18 +873,7 @@ export function normalizeSettings(input: AppSettingsPatch = {}): AppSettings {
     },
     networkTrace: normalizeNetworkTraceSettings(networkTrace),
     extensionAcquisition: {
-      crxsosoSearchEnabled: booleanValue(
-        extensionAcquisition.crxsosoSearchEnabled,
-        base.extensionAcquisition.crxsosoSearchEnabled,
-      ),
-      googleArtifactEnabled: booleanValue(
-        extensionAcquisition.googleArtifactEnabled,
-        base.extensionAcquisition.googleArtifactEnabled,
-      ),
-      crxsosoArtifactEnabled: booleanValue(
-        extensionAcquisition.crxsosoArtifactEnabled,
-        base.extensionAcquisition.crxsosoArtifactEnabled,
-      ),
+      artifactProviderId: normalizeExtensionArtifactProviderId(extensionAcquisition),
       crxsosoDisclosureVersionAccepted: normalizeDisclosureVersion(
         extensionAcquisition.crxsosoDisclosureVersionAccepted,
       ),
@@ -882,6 +893,28 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
     closeToTray: nextCloseBehavior === "tray",
   };
 
+  const extensionPatch = patch.extensionAcquisition;
+  // Callers normally pass normalized settings, but backup/v1 adapters and
+  // embedders may hand this helper a legacy three-boolean object. Derive the
+  // current channel through the same compatibility normalizer so a disclosure-
+  // only patch cannot silently reset a legacy Google selection to CRX搜搜.
+  const currentArtifactProviderId = normalizeExtensionArtifactProviderId(
+    current.extensionAcquisition as ExtensionAcquisitionSettingsPatch,
+  );
+  const extensionAcquisition = extensionPatch
+    ? {
+      artifactProviderId:
+        extensionPatch.artifactProviderId !== undefined
+          ? extensionPatch.artifactProviderId
+          : hasLegacyArtifactProviderFields(extensionPatch)
+            ? normalizeExtensionArtifactProviderId(extensionPatch)
+            : currentArtifactProviderId,
+      crxsosoDisclosureVersionAccepted:
+        extensionPatch.crxsosoDisclosureVersionAccepted
+        ?? current.extensionAcquisition.crxsosoDisclosureVersionAccepted,
+    }
+    : current.extensionAcquisition;
+
   return normalizeSettings({
     appearance: { ...current.appearance, ...(patch.appearance ?? {}) },
     table: { ...current.table, ...(patch.table ?? {}) },
@@ -889,8 +922,25 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
     storage: { ...current.storage, ...(patch.storage ?? {}) },
     binary: { ...current.binary, ...(patch.binary ?? {}) },
     networkTrace: { ...current.networkTrace, ...(patch.networkTrace ?? {}) },
-    extensionAcquisition: { ...current.extensionAcquisition, ...(patch.extensionAcquisition ?? {}) },
+    extensionAcquisition,
   });
+}
+
+/** Normalize the canonical channel and legacy three-boolean settings. */
+export function normalizeExtensionArtifactProviderId(
+  input: ExtensionAcquisitionSettingsPatch | undefined,
+): ExtensionArtifactProviderId {
+  if (input?.artifactProviderId !== undefined) {
+    return input.artifactProviderId === "chrome-web-store" ? "chrome-web-store" : "crxsoso";
+  }
+  const google = input?.googleArtifactEnabled === true;
+  const crxsoso = input?.crxsosoArtifactEnabled === true;
+  return google && !crxsoso ? "chrome-web-store" : "crxsoso";
+}
+
+function hasLegacyArtifactProviderFields(input: ExtensionAcquisitionSettingsPatch): boolean {
+  return Object.prototype.hasOwnProperty.call(input, "googleArtifactEnabled")
+    || Object.prototype.hasOwnProperty.call(input, "crxsosoArtifactEnabled");
 }
 
 function normalizeDisclosureVersion(value: unknown): number {

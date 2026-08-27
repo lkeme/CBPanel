@@ -733,9 +733,7 @@ test("extension acquisition settings persist across SQLite reopen", async () => 
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
   await repository.saveSettings({
     extensionAcquisition: {
-      crxsosoSearchEnabled: false,
-      googleArtifactEnabled: true,
-      crxsosoArtifactEnabled: false,
+      artifactProviderId: "chrome-web-store",
       crxsosoDisclosureVersionAccepted: 1,
     },
   });
@@ -743,12 +741,48 @@ test("extension acquisition settings persist across SQLite reopen", async () => 
 
   const reopened = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
   assert.deepEqual((await reopened.getSettings()).extensionAcquisition, {
-    crxsosoSearchEnabled: false,
-    googleArtifactEnabled: true,
-    crxsosoArtifactEnabled: false,
+    artifactProviderId: "chrome-web-store",
     crxsosoDisclosureVersionAccepted: 1,
   });
   reopened.close();
+});
+
+test("legacy acquisition switches normalize to one channel and are retired on the next settings write", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const defaults = await repository.getSettings();
+  repository.close();
+
+  const databasePath = path.join(directory, "cbpanel.sqlite");
+  const legacy = new DatabaseSync(databasePath);
+  legacy.prepare("UPDATE app_settings SET settings_json = ? WHERE id = 'default'").run(JSON.stringify({
+    ...defaults,
+    extensionAcquisition: {
+      crxsosoSearchEnabled: false,
+      googleArtifactEnabled: true,
+      crxsosoArtifactEnabled: false,
+      crxsosoDisclosureVersionAccepted: 1,
+    },
+  }));
+  legacy.close();
+
+  const reopened = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  assert.deepEqual((await reopened.getSettings()).extensionAcquisition, {
+    artifactProviderId: "chrome-web-store",
+    crxsosoDisclosureVersionAccepted: 1,
+  });
+  await reopened.saveSettings({ appearance: { theme: "dark" } });
+  reopened.close();
+
+  const verify = new DatabaseSync(databasePath);
+  const row = verify.prepare("SELECT settings_json FROM app_settings WHERE id = 'default'")
+    .get() as { settings_json: string };
+  verify.close();
+  const persisted = JSON.parse(row.settings_json) as { extensionAcquisition: Record<string, unknown> };
+  assert.deepEqual(persisted.extensionAcquisition, {
+    artifactProviderId: "chrome-web-store",
+    crxsosoDisclosureVersionAccepted: 1,
+  });
 });
 
 test("explicit extension unbind validates every environment before deleting any binding", async () => {

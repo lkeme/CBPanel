@@ -8,7 +8,11 @@ import {
   type ExtensionArtifactOffer,
   type ExtensionCatalogItem,
 } from "../../src/shared/extensionAcquisition";
-import { normalizeSettings, type AppSettings } from "../../src/shared/settings";
+import {
+  normalizeSettings,
+  type AppSettings,
+  type ExtensionAcquisitionSettingsPatch,
+} from "../../src/shared/settings";
 import {
   ExtensionAcquisitionError,
   ExtensionAcquisitionService,
@@ -24,7 +28,7 @@ const STORE_ID = "dhdgffkkebhmkfjojejmpbldmpobfkfo";
 const SECOND_STORE_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const OBSERVED_AT = "2026-08-27T01:02:03.000Z";
 
-test("search and disclosure switches make zero provider calls until both gates are open", async () => {
+test("search is always-on apart from the first-use disclosure gate", async () => {
   let settings = acquisitionSettings({ crxsosoDisclosureVersionAccepted: 0 });
   const calls: CatalogSearchInput[] = [];
   const provider = catalogProvider(async (input) => {
@@ -40,11 +44,10 @@ test("search and disclosure switches make zero provider calls until both gates a
   assert.equal(calls.length, 0);
 
   settings = acquisitionSettings({
-    crxsosoSearchEnabled: false,
     crxsosoDisclosureVersionAccepted: EXTENSION_ACQUISITION_DISCLOSURE_VERSION,
   });
-  await rejectsWithCode(service.search({ query: "tampermonkey" }), "CATALOG_PROVIDER_DISABLED");
-  assert.equal(calls.length, 0);
+  await service.search({ query: "tampermonkey" });
+  assert.equal(calls.length, 1);
 });
 
 test("control characters are rejected locally without degrading provider health", async () => {
@@ -80,10 +83,9 @@ test("search rejects ids and URL-like input locally instead of treating them as 
   assert.equal((await service.capabilities())[0]?.health, undefined);
 });
 
-test("capabilities re-read independent switches and expose only last user-triggered capability health", async () => {
+test("capabilities re-read selected channel and expose only last user-triggered capability health", async () => {
   let settings = acquisitionSettings({
-    googleArtifactEnabled: false,
-    crxsosoArtifactEnabled: true,
+    artifactProviderId: "crxsoso",
     crxsosoDisclosureVersionAccepted: EXTENSION_ACQUISITION_DISCLOSURE_VERSION,
   });
   let settingsReads = 0;
@@ -104,14 +106,12 @@ test("capabilities re-read independent switches and expose only last user-trigge
   assert.equal(capabilities[2]?.health, undefined);
 
   settings = acquisitionSettings({
-    crxsosoSearchEnabled: false,
-    googleArtifactEnabled: true,
-    crxsosoArtifactEnabled: false,
+    artifactProviderId: "chrome-web-store",
     crxsosoDisclosureVersionAccepted: EXTENSION_ACQUISITION_DISCLOSURE_VERSION,
   });
   capabilities = await service.capabilities();
   assert.deepEqual(capabilities.map(({ id, enabled }) => ({ id, enabled })), [
-    { id: "crxsoso-search", enabled: false },
+    { id: "crxsoso-search", enabled: true },
     { id: "google-artifact", enabled: true },
     { id: "crxsoso-artifact", enabled: false },
   ]);
@@ -283,13 +283,12 @@ test("provider continuation bounds match the adapter contract before a cursor is
   }
 });
 
-test("settingsChanged synchronously aborts and discards in-flight work when either gate closes", async (context) => {
+test("settingsChanged synchronously aborts and discards in-flight work when disclosure closes", async (context) => {
   const cases: Array<[
     string,
     Partial<AppSettings["extensionAcquisition"]>,
     ExtensionAcquisitionErrorCode,
   ]> = [
-    ["provider disabled", { crxsosoSearchEnabled: false }, "CATALOG_PROVIDER_DISABLED"],
     ["disclosure revoked", { crxsosoDisclosureVersionAccepted: 0 }, "CATALOG_DISCLOSURE_REQUIRED"],
   ];
   for (const [name, patch, code] of cases) {
@@ -357,27 +356,19 @@ test("an already-aborted caller signal makes zero provider calls and does not ch
   assert.equal((await service.capabilities())[0]?.health, undefined);
 });
 
-test("exact resolution is local, re-reads artifact switches, and delegates reviewed offers to the registry", async () => {
+test("exact resolution is local, re-reads the selected artifact channel, and delegates reviewed offers", async () => {
   let settings = acquisitionSettings({
-    crxsosoSearchEnabled: false,
-    googleArtifactEnabled: true,
-    crxsosoArtifactEnabled: true,
+    artifactProviderId: "chrome-web-store",
   });
   let searchCalls = 0;
   const provider = catalogProvider(async () => {
     searchCalls += 1;
     return emptyPage();
   });
-  const offerCalls: Array<{ storeId: string; google: boolean; crxsoso: boolean }> = [];
+  const offerCalls: Array<{ storeId: string; provider: string }> = [];
   const registry = registryFor(provider, (storeId, acquisition) => {
-    offerCalls.push({
-      storeId,
-      google: acquisition.googleArtifactEnabled,
-      crxsoso: acquisition.crxsosoArtifactEnabled,
-    });
-    return acquisition.googleArtifactEnabled
-      ? [artifactOffer(storeId, "chrome-web-store", "Reviewed Google label")]
-      : [];
+    offerCalls.push({ storeId, provider: acquisition.artifactProviderId });
+    return [artifactOffer(storeId, acquisition.artifactProviderId, "Reviewed selected label")];
   });
   const service = new ExtensionAcquisitionService({
     readSettings: async () => settings,
@@ -390,17 +381,13 @@ test("exact resolution is local, re-reads artifact switches, and delegates revie
   assert.deepEqual(fromUrl, fromId);
   assert.deepEqual(fromCrxsoso, fromId);
   assert.equal(fromId.storeUrl, chromeWebStoreListingUrl(STORE_ID));
-  assert.equal(fromId.offers[0]?.providerLabel, "Reviewed Google label");
+  assert.equal(fromId.offers[0]?.providerLabel, "Reviewed selected label");
   assert.equal(searchCalls, 0);
   assert.equal(offerCalls.length, 3);
 
-  settings = acquisitionSettings({
-    crxsosoSearchEnabled: false,
-    googleArtifactEnabled: false,
-    crxsosoArtifactEnabled: false,
-  });
+  settings = acquisitionSettings({ artifactProviderId: "crxsoso" });
   const noChannels = await service.resolve({ input: STORE_ID });
-  assert.deepEqual(noChannels.offers, [], "the registry sees both disabled settings");
+  assert.deepEqual(noChannels.offers.map((offer) => offer.artifactProviderId), ["crxsoso"]);
   assert.equal(searchCalls, 0);
 
   await rejectsWithCode(
@@ -441,14 +428,7 @@ function registryFor(
 }
 
 function defaultOffers(storeId: string, settings: AppSettings["extensionAcquisition"]): ExtensionArtifactOffer[] {
-  return [
-    ...(settings.googleArtifactEnabled
-      ? [artifactOffer(storeId, "chrome-web-store", "Chrome Web Store")]
-      : []),
-    ...(settings.crxsosoArtifactEnabled
-      ? [artifactOffer(storeId, "crxsoso", "CRX搜搜")]
-      : []),
-  ];
+  return [artifactOffer(storeId, settings.artifactProviderId, settings.artifactProviderId)];
 }
 
 function artifactOffer(
@@ -472,13 +452,11 @@ function catalogProvider(
 }
 
 function acquisitionSettings(
-  overrides: Partial<AppSettings["extensionAcquisition"]> = {},
+  overrides: ExtensionAcquisitionSettingsPatch = {},
 ): AppSettings {
   return normalizeSettings({
     extensionAcquisition: {
-      crxsosoSearchEnabled: true,
-      googleArtifactEnabled: true,
-      crxsosoArtifactEnabled: true,
+      artifactProviderId: "crxsoso",
       crxsosoDisclosureVersionAccepted: EXTENSION_ACQUISITION_DISCLOSURE_VERSION,
       ...overrides,
     },

@@ -52,9 +52,7 @@ test("normalizeSettings returns stable defaults", () => {
   assert.equal(settings.networkTrace.githubMirrorProviderId, DEFAULT_GITHUB_MIRROR_PROVIDER_ID);
   assert.equal(settings.networkTrace.customGithubMirrorPrefix, "");
   assert.deepEqual(settings.extensionAcquisition, {
-    crxsosoSearchEnabled: true,
-    googleArtifactEnabled: true,
-    crxsosoArtifactEnabled: true,
+    artifactProviderId: "crxsoso",
     crxsosoDisclosureVersionAccepted: 0,
   });
   assert.equal(settings.table.columns.length, DEFAULT_PROFILE_COLUMNS.length);
@@ -754,7 +752,7 @@ test("mergeSettings applies partial patches without losing sibling groups", () =
   assert.equal(settings.storage.primary, "sqlite");
 });
 
-test("extension acquisition settings preserve independent capabilities and disclosure", () => {
+test("extension acquisition settings select one channel and deterministically migrate legacy switches", () => {
   const settings = normalizeSettings({
     extensionAcquisition: {
       crxsosoSearchEnabled: false,
@@ -764,19 +762,15 @@ test("extension acquisition settings preserve independent capabilities and discl
     },
   });
   assert.deepEqual(settings.extensionAcquisition, {
-    crxsosoSearchEnabled: false,
-    googleArtifactEnabled: false,
-    crxsosoArtifactEnabled: true,
+    artifactProviderId: "crxsoso",
     crxsosoDisclosureVersionAccepted: 1,
   });
 
   const merged = mergeSettings(settings, {
-    extensionAcquisition: { googleArtifactEnabled: true },
+    extensionAcquisition: { artifactProviderId: "chrome-web-store" },
   });
   assert.deepEqual(merged.extensionAcquisition, {
-    crxsosoSearchEnabled: false,
-    googleArtifactEnabled: true,
-    crxsosoArtifactEnabled: true,
+    artifactProviderId: "chrome-web-store",
     crxsosoDisclosureVersionAccepted: 1,
   });
 
@@ -802,10 +796,23 @@ test("extension acquisition settings preserve independent capabilities and discl
         crxsosoDisclosureVersionAccepted: 0,
       },
     }).extensionAcquisition;
-    assert.equal(combination.crxsosoSearchEnabled, Boolean(mask & 1));
-    assert.equal(combination.googleArtifactEnabled, Boolean(mask & 2));
-    assert.equal(combination.crxsosoArtifactEnabled, Boolean(mask & 4));
+    const googleOnly = Boolean(mask & 2) && !Boolean(mask & 4);
+    assert.equal(combination.artifactProviderId, googleOnly ? "chrome-web-store" : "crxsoso");
+    assert.equal(Object.hasOwn(combination, "crxsosoSearchEnabled"), false);
+    assert.equal(Object.hasOwn(combination, "googleArtifactEnabled"), false);
+    assert.equal(Object.hasOwn(combination, "crxsosoArtifactEnabled"), false);
   }
+
+  assert.equal(normalizeSettings({
+    extensionAcquisition: {
+      artifactProviderId: "chrome-web-store",
+      googleArtifactEnabled: false,
+      crxsosoArtifactEnabled: true,
+    },
+  }).extensionAcquisition.artifactProviderId, "chrome-web-store", "canonical selection wins over legacy switches");
+  assert.equal(normalizeSettings({
+    extensionAcquisition: { artifactProviderId: "unknown" as never, googleArtifactEnabled: true },
+  }).extensionAcquisition.artifactProviderId, "crxsoso", "an invalid canonical value fails to the approved default");
 });
 
 test("mergeSettings applies browser core partial patches without losing sibling settings", () => {

@@ -1,5 +1,6 @@
 import {
   isCanonicalChromeExtensionId,
+  selectedExtensionArtifactProvider,
   type ExtensionAcquisitionSettingsLike,
   type ExtensionArtifactOffer,
   type ExtensionArtifactProviderId,
@@ -57,10 +58,8 @@ export class ExtensionProviderRegistry {
         400,
       );
     }
-    const offers: ExtensionArtifactOffer[] = [];
-    if (settings.googleArtifactEnabled) offers.push(this.providers.googleArtifact.offer(storeId));
-    if (settings.crxsosoArtifactEnabled) offers.push(this.providers.crxsosoArtifact.offer(storeId));
-    return offers;
+    const selected = selectedExtensionArtifactProvider(settings);
+    return [this.artifact(selected).offer(storeId)];
   }
 }
 

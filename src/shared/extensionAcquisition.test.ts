@@ -9,6 +9,7 @@ import {
   normalizeExtensionStoreIdentity,
   normalizeExtensionUpdateProviderId,
   normalizeExtensionUpdateState,
+  selectedExtensionArtifactProvider,
 } from "./extensionAcquisition";
 
 const STORE_ID = "dhdgffkkebhmkfjojejmpbldmpobfkfo";
@@ -84,17 +85,28 @@ test("classifyExtensionReference keeps ordinary text as a keyword and rejects UR
   }
 });
 
-test("capability descriptors preserve independent search and artifact switches", () => {
+test("capability descriptors keep search on and expose exactly one selected artifact channel", () => {
   const descriptors = extensionCapabilityDescriptors({
-    crxsosoSearchEnabled: false,
-    googleArtifactEnabled: true,
-    crxsosoArtifactEnabled: false,
+    artifactProviderId: "chrome-web-store",
   });
   assert.deepEqual(descriptors.map(({ id, enabled }) => ({ id, enabled })), [
-    { id: "crxsoso-search", enabled: false },
+    { id: "crxsoso-search", enabled: true },
     { id: "google-artifact", enabled: true },
     { id: "crxsoso-artifact", enabled: false },
   ]);
+
+  assert.deepEqual(extensionCapabilityDescriptors({ artifactProviderId: "crxsoso" })
+    .map(({ id, enabled }) => ({ id, enabled })), [
+    { id: "crxsoso-search", enabled: true },
+    { id: "google-artifact", enabled: false },
+    { id: "crxsoso-artifact", enabled: true },
+  ]);
+});
+
+test("selected artifact provider accepts only canonical runtime settings and fails safe", () => {
+  assert.equal(selectedExtensionArtifactProvider({ artifactProviderId: "chrome-web-store" }), "chrome-web-store");
+  assert.equal(selectedExtensionArtifactProvider({ artifactProviderId: "crxsoso" }), "crxsoso");
+  assert.equal(selectedExtensionArtifactProvider({ artifactProviderId: "invalid" as never }), "crxsoso");
 });
 
 test("strict acquisition projections normalize valid server-derived facts", () => {

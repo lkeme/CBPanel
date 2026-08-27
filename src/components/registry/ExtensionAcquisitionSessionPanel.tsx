@@ -3,7 +3,6 @@ import {
   CircleAlert,
   CircleCheck,
   CircleX,
-  Clock3,
   Download,
   FileCheck2,
   LoaderCircle,
@@ -309,13 +308,6 @@ function ExtensionAcquisitionPreflight({
         <FactSection icon={<FileCheck2 aria-hidden="true" size={17} />} items={packageFacts(report, locale, t)} title={t("extension.acquisition.package")} />
         <FactSection icon={<Download aria-hidden="true" size={17} />} items={transportFacts(report, locale, t)} title={t("extension.acquisition.transport")} />
         <FactSection icon={<ShieldCheck aria-hidden="true" size={17} />} items={verificationFacts(report, t)} title={t("extension.acquisition.verification")} />
-        {report.catalog && <FactSection
-          icon={<Clock3 aria-hidden="true" size={17} />}
-          items={catalogFacts(report, locale, t)}
-          title={t("extension.acquisition.catalogAttribution", {
-            time: formatAcquisitionDateTime(report.catalog.observedAt, locale),
-          })}
-        />}
       </div>
       <PermissionFacts report={report} t={t} />
       <DiscrepancyFacts report={report} t={t} />
@@ -414,13 +406,6 @@ function verificationFacts(report: ExtensionPreflightReport, t: ExtensionAcquisi
     { label: t("extension.acquisition.verification.developerAlgorithm"), value: report.verification.developerProofAlgorithm },
     { label: t("extension.acquisition.verification.publisherAlgorithm"), value: report.verification.publisherProofAlgorithm },
   ];
-}
-
-function catalogFacts(report: ExtensionPreflightReport, locale: Locale, t: ExtensionAcquisitionUiTranslator): KeyValueItem[] {
-  return report.catalog ? [
-    { label: t("extension.acquisition.transport.provider"), value: report.catalog.providerId },
-    { label: t("extension.acquisition.transport.fetchedAt", { time: formatAcquisitionDateTime(report.catalog.observedAt, locale) }), value: formatAcquisitionDateTime(report.catalog.observedAt, locale) },
-  ] : [];
 }
 
 function PermissionFacts({ report, t }: { report: ExtensionPreflightReport; t: ExtensionAcquisitionUiTranslator }) {

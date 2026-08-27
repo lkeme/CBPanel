@@ -1259,9 +1259,7 @@ async function createApp(): Promise<express.Express> {
       const extension = await repository.getExtension(request.params.id);
       if (extension?.updateProviderId && extension.storeIdentity?.namespace === "chrome-web-store") {
         const settings = await repository.getSettings();
-        const providerEnabled = extension.updateProviderId === "chrome-web-store"
-          ? settings.extensionAcquisition.googleArtifactEnabled
-          : settings.extensionAcquisition.crxsosoArtifactEnabled;
+        const providerEnabled = settings.extensionAcquisition.artifactProviderId === extension.updateProviderId;
         if (!providerEnabled) {
           response.json(await extensionService.recordRemoteUpdateObservation(
             extension.id,

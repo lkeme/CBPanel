@@ -6,17 +6,18 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type { TranslationKey } from "../../i18n";
 import type { ExtensionEntity } from "../../shared/entities";
-import type { ExtensionAcquisitionSettings } from "../../shared/settings";
 import { canAutoCheckExtension } from "../../hooks/useExtensionActions";
 import { ExtensionAcquisitionSessionPanel } from "./ExtensionAcquisitionSessionPanel";
 import { ExtensionAcquisitionStartError } from "./ExtensionAcquisitionResults";
 import {
-  allExtensionRemoteCapabilitiesDisabled,
   browserRuntimeIdFromManifestKey,
   canStartTrustedExtensionAcquisitionUpdate,
   canonicalExtensionListingUrl,
-  ExtensionLocalImportActions,
-  ExtensionRemoteDisabledNotice,
+  extensionForSelectedUpdateProvider,
+  extensionResolutionForSelectedProvider,
+  extensionSessionBlocksOtherStore,
+  extensionSessionMatchesResolution,
+  restoreExtensionAcquisitionScrollPosition,
   usesTrustedExtensionAcquisitionUpdate,
 } from "./ExtensionRegistryPanel";
 import {
@@ -54,11 +55,8 @@ test("library details distinguish all identities and retain verified provenance 
     "extension.detail.updateState.available",
   ]) assert.ok(html.includes(fact), fact);
 
-  assert.match(html, /<option value="chrome-web-store" selected="">/);
-  assert.doesNotMatch(html, /<option[^>]*value="crxsoso"[^>]*selected=""/);
-  assert.ok(html.includes("extension.detail.updateProvider.failed:extension.acquisition.error"));
-  assert.ok(html.includes("transition refused"));
-  assert.match(html, /role="alert"/);
+  assert.ok(html.includes("extension.detail.updateProvider.readOnly"));
+  assert.doesNotMatch(html, /<select[^>]*update-provider|extension\.detail\.updateProvider\.select/);
   const updatePolicyControlId = html.match(/<label for="([^"]+)">module\.extensionUpdatePolicy<\/label>/)?.[1];
   assert.ok(updatePolicyControlId);
   assert.ok(html.includes(`id="${updatePolicyControlId}"`));
@@ -105,24 +103,51 @@ test("external listing navigation ignores provider URLs and rebuilds from the ca
   assert.throws(() => canonicalExtensionListingUrl({ storeId: "not-canonical" }));
 });
 
-test("all-off is the only combination that disables remote acquisition and local imports stay enabled", () => {
-  assert.equal(allExtensionRemoteCapabilitiesDisabled(settings()), true);
-  assert.equal(allExtensionRemoteCapabilitiesDisabled(settings({ crxsosoSearchEnabled: true })), false);
-  assert.equal(allExtensionRemoteCapabilitiesDisabled(settings({ googleArtifactEnabled: true })), false);
-  assert.equal(allExtensionRemoteCapabilitiesDisabled(settings({ crxsosoArtifactEnabled: true })), false);
+test("catalog detail back restores the captured scroll position without allowing invalid values", () => {
+  const scroller = { scrollTop: 0 } as HTMLElement;
+  restoreExtensionAcquisitionScrollPosition(scroller, 184);
+  assert.equal(scroller.scrollTop, 184);
+  restoreExtensionAcquisitionScrollPosition(scroller, -20);
+  assert.equal(scroller.scrollTop, 0);
+  restoreExtensionAcquisitionScrollPosition(scroller, Number.NaN);
+  assert.equal(scroller.scrollTop, 0);
+  restoreExtensionAcquisitionScrollPosition(null, 10);
+});
 
-  const html = renderToStaticMarkup(React.createElement(React.Fragment, null,
-    React.createElement(ExtensionRemoteDisabledNotice, { onOpenSources: () => undefined, t }),
-    React.createElement(ExtensionLocalImportActions, {
-      importExtensionArchive: () => undefined,
-      importExtensionDirectory: () => undefined,
-      t,
-    }),
-  ));
-  assert.ok(html.includes("extension.acquisition.source.allOffHelp"));
-  for (const label of ["actions.importDirectory", "actions.importZip", "actions.importCrx"]) {
-    assert.match(html, new RegExp(`<button(?:(?!disabled)[^>])*>${label}</button>`));
-  }
+test("exact selections project a changed built-in channel without inventing an originally empty offer", () => {
+  const selection = {
+    namespace: "chrome-web-store" as const,
+    storeId: STORE_ID,
+    storeUrl: `https://chromewebstore.google.com/detail/${STORE_ID}`,
+    source: "reference" as const,
+    resolution: {
+      namespace: "chrome-web-store" as const,
+      storeId: STORE_ID,
+      storeUrl: `https://chromewebstore.google.com/detail/${STORE_ID}`,
+      offers: [{
+        namespace: "chrome-web-store" as const,
+        storeId: STORE_ID,
+        artifactProviderId: "chrome-web-store" as const,
+        format: "crx3" as const,
+        providerLabel: "Google",
+      }],
+    },
+  };
+  const switched = extensionResolutionForSelectedProvider(selection, "crxsoso", "CRX搜搜");
+  assert.deepEqual(switched?.offers.map((offer) => offer.artifactProviderId), ["crxsoso"]);
+  assert.equal(switched?.storeId, STORE_ID);
+
+  const empty = extensionResolutionForSelectedProvider({ ...selection, resolution: { ...selection.resolution, offers: [] } }, "crxsoso", "CRX搜搜");
+  assert.deepEqual(empty?.offers, []);
+
+  const malformed = extensionResolutionForSelectedProvider({
+    ...selection,
+    resolution: {
+      ...selection.resolution,
+      offers: [{ ...selection.resolution.offers[0]!, storeId: "a".repeat(32) }],
+    },
+  }, "crxsoso", "CRX搜搜");
+  assert.deepEqual(malformed?.offers, [], "a malformed nonempty server projection cannot seed a local capability offer");
 });
 
 test("failed update session creation exposes source settings and retry recovery", () => {
@@ -179,6 +204,90 @@ test("verified rows always route updates through acquisition and success exposes
   assert.ok(html.includes("extension.acquisition.bindNext"));
 });
 
+test("trusted updates transition to the global channel before a new session uses it", async () => {
+  const extension = verifiedExtension({ updateProviderId: "chrome-web-store" });
+  const transitions: Array<[string, string, string]> = [];
+  const transitioned = await extensionForSelectedUpdateProvider({
+    extension,
+    selectedProviderId: "crxsoso",
+    transitionUpdateProvider: async (extensionId, previousProviderId, requestedProviderId) => {
+      transitions.push([extensionId, previousProviderId, requestedProviderId]);
+      return { ...extension, updateProviderId: requestedProviderId };
+    },
+  });
+  assert.deepEqual(transitions, [[extension.id, "chrome-web-store", "crxsoso"]]);
+  assert.equal(transitioned?.updateProviderId, "crxsoso");
+
+  let transitionCalled = false;
+  assert.equal((await extensionForSelectedUpdateProvider({
+    extension,
+    selectedProviderId: "chrome-web-store",
+    transitionUpdateProvider: async () => {
+      transitionCalled = true;
+      return undefined;
+    },
+  }))?.id, extension.id);
+  assert.equal(transitionCalled, false);
+
+  assert.equal(await extensionForSelectedUpdateProvider({
+    extension,
+    selectedProviderId: "crxsoso",
+    transitionUpdateProvider: async () => ({ ...extension, updateProviderId: "chrome-web-store" }),
+  }), undefined, "a stale or inconsistent server projection cannot start the update session");
+});
+
+test("active acquisition sessions block another detail while terminal history does not", () => {
+  const request = {
+    namespace: "chrome-web-store" as const,
+    storeId: STORE_ID,
+    artifactProviderId: "crxsoso" as const,
+    purpose: "install" as const,
+  };
+  const view = {
+    sessionId: "session_12345678901234567890123456789012",
+    purpose: "install" as const,
+    namespace: "chrome-web-store" as const,
+    storeId: STORE_ID,
+    selectedProviderId: "crxsoso" as const,
+    status: "downloading" as const,
+    createdAt: "2026-08-27T00:00:00.000Z",
+    updatedAt: "2026-08-27T00:00:01.000Z",
+  };
+  assert.equal(extensionSessionBlocksOtherStore({
+    sequence: 1,
+    operation: "polling",
+    lastRequest: request,
+    view,
+  }, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), true);
+  assert.equal(extensionSessionBlocksOtherStore({
+    sequence: 2,
+    operation: "idle",
+    lastRequest: request,
+    view: { ...view, status: "rejected" },
+  }, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), false);
+  assert.equal(extensionSessionBlocksOtherStore({
+    sequence: 3,
+    operation: "polling",
+    lastRequest: request,
+    view,
+  }, STORE_ID), false);
+
+  const otherResolution = {
+    namespace: "chrome-web-store" as const,
+    storeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    storeUrl: "https://chromewebstore.google.com/detail/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    offers: [],
+  };
+  const sessionState = {
+    sequence: 4,
+    operation: "idle" as const,
+    lastRequest: { ...request, purpose: "update" as const },
+    error: { message: "stale update error" },
+  };
+  assert.equal(extensionSessionMatchesResolution(sessionState, otherResolution), false);
+  assert.equal(extensionSessionMatchesResolution(sessionState, undefined), true);
+});
+
 test("legacy remote source ids never qualify for the old background updater", () => {
   const legacy = verifiedExtension({
     sourceKind: "remote-zip",
@@ -214,20 +323,8 @@ function renderDetail(
     setExtensionUpdatePolicy: async () => undefined,
     t,
     toast: () => undefined,
-    transitionUpdateProvider: async () => undefined,
-    updateProviderSettings: { googleArtifactEnabled: true, crxsosoArtifactEnabled: true },
     updateProviderTransition,
   }));
-}
-
-function settings(patch: Partial<ExtensionAcquisitionSettings> = {}): ExtensionAcquisitionSettings {
-  return {
-    crxsosoSearchEnabled: false,
-    googleArtifactEnabled: false,
-    crxsosoArtifactEnabled: false,
-    crxsosoDisclosureVersionAccepted: 0,
-    ...patch,
-  };
 }
 
 function verifiedExtension(patch: Partial<ExtensionEntity> = {}): ExtensionEntity {

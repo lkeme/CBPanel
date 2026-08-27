@@ -47,10 +47,16 @@ export interface ExtensionCapabilityView extends ExtensionCapabilityDescriptor {
 }
 
 export type ExtensionAcquisitionSettingsLike = {
-  crxsosoSearchEnabled: boolean;
-  googleArtifactEnabled: boolean;
-  crxsosoArtifactEnabled: boolean;
+  /** The one canonical artifact channel; legacy switches never enter runtime services. */
+  artifactProviderId: ExtensionArtifactProviderId;
 };
+
+/** Resolve the one authoritative runtime artifact channel, failing safe to the approved default. */
+export function selectedExtensionArtifactProvider(
+  settings: ExtensionAcquisitionSettingsLike,
+): ExtensionArtifactProviderId {
+  return settings.artifactProviderId === "chrome-web-store" ? "chrome-web-store" : "crxsoso";
+}
 
 export const EXTENSION_CAPABILITY_DEFINITIONS: readonly ExtensionCapabilityDefinition[] = Object.freeze([
   Object.freeze({
@@ -72,21 +78,21 @@ export const EXTENSION_CAPABILITY_DEFINITIONS: readonly ExtensionCapabilityDefin
     kind: "artifact",
     providerId: "crxsoso",
     trust: "third-party",
-    operations: Object.freeze(["resolve-id", "download-current"] as const),
+    operations: Object.freeze(["resolve-id", "download-current", "open-listing"] as const),
   }),
 ]);
 
 export function extensionCapabilityDescriptors(
   settings: ExtensionAcquisitionSettingsLike,
 ): ExtensionCapabilityDescriptor[] {
+  const selected = selectedExtensionArtifactProvider(settings);
   return EXTENSION_CAPABILITY_DEFINITIONS.map((definition) => ({
     ...definition,
     operations: [...definition.operations],
+    // Catalog search is a built-in capability, not a user toggle.  The
+    // selected artifact channel is the only package capability enabled.
     enabled: definition.id === "crxsoso-search"
-      ? settings.crxsosoSearchEnabled
-      : definition.id === "google-artifact"
-        ? settings.googleArtifactEnabled
-        : settings.crxsosoArtifactEnabled,
+      || definition.providerId === selected,
   }));
 }
 
@@ -186,6 +192,7 @@ export interface ExtensionReferenceResolveRequest {
 export interface ExtensionReferenceResolution {
   namespace: ExtensionStoreNamespace;
   storeId: string;
+  /** Canonical Chrome Web Store identity URL, not the selected provider's UI URL. */
   storeUrl: string;
   offers: ExtensionArtifactOffer[];
 }

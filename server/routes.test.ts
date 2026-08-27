@@ -214,7 +214,7 @@ test("extension bindings require a currently loadable local package", async () =
   assert.ok(jsonBody<Array<{ extensionIds: string[] }>>(bound)[0]?.extensionIds.includes(imported.id));
 });
 
-test("extension acquisition capabilities and exact resolution stay read-only and honor settings gates", async () => {
+test("extension acquisition capabilities and exact resolution stay read-only and honor the selected channel", async () => {
   const settingsBefore = jsonBody<{ extensionAcquisition: Record<string, unknown> }>(
     await panel.request("GET", "/api/settings"),
   );
@@ -225,7 +225,7 @@ test("extension acquisition capabilities and exact resolution stay read-only and
     jsonBody<Array<{ id: string; enabled: boolean }>>(capabilities).map(({ id, enabled }) => ({ id, enabled })),
     [
       { id: "crxsoso-search", enabled: true },
-      { id: "google-artifact", enabled: true },
+      { id: "google-artifact", enabled: false },
       { id: "crxsoso-artifact", enabled: true },
     ],
   );
@@ -236,7 +236,7 @@ test("extension acquisition capabilities and exact resolution stay read-only and
   assert.equal((resolved.body as { storeId?: string }).storeId, storeId);
   assert.deepEqual(
     (resolved.body as { offers?: Array<{ artifactProviderId: string }> }).offers?.map((offer) => offer.artifactProviderId),
-    ["chrome-web-store", "crxsoso"],
+    ["crxsoso"],
   );
   const unsupported = await panel.request("POST", "/api/extension-acquisition/resolve", {
     input: `https://example.com/detail/${storeId}`,
@@ -249,21 +249,38 @@ test("extension acquisition capabilities and exact resolution stay read-only and
   assert.equal(undisclosed.status, 428);
   assert.equal((undisclosed.body as { code?: string }).code, "CATALOG_DISCLOSURE_REQUIRED");
 
-  const disabledSettings = await panel.request("PUT", "/api/settings", {
+  const selectedGoogleSettings = await panel.request("PUT", "/api/settings", {
     extensionAcquisition: {
-      crxsosoSearchEnabled: false,
-      googleArtifactEnabled: false,
-      crxsosoArtifactEnabled: false,
-      crxsosoDisclosureVersionAccepted: 0,
+      artifactProviderId: "chrome-web-store",
+      crxsosoDisclosureVersionAccepted: 1,
     },
   });
-  assert.equal(disabledSettings.status, 200);
-  const disabledSearch = await panel.request("POST", "/api/extension-acquisition/search", { query: "tampermonkey" });
-  assert.equal(disabledSearch.status, 409);
-  assert.equal((disabledSearch.body as { code?: string }).code, "CATALOG_PROVIDER_DISABLED");
-  const noOffers = await panel.request("POST", "/api/extension-acquisition/resolve", { input: storeId });
-  assert.equal(noOffers.status, 200);
-  assert.deepEqual((noOffers.body as { offers?: unknown[] }).offers, []);
+  assert.equal(selectedGoogleSettings.status, 200);
+  const selectedGoogleCapabilities = await panel.request("GET", "/api/extension-acquisition/capabilities");
+  assert.deepEqual(
+    jsonBody<Array<{ id: string; enabled: boolean }>>(selectedGoogleCapabilities)
+      .map(({ id, enabled }) => ({ id, enabled })),
+    [
+      { id: "crxsoso-search", enabled: true },
+      { id: "google-artifact", enabled: true },
+      { id: "crxsoso-artifact", enabled: false },
+    ],
+    "switching the package channel never disables keyword search",
+  );
+  const googleOffer = await panel.request("POST", "/api/extension-acquisition/resolve", { input: storeId });
+  assert.equal(googleOffer.status, 200);
+  assert.deepEqual(
+    (googleOffer.body as { offers?: Array<{ artifactProviderId: string }> }).offers?.map((offer) => offer.artifactProviderId),
+    ["chrome-web-store"],
+  );
+  const ignoredLegacySearchSwitch = await panel.request("PUT", "/api/settings", {
+    extensionAcquisition: { crxsosoSearchEnabled: false },
+  });
+  assert.deepEqual(
+    (ignoredLegacySearchSwitch.body as { extensionAcquisition?: unknown }).extensionAcquisition,
+    { artifactProviderId: "chrome-web-store", crxsosoDisclosureVersionAccepted: 1 },
+    "the retired search switch cannot disable search or alter the selected package channel",
+  );
 
   const stateAfter = jsonBody<{ extensions: unknown[] }>(await panel.request("GET", "/api/state"));
   assert.equal(stateAfter.extensions.length, stateBefore.extensions.length);

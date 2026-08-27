@@ -11,17 +11,15 @@ import {
   EXTENSION_ACQUISITION_DISCLOSURE_VERSION,
   classifyExtensionReference,
   isCanonicalChromeExtensionId,
-  type ExtensionAcquisitionCapabilityId,
   type ExtensionAcquisitionSessionConfirmRequest,
   type ExtensionAcquisitionSessionCreateRequest,
   type ExtensionAcquisitionSessionView,
   type ExtensionArtifactProviderId,
   type ExtensionCatalogItem,
 } from "../shared/extensionAcquisition";
-import type { AppSettings, ExtensionAcquisitionSettings } from "../shared/settings";
+import type { AppSettings, ExtensionAcquisitionSettings, ExtensionAcquisitionSettingsPatch } from "../shared/settings";
 import {
   artifactProviderEnabled,
-  capabilitySettingPatch,
   createInitialExtensionAcquisitionState,
   extensionAcquisitionReducer,
   preferredArtifactProvider,
@@ -33,7 +31,7 @@ import {
 const DEFAULT_SESSION_POLL_INTERVAL_MS = 500;
 
 export type PersistExtensionAcquisitionSettings = (
-  patch: Partial<ExtensionAcquisitionSettings>,
+  patch: ExtensionAcquisitionSettingsPatch,
   signal?: AbortSignal,
 ) => Promise<AppSettings | ExtensionAcquisitionSettings | void>;
 
@@ -66,8 +64,9 @@ export interface ExtensionAcquisitionController {
   cancelDiscovery(): void;
   acceptDisclosure(): Promise<boolean>;
   dismissDisclosure(): void;
-  setCapabilityEnabled(capabilityId: ExtensionAcquisitionCapabilityId, enabled: boolean): Promise<boolean>;
+  setArtifactProvider(providerId: ExtensionArtifactProviderId): Promise<boolean>;
   selectCatalogItem(item: ExtensionCatalogItem): boolean;
+  clearSelection(): void;
   selectProvider(providerId: ExtensionArtifactProviderId): boolean;
   startSession(request: ExtensionAcquisitionSessionCreateRequest): Promise<ExtensionAcquisitionSessionView | undefined>;
   startSelectedSession(options?: {
@@ -99,8 +98,9 @@ export type UseExtensionAcquisitionResult = {
   | "cancelDiscovery"
   | "acceptDisclosure"
   | "dismissDisclosure"
-  | "setCapabilityEnabled"
+  | "setArtifactProvider"
   | "selectCatalogItem"
+  | "clearSelection"
   | "selectProvider"
   | "startSession"
   | "startSelectedSession"
@@ -136,14 +136,15 @@ export function useExtensionAcquisition(options: UseExtensionAcquisitionOptions)
     controller.syncSettings(options.settings);
   }, [
     controller,
-    options.settings.crxsosoSearchEnabled,
-    options.settings.googleArtifactEnabled,
-    options.settings.crxsosoArtifactEnabled,
+    options.settings.artifactProviderId,
     options.settings.crxsosoDisclosureVersionAccepted,
   ]);
 
   useEffect(() => {
-    if (options.autoLoadCapabilities !== false) void controller.refreshCapabilities();
+    // Search and the chosen package channel are settings contracts, not a
+    // background availability probe. Callers may explicitly opt in when they
+    // need the diagnostic descriptors.
+    if (options.autoLoadCapabilities === true) void controller.refreshCapabilities();
   }, [controller, options.autoLoadCapabilities]);
 
   return useMemo(() => ({
@@ -156,8 +157,9 @@ export function useExtensionAcquisition(options: UseExtensionAcquisitionOptions)
     cancelDiscovery: controller.cancelDiscovery,
     acceptDisclosure: controller.acceptDisclosure,
     dismissDisclosure: controller.dismissDisclosure,
-    setCapabilityEnabled: controller.setCapabilityEnabled,
+    setArtifactProvider: controller.setArtifactProvider,
     selectCatalogItem: controller.selectCatalogItem,
+    clearSelection: controller.clearSelection,
     selectProvider: controller.selectProvider,
     startSession: controller.startSession,
     startSelectedSession: controller.startSelectedSession,
@@ -238,7 +240,6 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
 
   readonly syncSettings = (settings: ExtensionAcquisitionSettings): void => {
     if (sameSettings(this.state.settings, settings)) return;
-    if (!settings.crxsosoSearchEnabled && this.discoveryIsSearching()) this.cancelDiscovery();
     this.dispatch({ type: "settings-synced", settings });
   };
 
@@ -274,10 +275,6 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
       return;
     }
     if (reference.kind === "keyword") {
-      if (!this.state.settings.crxsosoSearchEnabled) {
-        this.failDiscoveryLocally("search", reference.query, localAcquisitionFailure("CATALOG_SEARCH_DISABLED"));
-        return;
-      }
       if (
         this.state.settings.crxsosoDisclosureVersionAccepted
         < EXTENSION_ACQUISITION_DISCLOSURE_VERSION
@@ -286,10 +283,6 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
         return;
       }
       await this.runSearch(reference.query, undefined, false);
-      return;
-    }
-    if (!this.anyArtifactProviderEnabled()) {
-      this.failDiscoveryLocally("resolve", input, localAcquisitionFailure("REMOTE_ACQUISITION_DISABLED"));
       return;
     }
     await this.runResolution(input);
@@ -310,7 +303,14 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     if (this.discoveryRequestActive()) return;
     const discovery = this.state.discovery;
     if (discovery.kind === "search") {
-      if (discovery.page?.hasMore && discovery.page.cursor) {
+      const cursorExpired = discovery.error?.code === "EXTENSION_CATALOG_CURSOR_EXPIRED"
+        || discovery.error?.code === "EXTENSION_CATALOG_CURSOR_INVALID";
+      // A stale/expired continuation cannot be retried verbatim. Restart the
+      // submitted keyword search so the provider can issue a fresh cursor and
+      // the user does not get trapped in the same pagination error.
+      if (cursorExpired && discovery.page?.query) {
+        await this.runSearch(discovery.page.query, undefined, false);
+      } else if (discovery.page?.hasMore && discovery.page.cursor) {
         await this.runSearch(discovery.page.query, discovery.page.cursor, true);
       } else if (discovery.submittedInput) {
         await this.runSearch(discovery.submittedInput, undefined, false);
@@ -352,14 +352,10 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     this.dispatch({ type: "disclosure-dismissed" });
   };
 
-  readonly setCapabilityEnabled = async (
-    capabilityId: ExtensionAcquisitionCapabilityId,
-    enabled: boolean,
-  ): Promise<boolean> => {
-    if (capabilityId === "crxsoso-search" && !enabled && this.discoveryIsSearching()) {
-      this.cancelDiscovery();
-    }
-    return this.persistSettingsPatch(capabilitySettingPatch(capabilityId, enabled));
+  readonly setArtifactProvider = async (providerId: ExtensionArtifactProviderId): Promise<boolean> => {
+    if (providerId !== "crxsoso" && providerId !== "chrome-web-store") return false;
+    if (this.state.settings.artifactProviderId === providerId) return true;
+    return this.persistSettingsPatch({ artifactProviderId: providerId });
   };
 
   readonly selectCatalogItem = (item: ExtensionCatalogItem): boolean => {
@@ -376,10 +372,15 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     return true;
   };
 
+  readonly clearSelection = (): void => {
+    this.dispatch({ type: "catalog-selection-cleared" });
+  };
+
   readonly selectProvider = (providerId: ExtensionArtifactProviderId): boolean => {
     if (!artifactProviderEnabled(this.state.settings, providerId)) return false;
-    const offers = this.state.selection?.resolution?.offers;
-    if (offers && !offers.some((offer) => offer.artifactProviderId === providerId)) return false;
+    // Exact resolution usually exposes the selected channel only. An
+    // alternate channel is intentionally allowed after an explicit failure;
+    // the server re-validates it when the new session is created.
     this.dispatch({ type: "provider-selected", providerId });
     return true;
   };
@@ -560,10 +561,6 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
 
   private async runSearch(query: string, cursor: string | undefined, append: boolean): Promise<void> {
     if (this.suspended) return;
-    if (!this.state.settings.crxsosoSearchEnabled) {
-      this.failDiscoveryLocally("search", query, localAcquisitionFailure("CATALOG_SEARCH_DISABLED"), append);
-      return;
-    }
     if (
       this.state.settings.crxsosoDisclosureVersionAccepted
       < EXTENSION_ACQUISITION_DISCLOSURE_VERSION
@@ -613,10 +610,6 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
       );
       return;
     }
-    if (!this.anyArtifactProviderEnabled()) {
-      this.failDiscoveryLocally("resolve", input, localAcquisitionFailure("REMOTE_ACQUISITION_DISABLED"));
-      return;
-    }
     abortRequest(this.discoveryController);
     const controller = new AbortController();
     this.discoveryController = controller;
@@ -656,7 +649,6 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
         if (controller.signal.aborted || this.suspended) return false;
         const settings = persistedAcquisitionSettings(persisted, optimistic);
         this.dispatch({ type: "settings-saved", sequence, settings });
-        void this.refreshCapabilities();
         return true;
       } catch (error) {
         if (controller.signal.aborted || this.suspended) return false;
@@ -864,16 +856,8 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     }
   }
 
-  private anyArtifactProviderEnabled(): boolean {
-    return this.state.settings.googleArtifactEnabled || this.state.settings.crxsosoArtifactEnabled;
-  }
-
   private discoveryRequestActive(): boolean {
     return this.state.discovery.status === "loading" || this.state.discovery.status === "loading-more";
-  }
-
-  private discoveryIsSearching(): boolean {
-    return this.discoveryRequestActive() && this.state.discovery.kind === "search";
   }
 
   private sessionBlocksReplacement(): boolean {
@@ -939,12 +923,15 @@ function persistedAcquisitionSettings(
   if (!value) return { ...fallback };
   const candidate = "extensionAcquisition" in value ? value.extensionAcquisition : value;
   if (
-    typeof candidate.crxsosoSearchEnabled !== "boolean"
-    || typeof candidate.googleArtifactEnabled !== "boolean"
-    || typeof candidate.crxsosoArtifactEnabled !== "boolean"
+    (candidate.artifactProviderId !== "crxsoso" && candidate.artifactProviderId !== "chrome-web-store")
     || !Number.isSafeInteger(candidate.crxsosoDisclosureVersionAccepted)
+    || candidate.crxsosoDisclosureVersionAccepted < 0
+    || candidate.crxsosoDisclosureVersionAccepted > EXTENSION_ACQUISITION_DISCLOSURE_VERSION
   ) return { ...fallback };
-  return { ...candidate };
+  return {
+    artifactProviderId: candidate.artifactProviderId,
+    crxsosoDisclosureVersionAccepted: candidate.crxsosoDisclosureVersionAccepted,
+  };
 }
 
 function localAcquisitionFailure(code: string): ExtensionAcquisitionFailure {
@@ -962,9 +949,7 @@ function acquisitionFailure(error: unknown): ExtensionAcquisitionFailure {
 }
 
 function sameSettings(left: ExtensionAcquisitionSettings, right: ExtensionAcquisitionSettings): boolean {
-  return left.crxsosoSearchEnabled === right.crxsosoSearchEnabled
-    && left.googleArtifactEnabled === right.googleArtifactEnabled
-    && left.crxsosoArtifactEnabled === right.crxsosoArtifactEnabled
+  return left.artifactProviderId === right.artifactProviderId
     && left.crxsosoDisclosureVersionAccepted === right.crxsosoDisclosureVersionAccepted;
 }
 

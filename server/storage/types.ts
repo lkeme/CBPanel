@@ -11,6 +11,7 @@ import type {
 } from "../../src/shared/entities";
 import type { AppSettings, AppSettingsPatch, StorageInfo } from "../../src/shared/settings";
 import type { AppBackupData } from "../../src/shared/appBackup";
+import type { ExtensionArtifactProviderId } from "../../src/shared/extensionAcquisition";
 
 export type EnvironmentPackageImportInput = {
   environments: BrowserEnvironment[];
@@ -43,6 +44,8 @@ export type EnvironmentExtensionBinding = {
 
 export type ExtensionAcquisitionDatabaseCommitInput = {
   extension: ExtensionEntity;
+  /** Selected channel that must still be current at the SQLite write boundary. */
+  expectedArtifactProviderId?: ExtensionArtifactProviderId;
   /** Undefined creates a new row; otherwise the exact row revision must still match. */
   expectedExistingUpdatedAt?: string;
   expectedEnvironmentBindings?: ExtensionBindingMetadata[];

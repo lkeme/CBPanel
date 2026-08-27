@@ -1,6 +1,7 @@
 import type { ExtensionEntity } from "../shared/entities";
 import {
   classifyExtensionReference,
+  selectedExtensionArtifactProvider,
   type ExtensionAcquisitionCapabilityId,
   type ExtensionAcquisitionErrorCode,
   type ExtensionAcquisitionSessionCreateRequest,
@@ -16,8 +17,6 @@ import type { ExtensionAcquisitionSettings } from "../shared/settings";
 import type { ExtensionAcquisitionConfirmationResult } from "../lib/extensionAcquisitionClient";
 
 export type ExtensionAcquisitionLocalErrorCode =
-  | "REMOTE_ACQUISITION_DISABLED"
-  | "CATALOG_SEARCH_DISABLED"
   | "ARTIFACT_CHANNEL_DISABLED"
   | "ACQUISITION_PROVIDER_SELECTION_REQUIRED"
   | "ACQUISITION_CONFIRMATION_NOT_READY"
@@ -164,6 +163,7 @@ export type ExtensionAcquisitionAction =
   | { type: "discovery-failed"; sequence: number; error: ExtensionAcquisitionFailure }
   | { type: "discovery-cancelled"; sequence: number }
   | { type: "catalog-item-selected"; item: ExtensionCatalogItem; selectedProviderId?: ExtensionArtifactProviderId }
+  | { type: "catalog-selection-cleared" }
   | { type: "provider-selected"; providerId?: ExtensionArtifactProviderId }
   | {
       type: "session-requested";
@@ -367,11 +367,17 @@ export function extensionAcquisitionReducer(
         selection: selectionFromCatalogItem(action.item),
         selectedProviderId: action.selectedProviderId,
       };
+    case "catalog-selection-cleared":
+      return { ...state, selection: undefined, selectedProviderId: undefined };
     case "provider-selected":
       return { ...state, selectedProviderId: action.providerId };
     case "session-requested":
       return {
         ...state,
+        // An installed-row update is not owned by a catalog result selection.
+        // Clear stale result identity so its detail/error association cannot
+        // hide the newly started update session for another store ID.
+        selection: action.request.purpose === "update" ? undefined : state.selection,
         session: {
           sequence: action.sequence,
           operation: "starting",
@@ -502,37 +508,27 @@ export function extensionAcquisitionReducer(
   }
 }
 
-export function capabilitySettingPatch(
-  capabilityId: ExtensionAcquisitionCapabilityId,
-  enabled: boolean,
-): Partial<ExtensionAcquisitionSettings> {
-  switch (capabilityId) {
-    case "crxsoso-search":
-      return { crxsosoSearchEnabled: enabled };
-    case "google-artifact":
-      return { googleArtifactEnabled: enabled };
-    case "crxsoso-artifact":
-      return { crxsosoArtifactEnabled: enabled };
-  }
-}
-
 export function artifactProviderEnabled(
   settings: ExtensionAcquisitionSettings,
   providerId: ExtensionArtifactProviderId,
 ): boolean {
-  return providerId === "chrome-web-store"
-    ? settings.googleArtifactEnabled
-    : settings.crxsosoArtifactEnabled;
+  return selectedExtensionArtifactProvider(settings) === providerId;
 }
 
 export function preferredArtifactProvider(
   settings: ExtensionAcquisitionSettings,
   offers?: ExtensionReferenceResolution["offers"],
 ): ExtensionArtifactProviderId | undefined {
-  const offered = offers ? new Set(offers.map((offer) => offer.artifactProviderId)) : undefined;
-  if (settings.googleArtifactEnabled && (!offered || offered.has("chrome-web-store"))) return "chrome-web-store";
-  if (settings.crxsosoArtifactEnabled && (!offered || offered.has("crxsoso"))) return "crxsoso";
-  return undefined;
+  const selected = selectedExtensionArtifactProvider(settings);
+  // Offers are a point-in-time server projection. The user may switch the
+  // single global channel after an exact resolve has returned, in which case
+  // that old projection contains only the previous provider. The selected
+  // built-in channel remains a valid candidate for the same canonical ID;
+  // session creation performs the authoritative availability/verification
+  // check. Do not strand the UI in an unselectable state because of stale
+  // offers (the parameter is retained for API/source compatibility).
+  void offers;
+  return selected;
 }
 
 export function sessionViewNeedsPolling(view: ExtensionAcquisitionSessionView): boolean {
@@ -548,9 +544,11 @@ function applySettings(
   settingsInput: ExtensionAcquisitionSettings,
 ): ExtensionAcquisitionState {
   const settings = cloneSettings(settingsInput);
-  const selectedProviderId = state.selectedProviderId && artifactProviderEnabled(settings, state.selectedProviderId)
-    ? state.selectedProviderId
-    : undefined;
+  const selectedProviderId = state.selection
+    ? selectedExtensionArtifactProvider(settings)
+    : state.selectedProviderId && artifactProviderEnabled(settings, state.selectedProviderId)
+      ? state.selectedProviderId
+      : undefined;
   return {
     ...state,
     settings,
@@ -571,11 +569,11 @@ function capabilityEnabled(
 ): boolean {
   switch (capabilityId) {
     case "crxsoso-search":
-      return settings.crxsosoSearchEnabled;
+      return true;
     case "google-artifact":
-      return settings.googleArtifactEnabled;
+      return selectedExtensionArtifactProvider(settings) === "chrome-web-store";
     case "crxsoso-artifact":
-      return settings.crxsosoArtifactEnabled;
+      return selectedExtensionArtifactProvider(settings) === "crxsoso";
   }
 }
 

@@ -15,13 +15,11 @@ import type {
   ExtensionUpdateState,
   ExtensionVerificationLevel,
 } from "../../shared/extensionAcquisition";
-import type { ExtensionAcquisitionSettings } from "../../shared/settings";
 import type { ExtensionUpdateProviderTransitionState } from "../../hooks/extensionAcquisitionState";
 import { CopyButton } from "../ui/CopyButton";
 import { riskReasonText } from "./entityDisplay";
 import {
   formatAcquisitionDateTime,
-  formatExtensionAcquisitionError,
 } from "./extensionAcquisitionUi";
 
 type Translate = (key: TranslationKey, params?: Record<string, string | number>) => string;
@@ -31,11 +29,6 @@ type Notify = (kind: "success" | "error" | "info", text: string) => void;
 export type BrowserRuntimeIdentity =
   | { status: "known"; id: string }
   | { status: "deriving" | "path-derived" | "unavailable" };
-
-export type ArtifactProviderSettings = Pick<
-  ExtensionAcquisitionSettings,
-  "googleArtifactEnabled" | "crxsosoArtifactEnabled"
->;
 
 export function displayedExtensionUpdateProviderId(
   extension: ExtensionEntity,
@@ -86,8 +79,6 @@ export function ExtensionRowDetail({
   setExtensionUpdatePolicy,
   t,
   toast,
-  transitionUpdateProvider,
-  updateProviderSettings,
   updateProviderTransition,
 }: {
   browserRuntimeIdentity: BrowserRuntimeIdentity;
@@ -99,12 +90,6 @@ export function ExtensionRowDetail({
   setExtensionUpdatePolicy: (extension: ExtensionEntity, updatePolicy: ExtensionUpdatePolicy) => Promise<void>;
   t: Translate;
   toast: Notify;
-  transitionUpdateProvider: (
-    extensionId: string,
-    previousProviderId: ExtensionArtifactProviderId,
-    requestedProviderId: ExtensionArtifactProviderId,
-  ) => Promise<ExtensionEntity | undefined>;
-  updateProviderSettings: ArtifactProviderSettings;
   updateProviderTransition: ExtensionUpdateProviderTransitionState;
 }) {
   const localSourceKind = extension.sourceKind === "local-directory"
@@ -125,58 +110,6 @@ export function ExtensionRowDetail({
   const updateState = effectiveExtension.updateState;
   const displayedUpdateProvider = displayedExtensionUpdateProviderId(extension, updateProviderTransition);
   const updatePolicySelectId = useId();
-  const updateProviderSelectId = useId();
-  const updateProviderFeedbackId = useId();
-  const updateProviderOptions: Array<{
-    id: ExtensionUpdateProviderId;
-    enabled: boolean;
-    label: string;
-  }> = [
-    {
-      id: "chrome-web-store",
-      enabled: updateProviderSettings.googleArtifactEnabled,
-      label: extensionProviderLabel("chrome-web-store", t),
-    },
-    {
-      id: "crxsoso",
-      enabled: updateProviderSettings.crxsosoArtifactEnabled,
-      label: extensionProviderLabel("crxsoso", t),
-    },
-  ];
-  const updateProviderEligible = Boolean(
-    displayedUpdateProvider
-    && effectiveExtension.storeIdentity?.namespace === "chrome-web-store"
-    && effectiveExtension.provenance?.verification.level === "cws-publisher-verified",
-  );
-  const updateProviderRequestInFlight = updateProviderTransition.status === "saving";
-  const updateProviderSaving = updateProviderTransitionApplies && updateProviderTransition.status === "saving";
-  const hasEnabledUpdateProviderAlternative = updateProviderOptions.some((option) => (
-    option.id !== displayedUpdateProvider && option.enabled
-  ));
-  const updateProviderFailure = updateProviderTransitionApplies
-    && updateProviderTransition.status === "error"
-    && updateProviderTransition.error
-    ? formatExtensionAcquisitionError(updateProviderTransition.error, t)
-    : undefined;
-  const updateProviderRefreshFailure = updateProviderTransitionApplies
-    && updateProviderTransition.refreshError
-    ? formatExtensionAcquisitionError(updateProviderTransition.refreshError, t)
-    : undefined;
-  const updateProviderFeedback = updateProviderSaving
-    ? t("extension.detail.updateProvider.saving")
-    : updateProviderFailure
-      ? t("extension.detail.updateProvider.failed", { message: updateProviderFailure.primary })
-      : updateProviderRefreshFailure
-        ? t("extension.detail.updateProvider.savedRefreshFailed", { message: updateProviderRefreshFailure.primary })
-        : updateProviderTransitionApplies && updateProviderTransition.status === "success" && displayedUpdateProvider
-          ? t("extension.detail.updateProvider.saved", {
-              provider: extensionProviderLabel(displayedUpdateProvider, t),
-            })
-          : hasEnabledUpdateProviderAlternative
-            ? t("extension.detail.updateProvider.help")
-            : t("extension.detail.updateProvider.noAlternative");
-  const updateProviderFeedbackDetail = updateProviderFailure?.detail ?? updateProviderRefreshFailure?.detail;
-  const updateProviderFeedbackIsError = Boolean(updateProviderFailure || updateProviderRefreshFailure);
   const lifecycleUnprotected = extension.sourceKind === "local-directory"
     && extension.directoryMode !== "copy"
     && !identityPinned;
@@ -284,12 +217,6 @@ export function ExtensionRowDetail({
             <div>
               <dt>{t("extension.detail.catalogProvider")}</dt>
               <dd>{extensionProviderLabel(provenance?.catalog?.providerId, t)}</dd>
-            </div>
-            <div>
-              <dt>{t("extension.detail.catalogObservedAt")}</dt>
-              <dd>{provenance?.catalog?.observedAt
-                ? formatAcquisitionDateTime(provenance.catalog.observedAt, locale)
-                : t("extension.detail.notRecorded")}</dd>
             </div>
             <div>
               <dt>{t("extension.detail.artifactProvider")}</dt>
@@ -403,42 +330,12 @@ export function ExtensionRowDetail({
               </select>
             </dd>
           </div>
-          {updateProviderEligible && displayedUpdateProvider && (
+          {displayedUpdateProvider && (
             <div className="extension-detail-row-wide">
-              <dt><label htmlFor={updateProviderSelectId}>{t("extension.detail.updateProvider.select")}</label></dt>
-              <dd className="extension-update-provider-control">
-                <select
-                  aria-busy={updateProviderSaving || undefined}
-                  aria-describedby={updateProviderFeedbackId}
-                  className="extension-policy-select"
-                  disabled={updateProviderRequestInFlight || !hasEnabledUpdateProviderAlternative}
-                  id={updateProviderSelectId}
-                  onChange={(event) => {
-                    const requestedProvider = event.target.value as ExtensionArtifactProviderId;
-                    if (requestedProvider !== displayedUpdateProvider) {
-                      void transitionUpdateProvider(extension.id, displayedUpdateProvider, requestedProvider);
-                    }
-                  }}
-                  value={displayedUpdateProvider}
-                >
-                  {updateProviderOptions.map((option) => (
-                    <option
-                      disabled={!option.enabled && option.id !== displayedUpdateProvider}
-                      key={option.id}
-                      value={option.id}
-                    >
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <small
-                  className={updateProviderFeedbackIsError ? "danger-text" : undefined}
-                  id={updateProviderFeedbackId}
-                  role={updateProviderFeedbackIsError ? "alert" : "status"}
-                >
-                  {updateProviderFeedback}
-                  {updateProviderFeedbackDetail ? ` — ${updateProviderFeedbackDetail}` : ""}
-                </small>
+              <dt>{t("extension.detail.updateProvider")}</dt>
+              <dd className="extension-update-provider-readonly">
+                {extensionProviderLabel(displayedUpdateProvider, t)}
+                <small>{t("extension.detail.updateProvider.readOnly")}</small>
               </dd>
             </div>
           )}

@@ -27,7 +27,7 @@ test("acquisition session exposes only verified facts and is consumed exactly on
     acquisitionRoot: path.join(directory, "extension-acquisitions"),
     repository,
     providerRegistry: registryFor(providerFor(fixture.bytes, "chrome-web-store")),
-    readSettings: async () => normalizeSettings(),
+    readSettings: async () => normalizeSettings({ extensionAcquisition: { artifactProviderId: "chrome-web-store" } }),
     verifyFile: verifier.verifyFile,
     commitPrepared: async (acquisition) => {
       committedSessionId = acquisition.sessionId;
@@ -48,6 +48,18 @@ test("acquisition session exposes only verified facts and is consumed exactly on
     },
   });
   await service.initialize();
+
+  await assert.rejects(
+    service.create({
+      namespace: "chrome-web-store",
+      storeId: fixture.storeId,
+      artifactProviderId: "crxsoso",
+      purpose: "install",
+    }),
+    (error: unknown) => error instanceof ExtensionAcquisitionError
+      && error.code === "ARTIFACT_PROVIDER_DISABLED",
+    "a session cannot bypass the selected global download channel",
+  );
 
   const created = await service.create({
     namespace: "chrome-web-store",
@@ -108,7 +120,7 @@ test("duplicate metadata-only records remain explicit eligible upgrade targets",
     acquisitionRoot: path.join(directory, "extension-acquisitions"),
     repository,
     providerRegistry: registryFor(providerFor(fixture.bytes, "chrome-web-store")),
-    readSettings: async () => normalizeSettings(),
+    readSettings: async () => normalizeSettings({ extensionAcquisition: { artifactProviderId: "chrome-web-store" } }),
     verifyFile: verifier.verifyFile,
     commitPrepared: async (_acquisition, request) => {
       selectedTarget = request.targetExtensionId;
@@ -172,7 +184,7 @@ test("provider disablement cancels an active download and reclaims its reservati
     acquisitionRoot: path.join(directory, "extension-acquisitions"),
     repository,
     providerRegistry: registryFor(provider),
-    readSettings: async () => normalizeSettings(),
+    readSettings: async () => normalizeSettings({ extensionAcquisition: { artifactProviderId: "crxsoso" } }),
     maxGlobalTempBytes: 1024,
     perSessionTempBytes: 1024,
     commitPrepared: async () => {
@@ -188,11 +200,103 @@ test("provider disablement cancels an active download and reclaims its reservati
   });
   await started;
   service.settingsChanged(normalizeSettings({
-    extensionAcquisition: { crxsosoArtifactEnabled: false },
+    extensionAcquisition: { artifactProviderId: "chrome-web-store" },
   }));
   const cancelled = await waitForStatus(service, created.sessionId, "cancelled");
   assert.equal(cancelled.error?.code, "ARTIFACT_PROVIDER_DISABLED");
-  assert.equal(await exists(path.join(directory, "extension-acquisitions", created.sessionId)), false);
+  await waitForCondition(async () => !await exists(path.join(directory, "extension-acquisitions", created.sessionId)));
+  repository.close();
+});
+
+test("selected-channel changes also cancel verification work before it can become ready", async () => {
+  const directory = await makeTempDir();
+  const fixture = createSyntheticStoreCrx3();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const verifier = createCrx3VerifierForTesting(fixture.publisherSpkiSha256);
+  let notifyVerifying: (() => void) | undefined;
+  const verifying = new Promise<void>((resolve) => { notifyVerifying = resolve; });
+  let releaseVerification: (() => void) | undefined;
+  const verificationReleased = new Promise<void>((resolve) => { releaseVerification = resolve; });
+  const service = new ExtensionAcquisitionSessionService({
+    acquisitionRoot: path.join(directory, "extension-acquisitions"),
+    repository,
+    providerRegistry: registryFor(providerFor(fixture.bytes, "chrome-web-store")),
+    readSettings: async () => normalizeSettings({
+      extensionAcquisition: { artifactProviderId: "chrome-web-store" },
+    }),
+    verifyFile: async (...args) => {
+      notifyVerifying?.();
+      await verificationReleased;
+      return verifier.verifyFile(...args);
+    },
+    commitPrepared: async () => {
+      throw new Error("not used");
+    },
+  });
+  await service.initialize();
+  const created = await service.create({
+    namespace: "chrome-web-store",
+    storeId: fixture.storeId,
+    artifactProviderId: "chrome-web-store",
+    purpose: "install",
+  });
+  await verifying;
+
+  service.settingsChanged(normalizeSettings({
+    extensionAcquisition: { artifactProviderId: "crxsoso" },
+  }));
+  releaseVerification?.();
+
+  const cancelled = await waitForStatus(service, created.sessionId, "cancelled");
+  assert.equal(cancelled.error?.code, "ARTIFACT_PROVIDER_DISABLED");
+  await waitForCondition(async () => !await exists(path.join(directory, "extension-acquisitions", created.sessionId)));
+  repository.close();
+});
+
+test("selected-channel changes during conflict resolution cannot publish a ready session", async () => {
+  const directory = await makeTempDir();
+  const fixture = createSyntheticStoreCrx3();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const verifier = createCrx3VerifierForTesting(fixture.publisherSpkiSha256);
+  let enteredConflictRead: (() => void) | undefined;
+  const conflictReadStarted = new Promise<void>((resolve) => { enteredConflictRead = resolve; });
+  let releaseConflictRead: (() => void) | undefined;
+  const conflictReadReleased = new Promise<void>((resolve) => { releaseConflictRead = resolve; });
+  const originalListExtensions = repository.listExtensions.bind(repository);
+  (repository as unknown as { listExtensions: () => Promise<unknown> }).listExtensions = async () => {
+    enteredConflictRead?.();
+    await conflictReadReleased;
+    return originalListExtensions();
+  };
+  const service = new ExtensionAcquisitionSessionService({
+    acquisitionRoot: path.join(directory, "extension-acquisitions"),
+    repository,
+    providerRegistry: registryFor(providerFor(fixture.bytes, "chrome-web-store")),
+    readSettings: async () => normalizeSettings({
+      extensionAcquisition: { artifactProviderId: "chrome-web-store" },
+    }),
+    verifyFile: verifier.verifyFile,
+    commitPrepared: async () => {
+      throw new Error("must not commit an overtaken session");
+    },
+  });
+  await service.initialize();
+  const created = await service.create({
+    namespace: "chrome-web-store",
+    storeId: fixture.storeId,
+    artifactProviderId: "chrome-web-store",
+    purpose: "install",
+  });
+  await conflictReadStarted;
+
+  service.settingsChanged(normalizeSettings({
+    extensionAcquisition: { artifactProviderId: "crxsoso" },
+  }));
+  releaseConflictRead?.();
+
+  const cancelled = await waitForStatus(service, created.sessionId, "cancelled");
+  assert.equal(cancelled.error?.code, "ARTIFACT_PROVIDER_DISABLED");
+  assert.equal(cancelled.status, "cancelled");
   repository.close();
 });
 
@@ -207,7 +311,7 @@ test("startup sweep treats disk sessions as non-authoritative derived work", asy
     acquisitionRoot: root,
     repository,
     providerRegistry: registryFor(providerFor(fixture.bytes, "chrome-web-store")),
-    readSettings: async () => normalizeSettings(),
+    readSettings: async () => normalizeSettings({ extensionAcquisition: { artifactProviderId: "chrome-web-store" } }),
     commitPrepared: async () => {
       throw new Error("not used");
     },
@@ -283,7 +387,7 @@ test("update observation refreshes the commit CAS token after its own row write"
     acquisitionRoot: path.join(directory, "extension-acquisitions"),
     repository,
     providerRegistry: registryFor(providerFor(fixture.bytes, "chrome-web-store")),
-    readSettings: async () => normalizeSettings(),
+    readSettings: async () => normalizeSettings({ extensionAcquisition: { artifactProviderId: "chrome-web-store" } }),
     verifyFile: verifier.verifyFile,
     recordUpdateObservation: async (targetExtensionId, providerId, observation, expectedUpdatedAt) => {
       assert.equal(targetExtensionId, target.id);
@@ -390,6 +494,15 @@ async function waitForStatus(
       throw new Error(`Session ended as ${session.status}: ${session.error?.code}`);
     }
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${status}.`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function waitForCondition(check: () => Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    if (await check()) return;
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for condition.");
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }

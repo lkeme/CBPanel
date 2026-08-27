@@ -1,42 +1,20 @@
-import {
-  CircleCheck,
-  CircleX,
-  Database,
-  Download,
-  Info,
-  Network,
-  RefreshCw,
-  Search,
-  ShieldAlert,
-} from "lucide-react";
+import { Check, Database, Download, Network, Search, ShieldAlert, CircleX } from "lucide-react";
 import { useId, type ReactNode } from "react";
 
-import type { Locale } from "../../i18n";
-import type {
-  ExtensionAcquisitionCapabilityId,
-  ExtensionCapabilityOperation,
-  ExtensionCapabilityView,
-} from "../../shared/extensionAcquisition";
+import type { ExtensionArtifactProviderId } from "../../shared/extensionAcquisition";
 import { StatusPill } from "../ui/StatusPill";
-import { Switch } from "../ui/switch";
 import { ExtensionAcquisitionDialog } from "./RegistryDialogs";
 import {
   ExtensionAcquisitionErrorText,
-  formatAcquisitionDateTime,
   type ExtensionAcquisitionUiKey,
   type ExtensionAcquisitionUiError,
   type ExtensionAcquisitionUiTranslator,
 } from "./extensionAcquisitionUi";
 
 const CAPABILITY_COPY: Record<
-  ExtensionAcquisitionCapabilityId,
+  "google-artifact" | "crxsoso-artifact",
   { name: ExtensionAcquisitionUiKey; description: ExtensionAcquisitionUiKey; icon: ReactNode }
 > = {
-  "crxsoso-search": {
-    name: "extension.acquisition.source.crxsosoSearchName",
-    description: "extension.acquisition.source.crxsosoSearchDescription",
-    icon: <Search aria-hidden="true" size={18} />,
-  },
   "google-artifact": {
     name: "extension.acquisition.source.googleArtifactName",
     description: "extension.acquisition.source.googleArtifactDescription",
@@ -49,141 +27,101 @@ const CAPABILITY_COPY: Record<
   },
 };
 
-const OPERATION_COPY: Record<ExtensionCapabilityOperation, ExtensionAcquisitionUiKey> = {
-  search: "extension.acquisition.source.operation.search",
-  "resolve-id": "extension.acquisition.source.operation.resolve",
-  "download-current": "extension.acquisition.source.operation.download",
-  "open-listing": "extension.acquisition.source.operation.openListing",
-};
-
 export type ExtensionAcquisitionSourceSettingsProps = {
-  busyCapabilityId?: ExtensionAcquisitionCapabilityId;
-  capabilities: ExtensionCapabilityView[];
-  disabledReasons?: Partial<Record<ExtensionAcquisitionCapabilityId, string>>;
-  error?: ExtensionAcquisitionUiError;
-  healthMessages?: Partial<Record<ExtensionAcquisitionCapabilityId, string>>;
-  loading?: boolean;
-  locale: Locale;
-  onRefresh?: () => void | Promise<void>;
-  onToggle: (capabilityId: ExtensionAcquisitionCapabilityId, enabled: boolean) => void | Promise<void>;
-  refreshing?: boolean;
+  busyProviderId?: ExtensionArtifactProviderId;
+  selectedProviderId?: ExtensionArtifactProviderId;
+  error?: { code?: string; message: string };
+  onSelectProvider: (providerId: ExtensionArtifactProviderId) => void | Promise<void>;
   t: ExtensionAcquisitionUiTranslator;
 };
 
 export function ExtensionAcquisitionSourceSettings({
-  busyCapabilityId,
-  capabilities,
-  disabledReasons = {},
+  busyProviderId,
   error,
-  healthMessages = {},
-  loading = false,
-  locale,
-  onRefresh,
-  onToggle,
-  refreshing = false,
+  selectedProviderId = "crxsoso",
+  onSelectProvider,
   t,
 }: ExtensionAcquisitionSourceSettingsProps) {
-  const headingId = useId();
-  const allOff = capabilities.length > 0 && capabilities.every((capability) => !capability.enabled);
+  const channelCapabilities = [
+    {
+      id: "crxsoso-artifact" as const,
+      trust: "third-party" as const,
+    },
+    {
+      id: "google-artifact" as const,
+      trust: "google-hosted" as const,
+    },
+  ];
 
   return (
-    <section aria-labelledby={headingId} className="acquisition-source-settings">
-      <header className="acquisition-section-header">
-        <div>
-          <h3 id={headingId}>{t("extension.acquisition.source.title")}</h3>
-          <p>{t("extension.acquisition.source.description")}</p>
-        </div>
-        {onRefresh && (
-          <button
-            className="command subtle"
-            disabled={loading || refreshing || Boolean(busyCapabilityId)}
-            onClick={() => void onRefresh()}
-            type="button"
-          >
-            <RefreshCw aria-hidden="true" className={refreshing ? "spin" : undefined} size={15} />
-            {refreshing ? t("extension.acquisition.source.loading") : t("actions.refresh")}
-          </button>
-        )}
-      </header>
+    <section aria-label={t("extension.acquisition.source.channelLegend")} className="acquisition-source-settings">
+      <fieldset className="acquisition-channel-settings-list" disabled={Boolean(busyProviderId)}>
+        <legend>{t("extension.acquisition.source.channelLegend")}</legend>
+        {channelCapabilities.map((capability) => (
+          <ChannelRow
+            busy={busyProviderId === providerForCapability(capability.id)}
+            capability={capability}
+            key={capability.id}
+            onSelectProvider={onSelectProvider}
+            selected={selectedProviderId === providerForCapability(capability.id)}
+            t={t}
+          />
+        ))}
+      </fieldset>
 
       {error && (
         <div className="inline-error" role="alert">
-          <CircleX aria-hidden="true" size={16} />
           <ExtensionAcquisitionErrorText error={error} t={t} />
         </div>
       )}
 
-      {loading && capabilities.length === 0 ? (
-        <div aria-live="polite" className="preflight-empty" role="status">
-          {t("extension.acquisition.source.loading")}
-        </div>
-      ) : (
-        <div className="acquisition-source-list" role="list">
-          {capabilities.map((capability) => (
-            <CapabilityRow
-              busy={busyCapabilityId === capability.id}
-              capability={capability}
-              disabledReason={disabledReasons[capability.id] ?? (
-                busyCapabilityId && busyCapabilityId !== capability.id
-                  ? t("extension.acquisition.source.saving")
-                  : undefined
-              )}
-              healthMessage={healthMessages[capability.id]}
-              key={capability.id}
-              locale={locale}
-              onToggle={onToggle}
-              t={t}
-            />
-          ))}
-        </div>
-      )}
-
-      {allOff && (
-        <div aria-live="polite" className="diagnostic-note acquisition-all-off" role="status">
-          <Info aria-hidden="true" size={16} />
-          <span>
-            <strong>{t("extension.acquisition.source.allOff")}</strong>
-            <small>{t("extension.acquisition.source.allOffHelp")}</small>
-          </span>
-        </div>
-      )}
+      <p className="acquisition-source-footnote">
+        {t("extension.acquisition.source.singleChannelHelp")}
+      </p>
     </section>
   );
 }
 
-function CapabilityRow({
+function providerForCapability(id: "google-artifact" | "crxsoso-artifact"): ExtensionArtifactProviderId {
+  return id === "google-artifact" ? "chrome-web-store" : "crxsoso";
+}
+
+function ChannelRow({
   busy,
   capability,
-  disabledReason,
-  healthMessage,
-  locale,
-  onToggle,
+  onSelectProvider,
+  selected,
   t,
 }: {
   busy: boolean;
-  capability: ExtensionCapabilityView;
-  disabledReason?: string;
-  healthMessage?: string;
-  locale: Locale;
-  onToggle: ExtensionAcquisitionSourceSettingsProps["onToggle"];
+  capability: { id: "google-artifact" | "crxsoso-artifact"; trust: "google-hosted" | "third-party" };
+  onSelectProvider: ExtensionAcquisitionSourceSettingsProps["onSelectProvider"];
+  selected: boolean;
   t: ExtensionAcquisitionUiTranslator;
 }) {
   const titleId = useId();
   const descriptionId = useId();
-  const stateId = useId();
-  const disabledReasonId = useId();
   const copy = CAPABILITY_COPY[capability.id];
-  const disabled = busy || Boolean(disabledReason);
-  const health = capability.health;
-  const describedBy = [descriptionId, stateId, disabledReason ? disabledReasonId : undefined]
-    .filter(Boolean)
-    .join(" ");
+  const providerId = providerForCapability(capability.id);
 
   return (
-    <article className={`acquisition-source-card ${capability.enabled ? "enabled" : "disabled"}`} role="listitem">
-      <span className="acquisition-source-icon" aria-hidden="true">
-        {copy.icon}
-      </span>
+    <label className={`acquisition-source-card acquisition-channel-setting-card ${selected ? "enabled" : ""}`}>
+      <input
+        aria-describedby={descriptionId}
+        aria-labelledby={titleId}
+        checked={selected}
+        disabled={busy}
+        name="extension-acquisition-artifact-provider"
+        onChange={() => {
+          // The controller serializes setting writes; a rejected write is
+          // reflected in its error state. Observe the promise here as this is
+          // a native event boundary and must not create a detached rejection.
+          void Promise.resolve(onSelectProvider(providerId)).catch(() => undefined);
+        }}
+        type="radio"
+        value={providerId}
+      />
+      <span className="acquisition-source-icon" aria-hidden="true">{copy.icon}</span>
       <div className="acquisition-source-copy">
         <div className="acquisition-source-heading">
           <h4 id={titleId}>{t(copy.name)}</h4>
@@ -194,60 +132,9 @@ function CapabilityRow({
           </StatusPill>
         </div>
         <p id={descriptionId}>{t(copy.description)}</p>
-        <p className="acquisition-source-operations">
-          <strong>{t("extension.acquisition.source.operations")}</strong>{" "}
-          {capability.operations.map((operation) => t(OPERATION_COPY[operation])).join(" · ")}
-        </p>
-        <div className="acquisition-source-health" id={stateId}>
-          {health ? (
-            <>
-              {health.status === "healthy" ? (
-                <CircleCheck aria-hidden="true" size={14} />
-              ) : (
-                <CircleX aria-hidden="true" size={14} />
-              )}
-              <span>
-                {health.status === "healthy"
-                  ? t("extension.acquisition.health.healthy")
-                  : t("extension.acquisition.health.unavailable")}
-                {" · "}
-                {t("extension.acquisition.health.checkedAt", {
-                  time: formatAcquisitionDateTime(health.checkedAt, locale),
-                })}
-                {healthMessage ? ` · ${healthMessage}` : health.errorCode ? ` · ${health.errorCode}` : ""}
-              </span>
-            </>
-          ) : (
-            <>
-              <Info aria-hidden="true" size={14} />
-              <span>{t("extension.acquisition.health.notChecked")}</span>
-            </>
-          )}
-        </div>
-        {disabledReason && (
-          <p className="acquisition-disabled-reason" id={disabledReasonId}>
-            {disabledReason}
-          </p>
-        )}
       </div>
-      <div className="acquisition-source-toggle">
-        <Switch
-          aria-describedby={describedBy}
-          aria-labelledby={titleId}
-          checked={capability.enabled}
-          className="toggle-switch"
-          disabled={disabled}
-          onCheckedChange={(enabled) => void onToggle(capability.id, enabled)}
-        />
-        <small aria-live="polite">
-          {busy
-            ? t("extension.acquisition.source.saving")
-            : capability.enabled
-              ? t("extension.acquisition.source.enabled")
-              : t("extension.acquisition.source.disabled")}
-        </small>
-      </div>
-    </article>
+      {selected && <Check aria-hidden="true" className="acquisition-channel-selected-mark" size={18} />}
+    </label>
   );
 }
 
@@ -255,7 +142,7 @@ export function ExtensionAcquisitionSourceSettingsDialog({
   close,
   ...settingsProps
 }: ExtensionAcquisitionSourceSettingsProps & { close: () => void }) {
-  const saving = Boolean(settingsProps.busyCapabilityId);
+  const saving = Boolean(settingsProps.busyProviderId);
   return (
     <ExtensionAcquisitionDialog
       actions={

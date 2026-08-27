@@ -24,7 +24,7 @@ for (const phase of [
 ] as const) {
   test(`verified acquisition commit converges after a ${phase} fault`, async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-acquisition-commit-"));
-    const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+    const repository = await createGoogleRepository(directory);
     const fixture = createSyntheticStoreCrx3({ name: "Atomic Extension", version: "2.0.0" });
     const verifier = createCrx3VerifierForTesting(fixture.publisherSpkiSha256);
     const prepared = await prepareAcquisition(directory, fixture.bytes, fixture.storeId, verifier.verifyFile);
@@ -35,7 +35,7 @@ for (const phase of [
       extensionArchiveDir: path.join(directory, "extension-archives"),
       extensionArtifactDir: path.join(directory, "extension-artifacts"),
       extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
-      readSettings: async () => normalizeSettings(),
+      readSettings: async () => googleArtifactSettings(),
       verifyStoreCrxFileForTesting: verifier.verifyFile,
       acquisitionCommitFaultForTesting: (current) => {
         if (!injected && current === phase) {
@@ -71,9 +71,47 @@ for (const phase of [
   });
 }
 
+test("verified acquisition rejects a selected-channel change at the final SQLite boundary", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-acquisition-channel-race-"));
+  const repository = await createGoogleRepository(directory);
+  const fixture = createSyntheticStoreCrx3({ name: "Channel race extension" });
+  const verifier = createCrx3VerifierForTesting(fixture.publisherSpkiSha256);
+  const prepared = await prepareAcquisition(directory, fixture.bytes, fixture.storeId, verifier.verifyFile);
+  const originalCommit = repository.commitExtensionAcquisition.bind(repository);
+  let changed = false;
+  repository.commitExtensionAcquisition = async (input) => {
+    if (!changed) {
+      changed = true;
+      await repository.saveSettings({ extensionAcquisition: { artifactProviderId: "crxsoso" } });
+    }
+    return originalCommit(input);
+  };
+  const service = new ExtensionService({
+    repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionArtifactDir: path.join(directory, "extension-artifacts"),
+    extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
+    readSettings: () => repository.getSettings(),
+    verifyStoreCrxFileForTesting: verifier.verifyFile,
+    activeEnvironmentIds: () => new Set(),
+  });
+  await service.initialize();
+
+  await assert.rejects(
+    service.commitPreparedAcquisition(prepared, { disposition: "create" }),
+    (error: unknown) => (error as { code?: string }).code === "ARTIFACT_PROVIDER_DISABLED",
+  );
+  assert.equal(changed, true);
+  assert.deepEqual(await repository.listExtensions(), []);
+  assert.equal(await exists(prepared.artifactPath), true, "rollback preserves the verified session artifact for an explicit retry");
+  assert.equal(await exists(prepared.stagedRoot), true, "rollback preserves staged files for an explicit retry");
+  assert.deepEqual(await fs.readdir(path.join(directory, "extension-acquisition-journal")), []);
+  repository.close();
+});
+
 test("verified metadata upgrade preserves identity and bindings while added permissions fail closed", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-acquisition-upgrade-"));
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const repository = await createGoogleRepository(directory);
   const environment = await repository.createProfile({ name: "Persistent Upgrade Environment" });
   const signingKeys = createSyntheticCrx3SigningKeys();
   const initialFixture = createSyntheticStoreCrx3({
@@ -89,7 +127,7 @@ test("verified metadata upgrade preserves identity and bindings while added perm
     extensionArchiveDir: path.join(directory, "extension-archives"),
     extensionArtifactDir: path.join(directory, "extension-artifacts"),
     extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
-    readSettings: async () => normalizeSettings(),
+    readSettings: async () => googleArtifactSettings(),
     verifyStoreCrxFileForTesting: verifier.verifyFile,
     activeEnvironmentIds: () => new Set(),
   });
@@ -191,7 +229,7 @@ test("verified metadata upgrade preserves identity and bindings while added perm
 
 test("one canonical metadata-only row upgrades in place after verified acquisition", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-acquisition-metadata-"));
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const repository = await createGoogleRepository(directory);
   const fixture = createSyntheticStoreCrx3({ name: "Metadata Extension", version: "1.0.0" });
   const metadata = await repository.createExtension({
     id: "metadata-extension",
@@ -213,7 +251,7 @@ test("one canonical metadata-only row upgrades in place after verified acquisiti
     extensionCacheDir: path.join(directory, "extensions"),
     extensionArtifactDir: path.join(directory, "extension-artifacts"),
     extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
-    readSettings: async () => normalizeSettings(),
+    readSettings: async () => googleArtifactSettings(),
     verifyStoreCrxFileForTesting: verifier.verifyFile,
     activeEnvironmentIds: () => new Set(),
   });
@@ -241,7 +279,7 @@ test("one canonical metadata-only row upgrades in place after verified acquisiti
 
 test("verified update requires approval when optional permissions become required", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-permission-promotion-"));
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const repository = await createGoogleRepository(directory);
   const signingKeys = createSyntheticCrx3SigningKeys();
   const initialFixture = createSyntheticStoreCrx3({
     name: "Permission Promotion",
@@ -258,7 +296,7 @@ test("verified update requires approval when optional permissions become require
     extensionCacheDir: path.join(directory, "extensions"),
     extensionArtifactDir: path.join(directory, "extension-artifacts"),
     extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
-    readSettings: async () => normalizeSettings(),
+    readSettings: async () => googleArtifactSettings(),
     verifyStoreCrxFileForTesting: verifier.verifyFile,
     activeEnvironmentIds: () => new Set(),
   });
@@ -342,7 +380,7 @@ test("disabling an update provider aborts its in-flight probe without changing t
   await switching.initialize();
   const pending = switching.transitionUpdateProvider(setup.extension.id, "crxsoso");
   await started;
-  settings = normalizeSettings({ extensionAcquisition: { crxsosoArtifactEnabled: false } });
+  settings = normalizeSettings({ extensionAcquisition: { artifactProviderId: "chrome-web-store" } });
   switching.settingsChanged(settings);
 
   await assert.rejects(
@@ -358,6 +396,33 @@ test("disabling an update provider aborts its in-flight probe without changing t
       .some((name) => name.startsWith(".provider-probe-")),
     false,
   );
+  setup.repository.close();
+});
+
+test("update-provider transitions enforce repository settings when no settings callback is supplied", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-provider-settings-fallback-"));
+  const setup = await committedStoreExtension(directory);
+  let probeCalls = 0;
+  const switching = new ExtensionService({
+    repository: setup.repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionArtifactDir: path.join(directory, "extension-artifacts"),
+    extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
+    verifyStoreCrxFileForTesting: setup.verifier.verifyFile,
+    probeArtifactProvider: async () => {
+      probeCalls += 1;
+      throw new Error("disabled provider must not be probed");
+    },
+    activeEnvironmentIds: () => new Set(),
+  });
+  await switching.initialize();
+
+  await assert.rejects(
+    switching.transitionUpdateProvider(setup.extension.id, "crxsoso"),
+    (error: unknown) => (error as { code?: string }).code === "ARTIFACT_PROVIDER_DISABLED",
+  );
+  assert.equal(probeCalls, 0);
+  assert.equal((await setup.repository.getExtension(setup.extension.id))?.updateProviderId, "chrome-web-store");
   setup.repository.close();
 });
 
@@ -410,7 +475,7 @@ test("provider disablement at the repository boundary prevents a stale provider 
   await switching.initialize();
   const pending = switching.transitionUpdateProvider(setup.extension.id, "crxsoso");
   await entered;
-  settings = normalizeSettings({ extensionAcquisition: { crxsosoArtifactEnabled: false } });
+  settings = normalizeSettings({ extensionAcquisition: { artifactProviderId: "chrome-web-store" } });
   switching.settingsChanged(settings);
   releaseWrite?.();
 
@@ -484,7 +549,7 @@ for (const phase of ["files-published", "database-written"] as const) {
       extensionCacheDir: path.join(directory, "extensions"),
       extensionArtifactDir: path.join(directory, "extension-artifacts"),
       extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
-      readSettings: async () => normalizeSettings(),
+      readSettings: async () => googleArtifactSettings(),
       verifyStoreCrxFileForTesting: setup.verifier.verifyFile,
       acquisitionCommitFaultForTesting: (current) => {
         if (!injected && current === phase) {
@@ -556,7 +621,7 @@ test("retained reinstall preserves journal staging for startup after secondary r
     extensionCacheDir: path.join(directory, "extensions"),
     extensionArtifactDir: path.join(directory, "extension-artifacts"),
     extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
-    readSettings: async () => normalizeSettings(),
+    readSettings: async () => googleArtifactSettings(),
     verifyStoreCrxFileForTesting: setup.verifier.verifyFile,
     acquisitionCommitFaultForTesting: (phase) => {
       if (!injected && phase === "prepared") {
@@ -586,7 +651,7 @@ test("retained reinstall preserves journal staging for startup after secondary r
     extensionCacheDir: path.join(directory, "extensions"),
     extensionArtifactDir: path.join(directory, "extension-artifacts"),
     extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
-    readSettings: async () => normalizeSettings(),
+    readSettings: async () => googleArtifactSettings(),
     verifyStoreCrxFileForTesting: setup.verifier.verifyFile,
     activeEnvironmentIds: () => new Set(),
   });
@@ -626,7 +691,7 @@ test("retained reinstall preserves staging when journal directory sync fails aft
     extensionCacheDir: path.join(directory, "extensions"),
     extensionArtifactDir: path.join(directory, "extension-artifacts"),
     extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
-    readSettings: async () => normalizeSettings(),
+    readSettings: async () => googleArtifactSettings(),
     verifyStoreCrxFileForTesting: setup.verifier.verifyFile,
     commitJournalSyncDirectoryForTesting: async () => {
       if (syncFailed) return;
@@ -657,7 +722,7 @@ test("retained reinstall preserves staging when journal directory sync fails aft
     extensionCacheDir: path.join(directory, "extensions"),
     extensionArtifactDir: path.join(directory, "extension-artifacts"),
     extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
-    readSettings: async () => normalizeSettings(),
+    readSettings: async () => googleArtifactSettings(),
     verifyStoreCrxFileForTesting: setup.verifier.verifyFile,
     activeEnvironmentIds: () => new Set(),
   });
@@ -776,7 +841,7 @@ async function committedStoreExtension(directory: string): Promise<{
   fixture: ReturnType<typeof createSyntheticStoreCrx3>;
   verifier: ReturnType<typeof createCrx3VerifierForTesting>;
 }> {
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const repository = await createGoogleRepository(directory);
   const environment = await repository.createProfile({ name: "Retained Reinstall Environment" });
   const fixture = createSyntheticStoreCrx3({
     name: "Retained Reinstall Extension",
@@ -790,7 +855,7 @@ async function committedStoreExtension(directory: string): Promise<{
     extensionCacheDir: path.join(directory, "extensions"),
     extensionArtifactDir: path.join(directory, "extension-artifacts"),
     extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
-    readSettings: async () => normalizeSettings(),
+    readSettings: async () => googleArtifactSettings(),
     verifyStoreCrxFileForTesting: verifier.verifyFile,
     activeEnvironmentIds: () => new Set(),
   });
@@ -800,6 +865,20 @@ async function committedStoreExtension(directory: string): Promise<{
     { disposition: "create", environmentIds: [environment.id] },
   );
   return { repository, service, extension, environmentId: environment.id, fixture, verifier };
+}
+
+function googleArtifactSettings(): ReturnType<typeof normalizeSettings> {
+  return normalizeSettings({
+    extensionAcquisition: { artifactProviderId: "chrome-web-store" },
+  });
+}
+
+async function createGoogleRepository(directory: string): Promise<SqlitePanelRepository> {
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  await repository.saveSettings({
+    extensionAcquisition: { artifactProviderId: "chrome-web-store" },
+  });
+  return repository;
 }
 
 async function exists(candidate: string): Promise<boolean> {
