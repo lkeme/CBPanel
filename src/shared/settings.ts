@@ -174,6 +174,14 @@ export interface StorageInfo {
   legacyJsonPath?: string;
   migrationBackupPath?: string;
   migrationError?: string;
+  /** One-way legacy extension-source retirement evidence and rollback snapshot. */
+  extensionSourceRetirement?: {
+    migrationVersion: number;
+    completedAt: string;
+    snapshotPath?: string;
+    migrated: number;
+    issues: number;
+  };
   portable: boolean;
   migratedFromJson: boolean;
 }

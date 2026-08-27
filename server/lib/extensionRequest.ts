@@ -94,25 +94,6 @@ export function readExtensionPreferencePatch(body: unknown): Partial<ExtensionPr
   return patch;
 }
 
-/** Temporary legacy POST boundary; Child 5 removes it with the old arbitrary remote-package feature. */
-export function readLegacyRemoteExtensionCreateBody(body: unknown): Partial<ExtensionEntity> {
-  const record = isRecord(body) ? body : {};
-  if (record.sourceKind !== "remote-zip" && record.sourceKind !== "remote-crx") {
-    throw requestError("Remote extension source kind must be remote-zip or remote-crx", "EXTENSION_REMOTE_KIND_INVALID");
-  }
-  if (typeof record.sourceUrl !== "string" || !record.sourceUrl.trim()) {
-    throw requestError("Remote extension URL cannot be empty", "EXTENSION_REMOTE_URL_INVALID");
-  }
-  if (typeof record.sha256 !== "string" || !/^[a-f0-9]{64}$/i.test(record.sha256.trim())) {
-    throw requestError("Remote extension sha256 must be a 64-character hex digest", "EXTENSION_REMOTE_SHA256_INVALID");
-  }
-  return {
-    sourceKind: record.sourceKind,
-    sourceUrl: record.sourceUrl.trim(),
-    sha256: record.sha256.trim().toLowerCase(),
-  };
-}
-
 export function readBindEnvironmentIds(value: unknown): string[] {
   return readEnvironmentIds(value) ?? [];
 }

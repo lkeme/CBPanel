@@ -98,13 +98,11 @@ type DerivedBrowserRuntimeIdentity = {
   id?: string;
 };
 
-const sourceKindKeys: Record<ExtensionSourceKind, TranslationKey> = {
+const sourceKindKeys: Partial<Record<ExtensionSourceKind, TranslationKey>> = {
   "local-directory": "extension.kind.localDirectory",
   "local-zip": "extension.kind.localZip",
   "local-crx": "extension.kind.localCrx",
   "managed-snapshot": "extension.kind.managedSnapshot",
-  "remote-zip": "extension.kind.remoteZip",
-  "remote-crx": "extension.kind.remoteCrx",
   "chrome-web-store": "extension.kind.chromeWebStore",
 };
 
@@ -251,12 +249,10 @@ function extensionSearchText(
     extension.id,
     extension.storeIdentity?.storeId ?? extension.storeId ?? "",
     browserRuntimeId ?? "",
-    extension.sourceKind,
     kindLabel,
     extension.installState,
     stateLabel,
     extension.localPath ?? "",
-    extension.sourceUrl,
     extension.permissions.join(" "),
     extension.hostPermissions.join(" "),
   ]
@@ -455,7 +451,7 @@ export function ExtensionRegistryPanel({
     return extensions
       .map((extension) => {
         const stat = statsById.get(extension.id);
-        const kindLabel = t(sourceKindKeys[extension.sourceKind] ?? "extension.kind.localDirectory");
+        const kindLabel = t(sourceKindKeys[extension.sourceKind] ?? "extension.kind.legacy");
         const stateLabel = t(installStateKeys[extension.installState] ?? "extension.state.notInstalled");
         const runtimeIdentity = browserRuntimeIdentities.get(extension.id);
         return {
@@ -910,18 +906,15 @@ function ExtensionRow({
   updateProviderTransition: ExtensionUpdateProviderTransitionState;
 }) {
   const { duplicated, extension, failing, highRiskCount, kindLabel, mediumRiskCount, refCount, stateLabel } = row;
-  const canMutatePackage = extension.sourceKind !== "chrome-web-store";
+  const canMutatePackage = Boolean(sourceKindKeys[extension.sourceKind])
+    && extension.sourceKind !== "chrome-web-store";
   const isLoadable = extension.installState === "installed" || extension.installState === "update-available";
   const canInstall = canMutatePackage && !isLoadable;
   const canReinstall = canMutatePackage && extension.installState !== "update-available";
-  const canCheckUpdate = Boolean(extension.sourceId)
-    || usesTrustedExtensionAcquisitionUpdate(extension)
-    || extension.sourceKind === "local-zip"
-    || extension.sourceKind === "local-crx"
-    || extension.sourceKind === "local-directory";
   const verifiedStoreUpdate = usesTrustedExtensionAcquisitionUpdate(extension);
+  const canCheckUpdate = verifiedStoreUpdate || extension.sourceKind.startsWith("local-");
   const remoteUpdate = extension.updateState?.status === "available" && Boolean(extension.updateProviderId);
-  const canUpdate = extension.installState === "update-available" || remoteUpdate;
+  const canUpdate = canMutatePackage && (extension.installState === "update-available" || remoteUpdate);
   const identityPinned = Boolean(extension.manifestKey);
   const referenceDirectory = extension.sourceKind === "local-directory" && extension.directoryMode !== "copy";
   const canMigrateIdentity = canMutatePackage && !identityPinned && !referenceDirectory;

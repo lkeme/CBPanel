@@ -108,6 +108,12 @@ export function SystemStatusContent({
               { label: t("settings.legacyJson"), value: storage?.legacyJsonPath ?? "-" },
               { label: t("settings.portable"), value: storage?.portable ? t("settings.yes") : t("settings.no") },
               { label: t("settings.migrated"), value: storage?.migratedFromJson ? t("settings.yes") : t("settings.no") },
+              ...(storage?.extensionSourceRetirement ? [
+                { label: t("system.extensionSourceRetirement"), value: `${t("settings.yes")} · v${storage.extensionSourceRetirement.migrationVersion}` },
+                { label: t("system.extensionSourceRetirementSnapshot"), value: storage.extensionSourceRetirement.snapshotPath ?? "-" },
+                { label: t("system.extensionSourceRetirementCount"), value: storage.extensionSourceRetirement.migrated },
+                { label: t("system.extensionSourceRetirementIssues"), value: storage.extensionSourceRetirement.issues },
+              ] : []),
               { label: t("session.dataDir"), value: state?.meta.dataDir ?? "-" },
             ]}
           />
@@ -157,15 +163,9 @@ export function SystemStatusContent({
           <h2>{t("system.extensions")}</h2>
           <KeyValueList
             items={[
-              {
-                label: t("module.extensionSourcesTitle"),
-                value: diagnostics
-                  ? `${diagnostics.extensionSources.enabled}/${diagnostics.extensionSources.total}`
-                  : `${state?.extensionSources?.filter((source) => source.status === "enabled").length ?? 0}/${state?.extensionSources?.length ?? 0}`,
-              },
               { label: t("system.extensionCache"), value: diagnostics?.extensionCache.directory ?? "-" },
               { label: t("system.installedCount"), value: diagnostics?.extensionCache.installedCount ?? state?.extensions?.filter((extension) => extension.installState === "installed").length ?? 0 },
-              { label: t("system.lastError"), value: diagnostics?.extensionSources.lastError ?? diagnostics?.extensionCache.lastError ?? "-" },
+              { label: t("system.lastError"), value: diagnostics?.extensionCache.lastError ?? "-" },
             ]}
           />
         </section>

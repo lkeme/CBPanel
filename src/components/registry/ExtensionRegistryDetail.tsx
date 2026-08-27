@@ -104,7 +104,11 @@ export function ExtensionRowDetail({
   updateProviderSettings: ArtifactProviderSettings;
   updateProviderTransition: ExtensionUpdateProviderTransitionState;
 }) {
-  const pathText = extension.localPath ?? (extension.sourceUrl || t("module.extensionNoPath"));
+  const localSourceKind = extension.sourceKind === "local-directory"
+    || extension.sourceKind === "local-zip"
+    || extension.sourceKind === "local-crx";
+  const pathText = extension.localPath
+    ?? (localSourceKind && extension.sourceUrl ? extension.sourceUrl : t("module.extensionNoPath"));
   const description = extension.description && extension.description !== extension.name ? extension.description : "";
   const localPath = extension.localPath;
   const canOpenDirectory = Boolean(localPath) && isTauri();

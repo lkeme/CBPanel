@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import http from "node:http";
-import type net from "node:net";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import test, { after, before } from "node:test";
 import type { BrowserEnvironment, TrashEnvironment } from "../src/shared/entities";
 import type { SessionSummary } from "../src/shared/profile";
@@ -197,19 +194,8 @@ test("emptying the trash answers exactly { deleted, dataRemoved, warnings }", as
   assert.deepEqual(await trashedIds(), []);
 });
 
-test("new extension bindings require a currently loadable local package", async () => {
+test("extension bindings require a currently loadable local package", async () => {
   const environment = await createEnvironment("Binding Validation Env");
-  const pending = jsonBody<{ id: string }>(await panel.request("POST", "/api/extensions", {
-    sourceKind: "remote-zip",
-    sourceUrl: "http://127.0.0.1:1/must-not-be-fetched.zip",
-    sha256: "a".repeat(64),
-  }));
-  const rejected = await panel.request("POST", `/api/extensions/${pending.id}/bind-environments`, {
-    environmentIds: [environment.id],
-  });
-  assert.equal(rejected.status, 409);
-  assert.equal((rejected.body as { code?: string }).code, "EXTENSION_BIND_PACKAGE_REQUIRED");
-
   const sourceDirectory = path.join(panel.dataDir, "bindable-extension-source");
   await fs.mkdir(sourceDirectory, { recursive: true });
   await fs.writeFile(path.join(sourceDirectory, "manifest.json"), JSON.stringify({
@@ -287,56 +273,6 @@ test("extension acquisition capabilities and exact resolution stay read-only and
   assert.equal(restoredSettings.status, 200);
 });
 
-test("a prune preserves a runtime-held id after clearing the last database row that names it", async () => {
-  const held = await startPanelHarness();
-  let stalled: StalledDownload | undefined;
-  let launching: Promise<unknown> = Promise.resolve();
-  try {
-    stalled = await startStalledDownload();
-    const environment = jsonBody<BrowserEnvironment>(await held.request("POST", "/api/environments", {
-      name: "Held After Trash Clear",
-    }));
-    const extension = jsonBody<{ id: string }>(await held.request("POST", "/api/extensions", {
-      name: "Held Runtime Extension",
-      sourceKind: "remote-zip",
-      sourceUrl: stalled.url,
-      sha256: "c".repeat(64),
-    }));
-    insertLegacyExtensionBinding(held.dataDir, environment.id, extension.id);
-    await fs.mkdir(path.join(held.dataDir, "browser-data", environment.id), { recursive: true });
-    await fs.writeFile(path.join(held.dataDir, "browser-data", environment.id, "Cookies"), "held", "utf8");
-    await fs.mkdir(path.join(held.dataDir, "extension-runtimes", environment.id, extension.id), { recursive: true });
-    await fs.writeFile(path.join(held.dataDir, "extension-runtimes", environment.id, extension.id, "sentinel"), "held", "utf8");
-    await fs.mkdir(path.join(held.dataDir, "browser-data", "orphan-next-to-held"), { recursive: true });
-
-    launching = held.request("POST", `/api/environments/${environment.id}/launch`).catch(() => undefined);
-    await waitForSessionStatus(held, environment.id, "launching");
-
-    // Stage the same state a close-unconfirmed session can reach, without spending six seconds on the
-    // production close timeout: the session still holds files while its environment is now in trash.
-    const database = new DatabaseSync(path.join(held.dataDir, "cbpanel.sqlite"));
-    database.prepare("UPDATE browser_environments SET deleted_at = ?, delete_reason = ? WHERE id = ?")
-      .run(new Date().toISOString(), "test", environment.id);
-    database.close();
-
-    const cleared = await held.request("DELETE", "/api/trash/environments");
-    assert.equal(cleared.status, 200);
-    assert.equal(await pathExists(path.join(held.dataDir, "browser-data", environment.id, "Cookies")), true);
-    assert.equal(await pathExists(path.join(held.dataDir, "extension-runtimes", environment.id, extension.id, "sentinel")), true);
-
-    const pruned = await held.request("POST", "/api/storage/browser-data/prune");
-    assert.equal(pruned.status, 200);
-    assert.ok(cleanupResult(pruned).removed.includes("orphan-next-to-held"));
-    assert.ok(!cleanupResult(pruned).removed.includes(environment.id));
-    assert.equal(await pathExists(path.join(held.dataDir, "browser-data", environment.id, "Cookies")), true);
-    assert.equal(await pathExists(path.join(held.dataDir, "extension-runtimes", environment.id, extension.id, "sentinel")), true);
-  } finally {
-    await stalled?.close();
-    await held.dispose();
-    await launching;
-  }
-});
-
 test("the browser-data prune refuses with 409 while an environment package import is in flight", async () => {
   const orphanId = "orphan-during-import";
   const launchCandidate = await createEnvironment("Blocked During Data Import");
@@ -380,56 +316,27 @@ test("the browser-data prune refuses with 409 while an environment package impor
   await fs.rm(archivePath, { force: true });
 });
 
-// The refusal a single permanent delete owes the user, as against the batch above, which drops every row
-// and only reports the directories it had to skip.
-//
-// The environment stays out of the trash on purpose, and this is the limit of what can be pinned from
-// outside: `getProfile` filters soft-deleted rows, so a trashed environment cannot be launched, and no route
-// puts an environment into the trash while a session is up — `DELETE /api/environments/:id` refuses that
-// itself. So what runs here is the guard *ahead of* the row lookup, read off the difference between the two
-// identical requests: 404 while nothing holds the runtime, 409 once something does.
-//
-// Its own instance, because the session this test wedges in "launching" can only be cleared by ending the
-// process, and until then every later prune and delete would treat that id as held.
-test("a permanent delete refuses with 409 while a session still holds the environment's runtime", async () => {
-  const held = await startPanelHarness();
-  // Opened inside the try, not beside the harness above: a listen that failed out here would skip the
-  // finally and leave that harness's child process and temp directory behind for the rest of the run.
-  let stalled: StalledDownload | undefined;
-  // Fired and deliberately not awaited: it stays open for as long as the download does. The catch is for
-  // the rejection that arrives when the child is killed.
-  let launching: Promise<unknown> = Promise.resolve();
-  try {
-    stalled = await startStalledDownload();
-    const environment = jsonBody<BrowserEnvironment>(await held.request("POST", "/api/environments", { name: "Held Env" }));
-    await fs.mkdir(path.join(held.dataDir, "browser-data", environment.id), { recursive: true });
-    await fs.writeFile(path.join(held.dataDir, "browser-data", environment.id, "Cookies"), "cookie-db", "utf8");
-    const extension = jsonBody<{ id: string }>(await held.request("POST", "/api/extensions", {
-      name: "Stalled Extension",
-      sourceKind: "remote-zip",
-      sourceUrl: stalled.url,
-      sha256: "b".repeat(64),
-    }));
-    insertLegacyExtensionBinding(held.dataDir, environment.id, extension.id);
+test("legacy remote extension creation route is retired", async () => {
+  const response = await panel.request("POST", "/api/extensions", {
+    sourceKind: "remote-zip",
+    sourceUrl: "https://legacy.example/extension.zip",
+    sha256: "b".repeat(64),
+  });
+  assert.equal(response.status, 404);
+});
 
-    // Nothing holds the runtime yet, so the same request answers 404 — which is what makes the 409 below
-    // attributable to the guard and not to the row lookup behind it.
-    const beforeLaunch = await held.request("DELETE", `/api/trash/environments/${environment.id}`);
-    assert.equal(beforeLaunch.status, 404);
-
-    launching = held.request("POST", `/api/environments/${environment.id}/launch`).catch(() => undefined);
-    await waitForSessionStatus(held, environment.id, "launching");
-
-    const refused = await held.request("DELETE", `/api/trash/environments/${environment.id}`);
-
-    assert.equal(refused.status, 409);
-    // Refused before anything was touched, not reported afterwards.
-    assert.equal(await pathExists(path.join(held.dataDir, "browser-data", environment.id, "Cookies")), true);
-    assert.equal((await held.request("GET", `/api/environments/${environment.id}`)).status, 200);
-  } finally {
-    await stalled?.close();
-    await held.dispose();
-    await launching;
+test("legacy extension-source CRUD and update-provider routes are not authorities", async () => {
+  const requests: Array<[string, string, unknown?]> = [
+    ["GET", "/api/extension-sources"],
+    ["POST", "/api/extension-sources", { name: "legacy", url: "https://legacy.example/index.json" }],
+    ["PUT", "/api/extension-sources/source-1", { status: "disabled" }],
+    ["POST", "/api/extension-sources/source-1/refresh"],
+    ["DELETE", "/api/extension-sources/source-1"],
+    ["POST", "/api/extensions/extension-1/update-provider", { providerId: "crxsoso" }],
+  ];
+  for (const [method, route, body] of requests) {
+    const response = await panel.request(method, route, body);
+    assert.equal(response.status, 404, `${method} ${route} must be retired`);
   }
 });
 
@@ -479,69 +386,6 @@ async function settlePackageOperation(operationId: string): Promise<void> {
     await delay(20);
   }
   throw new Error(`Environment package operation ${operationId} did not settle.`);
-}
-
-async function waitForSessionStatus(harness: PanelHarness, profileId: string, status: SessionSummary["status"]): Promise<void> {
-  let seen: string | undefined;
-  for (let attempt = 0; attempt < 400; attempt += 1) {
-    const response = await harness.request("GET", "/api/sessions");
-    seen = (response.body as SessionSummary[]).find((session) => session.profileId === profileId)?.status;
-    if (seen === status) return;
-    await delay(20);
-  }
-  throw new Error(`Session ${profileId} never reached "${status}" (last seen: ${seen ?? "no session"}).`);
-}
-
-/** Simulates a binding created before service-level package validation; migration must preserve it. */
-function insertLegacyExtensionBinding(dataDir: string, environmentId: string, extensionId: string): void {
-  const database = new DatabaseSync(path.join(dataDir, "cbpanel.sqlite"));
-  try {
-    database.prepare(`
-      INSERT OR IGNORE INTO environment_extensions (environment_id, extension_id, lifecycle_revision)
-      VALUES (?, ?, ?)
-    `).run(environmentId, extensionId, `legacy-test:${environmentId}:${extensionId}`);
-  } finally {
-    database.close();
-  }
-}
-
-type StalledDownload = {
-  url: string;
-  close(): Promise<void>;
-};
-
-/**
- * A download that accepts the connection and then never answers, which is the only way to hold a launch
- * open from outside the process: `ensureExtensionsInstalled` fetches a remote asset with no timeout, so a
- * launch whose environment is bound to one stays registered as "launching" — the state
- * `profileIdsHoldingRuntime` reports — until this server is closed. No real browser core is needed, and no
- * product code is stubbed.
- */
-async function startStalledDownload(): Promise<StalledDownload> {
-  const sockets = new Set<net.Socket>();
-  const server = http.createServer(() => {
-    // Deliberately never responds.
-  });
-  server.on("connection", (socket) => {
-    sockets.add(socket);
-    socket.once("close", () => sockets.delete(socket));
-  });
-  await new Promise<void>((resolve) => {
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  const port = typeof address === "object" && address !== null ? address.port : 0;
-  return {
-    url: `http://127.0.0.1:${port}/stalled-extension.zip`,
-    close: async () => {
-      // The sockets have to go first: `close` only stops new connections, and a held one would keep the
-      // test process alive after the last assertion.
-      for (const socket of sockets) socket.destroy();
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-      });
-    },
-  };
 }
 
 /** `truncate` rather than a written buffer: the file is only ever read, and the zeros never hit the disk. */

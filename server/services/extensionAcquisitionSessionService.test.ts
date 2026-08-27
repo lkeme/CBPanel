@@ -80,6 +80,70 @@ test("acquisition session exposes only verified facts and is consumed exactly on
   repository.close();
 });
 
+test("duplicate metadata-only records remain explicit eligible upgrade targets", async () => {
+  const directory = await makeTempDir();
+  const fixture = createSyntheticStoreCrx3({ name: "Duplicate metadata" });
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const listingUrl = `https://chromewebstore.google.com/detail/${fixture.storeId}`;
+  for (const id of ["extension-metadata-a", "extension-metadata-b"]) {
+    await repository.createExtension({
+      id,
+      name: `Metadata ${id.at(-1)}`,
+      sourceKind: "chrome-web-store",
+      sourceUrl: "",
+      storeId: fixture.storeId,
+      storeUrl: listingUrl,
+      storeIdentity: {
+        namespace: "chrome-web-store",
+        storeId: fixture.storeId,
+        listingUrl,
+      },
+      installState: "metadata-only",
+      status: "disabled",
+    });
+  }
+  const verifier = createCrx3VerifierForTesting(fixture.publisherSpkiSha256);
+  let selectedTarget: string | undefined;
+  const service = new ExtensionAcquisitionSessionService({
+    acquisitionRoot: path.join(directory, "extension-acquisitions"),
+    repository,
+    providerRegistry: registryFor(providerFor(fixture.bytes, "chrome-web-store")),
+    readSettings: async () => normalizeSettings(),
+    verifyFile: verifier.verifyFile,
+    commitPrepared: async (_acquisition, request) => {
+      selectedTarget = request.targetExtensionId;
+      return (await repository.getExtension(request.targetExtensionId as string))!;
+    },
+  });
+  await service.initialize();
+
+  const created = await service.create({
+    namespace: "chrome-web-store",
+    storeId: fixture.storeId,
+    artifactProviderId: "chrome-web-store",
+    purpose: "install",
+  });
+  const ready = await waitForStatus(service, created.sessionId, "ready");
+  assert.deepEqual(
+    ready.report?.conflicts.map((candidate) => ({
+      extensionId: candidate.extensionId,
+      matchBy: candidate.matchBy,
+      eligible: candidate.eligible,
+      blockingReason: candidate.blockingReason,
+    })),
+    [
+      { extensionId: "extension-metadata-a", matchBy: "store-identity", eligible: true, blockingReason: undefined },
+      { extensionId: "extension-metadata-b", matchBy: "store-identity", eligible: true, blockingReason: undefined },
+    ],
+  );
+  await service.confirm(created.sessionId, {
+    disposition: "upgrade",
+    targetExtensionId: "extension-metadata-b",
+  });
+  assert.equal(selectedTarget, "extension-metadata-b");
+  repository.close();
+});
+
 test("provider disablement cancels an active download and reclaims its reservation", async () => {
   const directory = await makeTempDir();
   const fixture = createSyntheticStoreCrx3();
@@ -154,6 +218,114 @@ test("startup sweep treats disk sessions as non-authoritative derived work", asy
   repository.close();
 });
 
+test("update observation refreshes the commit CAS token after its own row write", async () => {
+  const directory = await makeTempDir();
+  const fixture = createSyntheticStoreCrx3({ name: "Update Candidate", version: "2.0.0" });
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const target = await repository.createExtension({
+    id: "extension-update-target",
+    name: "Update Candidate",
+    sourceKind: "local-crx",
+    sourceUrl: path.join(directory, "retained.crx"),
+    version: "1.0.0",
+    permissions: ["storage"],
+    hostPermissions: ["https://example.test/*"],
+    installState: "installed",
+    storeId: fixture.storeId,
+    storeUrl: `https://chromewebstore.google.com/detail/${fixture.storeId}`,
+    storeIdentity: {
+      namespace: "chrome-web-store",
+      storeId: fixture.storeId,
+      listingUrl: `https://chromewebstore.google.com/detail/${fixture.storeId}`,
+    },
+    updateProviderId: "chrome-web-store",
+    artifactArchivePath: path.join(directory, "retained.crx"),
+    sha256: "a".repeat(64),
+    manifestSha256: "b".repeat(64),
+    provenance: {
+      schemaVersion: 1,
+      artifact: {
+        providerId: "chrome-web-store",
+        format: "crx3",
+        retained: true,
+        sha256: "a".repeat(64),
+        size: fixture.bytes.byteLength,
+        finalByteHost: "clients2.googleusercontent.com",
+        fetchedAt: "2026-08-27T00:00:00.000Z",
+      },
+      verification: {
+        level: "cws-publisher-verified",
+        verifiedAt: "2026-08-27T00:00:00.000Z",
+        developerKeySha256: fixture.developerSpkiSha256,
+        proofDerivedStoreId: fixture.storeId,
+        publisherKeySha256: fixture.publisherSpkiSha256,
+        publisherTrustRootId: "test-root",
+        publisherTrustRootVersion: 1,
+        manifestSha256: "b".repeat(64),
+        treeSha256: "c".repeat(64),
+      },
+    },
+  });
+  const initialUpdatedAt = target.updatedAt;
+  let observedUpdatedAt: string | undefined;
+  let commitTargetUpdatedAt: string | undefined;
+  let expectedObservationRevision = initialUpdatedAt;
+  let returnInconsistentRevision = false;
+  const verifier = createCrx3VerifierForTesting(fixture.publisherSpkiSha256);
+  const service = new ExtensionAcquisitionSessionService({
+    acquisitionRoot: path.join(directory, "extension-acquisitions"),
+    repository,
+    providerRegistry: registryFor(providerFor(fixture.bytes, "chrome-web-store")),
+    readSettings: async () => normalizeSettings(),
+    verifyFile: verifier.verifyFile,
+    recordUpdateObservation: async (targetExtensionId, providerId, observation, expectedUpdatedAt) => {
+      assert.equal(targetExtensionId, target.id);
+      assert.equal(providerId, "chrome-web-store");
+      assert.equal(expectedUpdatedAt, expectedObservationRevision);
+      const updated = await repository.updateExtension(target.id, {
+        updateState: { ...observation, checkedAt: new Date().toISOString() },
+      });
+      observedUpdatedAt = updated.updatedAt;
+      return returnInconsistentRevision
+        ? { ...updated, updatedAt: "2000-01-01T00:00:00.000Z" }
+        : updated;
+    },
+    commitPrepared: async (acquisition) => {
+      commitTargetUpdatedAt = acquisition.targetUpdatedAt;
+      return target;
+    },
+  });
+  await service.initialize();
+  const created = await service.create({
+    namespace: "chrome-web-store",
+    storeId: fixture.storeId,
+    artifactProviderId: "chrome-web-store",
+    purpose: "update",
+    targetExtensionId: target.id,
+  });
+  const ready = await waitForStatus(service, created.sessionId, "ready");
+  assert.equal(ready.status, "ready");
+  assert.ok(observedUpdatedAt);
+  await service.confirm(created.sessionId, {
+    disposition: "upgrade",
+    targetExtensionId: target.id,
+  });
+  assert.equal(commitTargetUpdatedAt, observedUpdatedAt);
+
+  expectedObservationRevision = (await repository.getExtension(target.id))!.updatedAt;
+  returnInconsistentRevision = true;
+  const raced = await service.create({
+    namespace: "chrome-web-store",
+    storeId: fixture.storeId,
+    artifactProviderId: "chrome-web-store",
+    purpose: "update",
+    targetExtensionId: target.id,
+  });
+  const rejected = await waitForStatus(service, raced.sessionId, "rejected");
+  assert.equal(rejected.error?.code, "ACQUISITION_CONFLICT_TARGET_INVALID");
+  repository.close();
+});
+
 function providerFor(bytes: Uint8Array, id: "chrome-web-store" | "crxsoso"): ArtifactProvider {
   return {
     id,
@@ -197,7 +369,7 @@ function registryFor(provider: ArtifactProvider): { artifact: (id: "chrome-web-s
 async function waitForStatus(
   service: ExtensionAcquisitionSessionService,
   sessionId: string,
-  status: "ready" | "cancelled",
+  status: "ready" | "cancelled" | "rejected",
 ): Promise<ReturnType<ExtensionAcquisitionSessionService["get"]>> {
   const deadline = Date.now() + 5_000;
   for (;;) {

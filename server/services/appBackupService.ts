@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type { ExtensionEntity } from "../../src/shared/entities";
-import type { LegacyTransferExtension } from "../../src/shared/extensionAcquisition";
 import {
   APP_BACKUP_KIND,
   APP_BACKUP_SCHEMA_VERSION,
@@ -44,6 +43,7 @@ import {
   preflightExtensionPackage,
 } from "./extensionPackagePreflight";
 import { validateTransferredExtensionArtifact } from "./extensionArtifactTransferVerifier";
+import { retireLegacyTransferredExtension } from "./extensionSourceRetirementMigration";
 
 type AppBackupServiceOptions = {
   repository: PanelRepository;
@@ -431,7 +431,7 @@ export class AppBackupService {
           lastError: "Extension unpacked files are missing from the restored backup.",
         };
       }
-      if (extension.installState !== "installed") return extension;
+      if (extension.installState !== "installed" && extension.installState !== "update-available") return extension;
       return {
         ...extension,
         localPath: undefined,
@@ -635,7 +635,7 @@ function migrateBackupDataToCurrent(data: AnyAppBackupData): AppBackupData {
     groups: data.groups,
     tags: data.tags,
     proxies: data.proxies,
-    extensions: data.extensions.map(migrateLegacyBackupExtension),
+    extensions: data.extensions.map(retireLegacyTransferredExtension),
     retainedExtensionArtifacts: [],
     environmentExtensionBindings: data.environmentExtensionBindings,
   };
@@ -647,38 +647,6 @@ function migrateBackupDataToCurrent(data: AnyAppBackupData): AppBackupData {
       runtimeProfile: withoutSerializedExtensionPaths(environment.runtimeProfile),
     })),
     extensions: current.extensions.map(sanitizeTransferredExtension),
-  };
-}
-
-function migrateLegacyBackupExtension(extension: LegacyTransferExtension): ExtensionEntity {
-  const remote = extension.sourceKind === "remote-zip"
-    || extension.sourceKind === "remote-crx"
-    || Boolean(extension.sourceId);
-  if (!remote) return { ...extension };
-  const format = extension.sourceKind === "remote-zip" ? "zip" : "unknown";
-  return {
-    ...extension,
-    sourceKind: "managed-snapshot",
-    sourceUrl: "",
-    sourceId: undefined,
-    updatePolicy: "pinned",
-    artifactArchivePath: undefined,
-    updateProviderId: undefined,
-    updateState: { status: "provider-disabled" },
-    provenance: {
-      schemaVersion: 1,
-      artifact: {
-        providerId: "legacy",
-        legacySourceUrl: extension.sourceUrl || undefined,
-        format,
-        sha256: extension.sha256,
-        retained: false,
-      },
-      verification: {
-        level: "legacy-unknown",
-        manifestSha256: extension.manifestSha256,
-      },
-    },
   };
 }
 
@@ -707,23 +675,7 @@ function sanitizeTransferredExtension(extension: ExtensionEntity): ExtensionEnti
       directoryMode: undefined,
     };
   }
-  const hadRemoteAuthority = extension.sourceKind === "remote-zip"
-    || extension.sourceKind === "remote-crx"
-    || Boolean(extension.sourceId)
-    || Boolean(extension.updateProviderId)
-    || Boolean(extension.provenance?.artifact.legacySourceUrl);
-  return {
-    ...extension,
-    sourceKind: "managed-snapshot",
-    sourceUrl: "",
-    sourceId: undefined,
-    artifactArchivePath: undefined,
-    updateProviderId: undefined,
-    updateState: hadRemoteAuthority ? { status: "provider-disabled" } : undefined,
-    updatePolicy: "pinned",
-    localPath: undefined,
-    directoryMode: undefined,
-  };
+  return retireLegacyTransferredExtension(extension, { stripPaths: true });
 }
 
 function withoutSerializedExtensionPaths(profile: BrowserProfile): BrowserProfile {

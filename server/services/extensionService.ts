@@ -1,4 +1,4 @@
-import { createHash, createPublicKey, createVerify, generateKeyPairSync, timingSafeEqual } from "node:crypto";
+import { createHash, createPublicKey, createVerify, generateKeyPairSync, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
@@ -14,9 +14,6 @@ import {
   type ExtensionPermissionRisk,
   type ExtensionPermissionRiskLevel,
   type ExtensionPermissionRiskReasonKey,
-  type ExtensionSourceEntity,
-  type ExtensionSourceRefreshResult,
-  type ExtensionSourceKind,
   isPreserveLifecycleRevision,
 } from "../../src/shared/entities";
 import { chromeWebStoreListingUrl } from "../../src/shared/extensionAcquisition";
@@ -26,6 +23,8 @@ import type { PanelRepository } from "../storage/types";
 import { fingerprintStagedExtensionTree } from "./boundedZipAnalyzer";
 import { verifyChromeWebStoreCrx3File } from "./crx3Verifier";
 import { ExtensionRuntimeService, type ExtensionRuntimeMaterializeResult } from "./extensionRuntimeService";
+import { validateTransferredExtensionArtifact } from "./extensionArtifactTransferVerifier";
+import { preflightExtensionPackage } from "./extensionPackagePreflight";
 import { DataMutationCoordinator } from "./dataMutationCoordinator";
 import {
   ExtensionAcquisitionCommitJournal,
@@ -61,7 +60,6 @@ type ExtensionServiceOptions = {
   acquisitionCommitFaultForTesting?: (
     phase: "prepared" | "files-published" | "database-written" | "database-committed" | "complete",
   ) => void | Promise<void>;
-  fetchImpl?: typeof fetch;
   activeEnvironmentIds?: () => Set<string>;
 };
 
@@ -139,23 +137,6 @@ type ExtensionImportConflict = {
   candidates: ExtensionEntity[];
 };
 
-type ExtensionSourceIndexEntry = {
-  id: string;
-  name: string;
-  description?: string;
-  version: string;
-  assetKind: ExtensionAssetKind;
-  assetUrl: string;
-  sha256?: string;
-  webStoreId?: string;
-  storeUrl?: string;
-};
-
-type ExtensionSourceIndex = {
-  name: string;
-  extensions: ExtensionSourceIndexEntry[];
-};
-
 const HIGH_RISK_PERMISSIONS = new Set([
   "cookies",
   "proxy",
@@ -197,8 +178,6 @@ const ICON_MIME_TYPES: Record<string, string> = {
 const MAX_ICON_ASSET_BYTES = 512 * 1024;
 
 export class ExtensionService {
-  private readonly fetchImpl: typeof fetch;
-
   private readonly extensionArchiveDir: string;
 
   private readonly extensionArtifactDir: string;
@@ -216,7 +195,6 @@ export class ExtensionService {
   private readonly runtimeService: ExtensionRuntimeService;
 
   constructor(private readonly options: ExtensionServiceOptions) {
-    this.fetchImpl = options.fetchImpl ?? fetch;
     this.extensionArchiveDir = options.extensionArchiveDir
       ?? path.join(path.dirname(path.resolve(options.extensionCacheDir)), "extension-archives");
     this.extensionArtifactDir = options.extensionArtifactDir
@@ -650,7 +628,6 @@ export class ExtensionService {
       description: acquisition.package.description,
       sourceKind: "local-crx",
       sourceUrl: artifactLivePath,
-      sourceId: undefined,
       storeId: acquisition.storeId,
       storeUrl,
       storeIdentity: {
@@ -907,90 +884,6 @@ export class ExtensionService {
     return this.options.repository.bindExtensionToEnvironments(id, environmentIds);
   }
 
-  async createRemote(input: Partial<ExtensionEntity>): Promise<ExtensionEntity> {
-    const sourceKind = input.sourceKind === "remote-crx" ? "remote-crx" : "remote-zip";
-    if (!input.sourceUrl?.trim()) {
-      throw Object.assign(new Error("Remote extension URL cannot be empty"), { status: 400 });
-    }
-    if (!input.sha256?.trim()) {
-      throw Object.assign(new Error("Remote extension sha256 is required"), { status: 400 });
-    }
-    return this.options.repository.createExtension({
-      ...input,
-      sourceKind,
-      sourceUrl: input.sourceUrl.trim(),
-      installState: "download-pending",
-      updatePolicy: input.updatePolicy ?? "pinned",
-      sha256: input.sha256.trim().toLowerCase(),
-    });
-  }
-
-  async refreshSource(id: string): Promise<ExtensionSourceRefreshResult> {
-    return this.withExtensionMutation([`extension-source-${id}`], () => this.refreshSourceInternal(id));
-  }
-
-  private async refreshSourceInternal(id: string): Promise<ExtensionSourceRefreshResult> {
-    const source = await this.getExtensionSourceOrThrow(id);
-    if (source.status === "disabled") {
-      throw Object.assign(new Error("Extension source is disabled"), { status: 409 });
-    }
-
-    try {
-      const index = await this.fetchSourceIndex(source);
-      let imported = 0;
-      let updated = 0;
-      const extensions: ExtensionEntity[] = [];
-
-      for (const entry of index.extensions) {
-        const extensionId = extensionIdFromSourceEntry(source.id, entry.id);
-        const existing = await this.options.repository.getExtension(extensionId);
-        const sourceKind: ExtensionSourceKind = entry.assetKind === "crx" ? "remote-crx" : "remote-zip";
-        const basePatch: Partial<ExtensionEntity> = {
-          id: extensionId,
-          name: entry.name,
-          description: entry.description ?? "",
-          sourceKind,
-          sourceUrl: entry.assetUrl,
-          sourceId: source.id,
-          storeId: entry.webStoreId,
-          storeUrl: entry.storeUrl,
-          version: entry.version,
-          sha256: entry.sha256,
-          updatePolicy: existing?.updatePolicy ?? "pinned",
-          status: existing?.status ?? "enabled",
-        };
-
-        if (existing) {
-          const assetChanged = existing.sourceUrl !== entry.assetUrl || Boolean(entry.sha256 && existing.sha256 !== entry.sha256);
-          const installState = existing.installState === "installed" && (existing.version !== entry.version || assetChanged)
-            ? "update-available"
-            : existing.installState === "installed"
-              ? "installed"
-              : "download-pending";
-          extensions.push(await this.options.repository.updateExtension(extensionId, { ...basePatch, installState }));
-          updated += 1;
-        } else {
-          extensions.push(await this.options.repository.createExtension({ ...basePatch, installState: "download-pending" }));
-          imported += 1;
-        }
-      }
-
-      const refreshedSource = await this.options.repository.updateExtensionSource(source.id, {
-        name: index.name || source.name,
-        lastRefreshedAt: nowIso(),
-        lastError: undefined,
-      });
-
-      return { source: refreshedSource, imported, updated, skipped: 0, extensions };
-    } catch (error) {
-      await this.options.repository.updateExtensionSource(source.id, {
-        lastRefreshedAt: nowIso(),
-        lastError: (error as Error).message,
-      });
-      throw error;
-    }
-  }
-
   async install(id: string, options: InUseGuardOptions = {}): Promise<ExtensionEntity> {
     return this.withExtensionMutation([id], () => this.installInternal(id, options));
   }
@@ -998,6 +891,9 @@ export class ExtensionService {
   private async installInternal(id: string, options: InUseGuardOptions = {}): Promise<ExtensionEntity> {
     const extension = await this.getExtensionOrThrow(id);
     await this.assertNotInUse(extension.id, options);
+    if (extension.provenance?.verification.level === "cws-publisher-verified") {
+      return this.ensureVerifiedStoreSnapshot(extension);
+    }
     // Preserve update-available on rollback so the UI Update action and B16 check()
     // path stay available; collapsing to install-failed would hide the pending update.
     const previousInstalledState =
@@ -1017,23 +913,17 @@ export class ExtensionService {
       if (extension.sourceKind === "local-directory") {
         return await this.refreshLocalDirectory(extension);
       }
-      if (extension.provenance?.verification.level === "cws-publisher-verified") {
-        if (extension.localPath && isLoadableInstallState(extension.installState)) {
-          return this.checkInternal(extension.id);
-        }
-        throw Object.assign(new Error("Verified store extension must be reacquired through a provider session."), {
-          status: 409,
-          code: "EXTENSION_STORE_REACQUISITION_REQUIRED",
-        });
-      }
       if (extension.sourceKind === "local-zip" || extension.sourceKind === "local-crx") {
         return await this.installLocalAsset(extension);
       }
       if (extension.sourceKind === "managed-snapshot") {
-        return await this.checkInternal(extension.id);
-      }
-      if (extension.sourceKind === "remote-zip" || extension.sourceKind === "remote-crx") {
-        return await this.installRemoteAsset(extension);
+        if (extension.localPath && isLoadableInstallState(extension.installState)) {
+          return await this.checkInternal(extension.id);
+        }
+        throw Object.assign(new Error("Retired extension source has no local package; reacquire it through Get extensions."), {
+          status: 409,
+          code: "EXTENSION_LEGACY_SOURCE_RETIRED",
+        });
       }
       throw Object.assign(new Error("Chrome Web Store metadata cannot be installed without a verified asset"), {
         status: 409,
@@ -1202,23 +1092,6 @@ export class ExtensionService {
       });
     }
 
-    if (extension.sourceId) {
-      const source = await this.getExtensionSourceOrThrow(extension.sourceId);
-      if (source.status === "disabled") {
-        return this.options.repository.updateExtension(id, {
-          lastCheckedAt: nowIso(),
-          lastError: "Extension source is disabled",
-        });
-      }
-      await this.refreshSourceInternal(source.id);
-      const refreshed = await this.getExtensionOrThrow(id);
-      return this.options.repository.updateExtension(id, {
-        lastCheckedAt: nowIso(),
-        lastError: undefined,
-        installState: refreshed.installState,
-      });
-    }
-
     if (extension.sourceKind === "local-zip" || extension.sourceKind === "local-crx") {
       return this.checkLocalArchiveUpdate(extension);
     }
@@ -1268,13 +1141,15 @@ export class ExtensionService {
       });
     }
     if (extension.provenance?.verification.level === "cws-publisher-verified") {
+      return this.ensureVerifiedStoreSnapshot(extension);
+    }
+    if (extension.sourceKind === "managed-snapshot") {
       if (extension.localPath && isLoadableInstallState(extension.installState)) return this.checkInternal(id);
-      throw Object.assign(new Error("Verified store extension must be reacquired through a provider session."), {
+      throw Object.assign(new Error("Retired extension source has no local package; reacquire it through Get extensions."), {
         status: 409,
-        code: "EXTENSION_STORE_REACQUISITION_REQUIRED",
+        code: "EXTENSION_LEGACY_SOURCE_RETIRED",
       });
     }
-    if (extension.sourceKind === "managed-snapshot") return this.checkInternal(id);
     return this.installInternal(extension.id);
   }
 
@@ -1311,7 +1186,10 @@ export class ExtensionService {
       return this.options.repository.updateExtension(extension.id, { manifestKey: installedKey });
     }
 
-    const manifestKey = (await this.readSourceCrxPublicKey(extension)) ?? generateManifestKey();
+    const localCrxKey = extension.sourceKind === "local-crx"
+      ? await fs.readFile(extension.sourceUrl).then((bytes) => extractCrxPublicKey(bytes)).catch(() => undefined)
+      : undefined;
+    const manifestKey = localCrxKey ?? generateManifestKey();
     await this.options.repository.updateExtension(extension.id, { manifestKey });
     try {
       return await this.installInternal(extension.id);
@@ -2039,82 +1917,6 @@ export class ExtensionService {
     });
   }
 
-  private async installRemoteAsset(extension: ExtensionEntity): Promise<ExtensionEntity> {
-    const allowUnsigned = await this.allowUnsignedRemote(extension);
-    if (!extension.sha256 && !allowUnsigned) {
-      throw Object.assign(new Error("Remote extension sha256 is required"), { status: 400 });
-    }
-    const response = await this.fetchImpl(extension.sourceUrl);
-    if (!response.ok) {
-      throw Object.assign(new Error(`Remote extension download failed: HTTP ${response.status}`), { status: 502 });
-    }
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    const actualSha256 = sha256Hex(bytes);
-    if (extension.sha256 && actualSha256 !== extension.sha256.toLowerCase()) {
-      throw Object.assign(new Error("Remote extension checksum mismatch"), { status: 409 });
-    }
-    const localPath = await this.extractAsset(bytes, extension.sourceKind === "remote-crx" ? "crx" : "zip", extension.id);
-    // Before the key lands on disk: a remote asset only becomes a local package here, so this is the
-    // one point where its manifest can still be read exactly as the publisher shipped it.
-    const manifestSha256 = await readManifestFingerprint(localPath);
-    const manifestKey = await this.applyRemoteManifestKey(extension, localPath, bytes);
-    const manifest = await readManifestFromDirectory(localPath);
-    return this.options.repository.updateExtension(extension.id, {
-      ...extensionFieldsFromManifest(manifest),
-      sha256: actualSha256,
-      manifestSha256,
-      localPath,
-      manifestKey,
-      installState: "installed",
-      lastInstalledAt: nowIso(),
-      lastCheckedAt: nowIso(),
-      lastError: undefined,
-    });
-  }
-
-  private async applyRemoteManifestKey(
-    extension: ExtensionEntity,
-    localPath: string,
-    bytes: Uint8Array,
-  ): Promise<string | undefined> {
-    if (extension.manifestKey) {
-      await applyManifestKey(localPath, extension.manifestKey);
-      return extension.manifestKey;
-    }
-    const firstInstall = !extension.lastInstalledAt
-      && (extension.installState === "download-pending" || extension.installState === "install-failed");
-    if (!firstInstall) return undefined;
-    return this.acquireManifestKey(localPath, extension.sourceKind === "remote-crx" ? bytes : undefined);
-  }
-
-  private async acquireManifestKey(localPath: string, crxBytes?: Uint8Array): Promise<string> {
-    const existing = await readManifestKey(localPath);
-    if (existing) return existing;
-    const manifestKey = (crxBytes && extractCrxPublicKey(crxBytes)) || generateManifestKey();
-    await applyManifestKey(localPath, manifestKey);
-    return manifestKey;
-  }
-
-  /**
-   * Recovers the real CRX developer key so migrating a remote-crx adopts the same identity a
-   * first install would have extracted, instead of generating a second one for the same asset.
-   */
-  private async readSourceCrxPublicKey(extension: ExtensionEntity): Promise<string | undefined> {
-    try {
-      if (extension.sourceKind === "local-crx") {
-        return extractCrxPublicKey(await fs.readFile(extension.sourceUrl));
-      }
-      if (extension.sourceKind !== "remote-crx") return undefined;
-      const response = await this.fetchImpl(extension.sourceUrl);
-      if (!response.ok) return undefined;
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (extension.sha256 && sha256Hex(bytes) !== extension.sha256.toLowerCase()) return undefined;
-      return extractCrxPublicKey(bytes);
-    } catch {
-      return undefined;
-    }
-  }
-
   private async assertNotInUse(extensionId: string, options: InUseGuardOptions = {}): Promise<void> {
     const activeEnvironmentIds = this.options.activeEnvironmentIds?.();
     if (!activeEnvironmentIds || activeEnvironmentIds.size === 0) return;
@@ -2152,6 +1954,197 @@ export class ExtensionService {
           { status: 400 },
         );
       }
+    }
+  }
+
+  private async ensureVerifiedStoreSnapshot(extension: ExtensionEntity): Promise<ExtensionEntity> {
+    let candidate = extension;
+    if (candidate.localPath && isLoadableInstallState(candidate.installState)) {
+      candidate = await this.checkInternal(candidate.id);
+      if (candidate.localPath && isLoadableInstallState(candidate.installState)) return candidate;
+    }
+    try {
+      return await this.restoreVerifiedStoreSnapshot(candidate);
+    } catch (error) {
+      if ((error as { reconciliationRequired?: unknown }).reconciliationRequired) throw error;
+      await this.options.repository.updateExtension(candidate.id, {
+        installState: "local-missing",
+        lastCheckedAt: nowIso(),
+        lastError: (error as Error).message,
+      }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /**
+   * Rebuilds the app-managed unpacked tree from the exact retained Web Store CRX.
+   * This path is deliberately local-only: it re-establishes trust from the bytes
+   * and stored evidence, then publishes only the tree while keeping the retained
+   * artifact immutable. It never consults the update provider or a legacy URL.
+   */
+  private async restoreVerifiedStoreSnapshot(extension: ExtensionEntity): Promise<ExtensionEntity> {
+    const artifactPath = this.canonicalArtifactPath(extension.id);
+    if (
+      extension.sourceKind !== "local-crx"
+      || extension.storeIdentity?.namespace !== "chrome-web-store"
+      || !extension.provenance
+      || !extension.provenance.artifact.retained
+      || extension.provenance.verification.level !== "cws-publisher-verified"
+      || extension.artifactArchivePath !== artifactPath
+      || extension.sourceUrl !== artifactPath
+      || !extension.provenance.artifact.sha256
+      || !extension.provenance.verification.treeSha256
+      || !extension.manifestKey
+    ) {
+      throw Object.assign(new Error("Verified store extension lacks a complete retained local package."), {
+        status: 409,
+        code: "EXTENSION_STORE_REACQUISITION_REQUIRED",
+      });
+    }
+
+    const recoverySessionId = `reinstall-${randomBytes(24).toString("base64url")}`;
+    const recoveryRoot = path.join(this.extensionAcquisitionDir, recoverySessionId);
+    const artifactLink = path.join(recoveryRoot, "artifact.crx");
+    const stagedRoot = path.join(recoveryRoot, "unpacked");
+    await fs.mkdir(recoveryRoot, { recursive: false });
+    try {
+      await validateTransferredExtensionArtifact({
+        extension,
+        artifactPath,
+        expectedSha256: extension.provenance.artifact.sha256,
+        validationDir: stagedRoot,
+        verifyFile: this.verifyStoreCrxFile,
+      });
+      // The validator owns validationDir cleanup for transfer callers. Re-run the
+      // same bounded staging once more as the publication candidate so validated
+      // bytes never cross from an external path and no generic CRX unzip path is used.
+      const verification = await this.verifyStoreCrxFile(artifactPath, extension.storeIdentity.storeId);
+      const packageFacts = await preflightExtensionPackage({
+        archivePath: artifactPath,
+        archiveOffset: verification.zipOffset,
+        archiveLength: verification.zipSize,
+        stagingDir: stagedRoot,
+      });
+      const signedManifestKey = await readManifestKeyExact(packageFacts.stagedRoot);
+      if (signedManifestKey && signedManifestKey !== verification.developerSpkiBase64) {
+        throw acquisitionError("ACQUISITION_IDENTITY_CONFLICT", "The retained signed Manifest key conflicts with its verified developer identity.");
+      }
+      if (!signedManifestKey) await applyManifestKey(packageFacts.stagedRoot, verification.developerSpkiBase64);
+      const publishedTreeFingerprint = await fingerprintStagedExtensionTree(packageFacts.stagedRoot, {
+        maxFiles: 20_000,
+        maxExpandedBytes: 512 * 1024 * 1024,
+      });
+      if (
+        verification.crxSha256 !== extension.provenance.artifact.sha256
+        || verification.crxSize !== extension.provenance.artifact.size
+        || verification.developerDerivedId !== extension.storeIdentity.storeId
+        || verification.developerSpkiSha256 !== extension.provenance.verification.developerKeySha256
+        || verification.publisherSpkiSha256 !== extension.provenance.verification.publisherKeySha256
+        || verification.publisherTrustRootId !== extension.provenance.verification.publisherTrustRootId
+        || verification.publisherTrustRootVersion !== extension.provenance.verification.publisherTrustRootVersion
+        || verification.developerSpkiBase64 !== extension.manifestKey
+        || packageFacts.manifestSha256 !== extension.manifestSha256
+        || packageFacts.name !== extension.name
+        || packageFacts.version !== extension.version
+        || packageFacts.manifestVersion !== extension.manifestVersion
+        || !sameStringSet(packageFacts.permissions, extension.permissions)
+        || !sameStringSet(packageFacts.hostPermissions, extension.hostPermissions)
+        || !sameStringSet(packageFacts.optionalPermissions, extension.optionalPermissions ?? [])
+        || !sameStringSet(packageFacts.optionalHostPermissions, extension.optionalHostPermissions ?? [])
+        || publishedTreeFingerprint.sha256 !== extension.provenance.verification.treeSha256
+      ) {
+        throw acquisitionError("ACQUISITION_COMMIT_FAILED", "The retained extension package no longer matches its verified installed evidence.");
+      }
+
+      // The two-publication journal also protects tree-only recovery. Its artifact
+      // publication is a same-byte temporary hard-free copy, allowing the existing
+      // crash reconciliation state machine to remain the single publication owner.
+      await fs.copyFile(artifactPath, artifactLink, fsConstants.COPYFILE_EXCL);
+      const timestamp = nowIso();
+      const bindings = await this.options.repository.listExtensionEnvironmentBindings(extension.id);
+      const restoredEntity: ExtensionEntity = {
+        ...extension,
+        localPath: path.resolve(this.options.extensionCacheDir, extension.id),
+        installState: "installed",
+        lastInstalledAt: timestamp,
+        lastCheckedAt: timestamp,
+        lastError: undefined,
+        updatedAt: timestamp,
+      };
+      const liveTreePath = restoredEntity.localPath as string;
+      const oldDatabaseFingerprint = extensionDatabaseProjectionFingerprint(extension, bindings);
+      const newDatabaseFingerprint = extensionDatabaseProjectionFingerprint(restoredEntity, bindings);
+      const publications: [ExtensionCommitPublication, ExtensionCommitPublication] = [
+        {
+          kind: "artifact",
+          stagedPath: artifactLink,
+          livePath: artifactPath,
+          asidePath: path.join(path.dirname(artifactPath), `.old-${recoverySessionId}`),
+          oldFingerprint: extension.provenance.artifact.sha256,
+          newFingerprint: extension.provenance.artifact.sha256,
+        },
+        {
+          kind: "tree",
+          stagedPath: packageFacts.stagedRoot,
+          livePath: liveTreePath,
+          asidePath: path.join(this.options.extensionCacheDir, `.old-${extension.id}-${recoverySessionId}`),
+          oldFingerprint: await fingerprintPublishedPath("tree", liveTreePath),
+          newFingerprint: publishedTreeFingerprint.sha256,
+        },
+      ];
+
+      let journal: ExtensionCommitJournalRecord | undefined;
+      try {
+        await syncPublishedTree(packageFacts.stagedRoot);
+        await syncFile(artifactLink);
+        journal = await this.commitJournal.create({
+          sessionId: recoverySessionId,
+          targetExtensionId: extension.id,
+          oldEntityFingerprint: oldDatabaseFingerprint,
+          newEntityFingerprint: newDatabaseFingerprint,
+          publications,
+        });
+        await this.options.acquisitionCommitFaultForTesting?.("prepared");
+        await this.publishCommitFiles(journal);
+        journal = await this.commitJournal.advance(journal, "files-published");
+        await this.options.acquisitionCommitFaultForTesting?.("files-published");
+        await this.options.repository.commitExtensionAcquisition({
+          extension: restoredEntity,
+          expectedExistingUpdatedAt: extension.updatedAt,
+          expectedEnvironmentBindings: bindings,
+          environmentBindings: bindings,
+        });
+        await this.options.acquisitionCommitFaultForTesting?.("database-written");
+        journal = await this.commitJournal.advance(journal, "database-committed");
+        await this.options.acquisitionCommitFaultForTesting?.("database-committed");
+        await this.finalizeCommitFiles(journal);
+        journal = await this.commitJournal.advance(journal, "complete");
+        await this.options.acquisitionCommitFaultForTesting?.("complete");
+        await this.commitJournal.remove(journal);
+        return restoredEntity;
+      } catch (error) {
+        if (!journal) throw error;
+        const databaseState = await this.commitDatabaseState(journal).catch(() => undefined);
+        try {
+          await this.commitJournal.reconcile(journal, {
+            databaseState: (record) => this.commitDatabaseState(record),
+            rollbackFiles: (record) => this.rollbackCommitFiles(record),
+            finalizeFiles: (record) => this.finalizeCommitFiles(record),
+          });
+        } catch (reconciliationError) {
+          throw Object.assign(
+            acquisitionError("ACQUISITION_RECONCILIATION_REQUIRED", "The local reinstall is awaiting durable startup reconciliation."),
+            { reconciliationRequired: true, cause: reconciliationError },
+          );
+        }
+        if (databaseState === "new") {
+          const committed = await this.options.repository.getExtension(extension.id);
+          if (committed) return committed;
+        }
+        throw acquisitionError("ACQUISITION_COMMIT_FAILED", "The local reinstall was rolled back safely.", error);
+      }
+    } finally {
+      await fs.rm(recoveryRoot, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 
@@ -2215,32 +2208,6 @@ export class ExtensionService {
     return extension;
   }
 
-  private async getExtensionSourceOrThrow(id: string): Promise<ExtensionSourceEntity> {
-    const source = await this.options.repository.getExtensionSource(id);
-    if (!source) throw Object.assign(new Error("Extension source does not exist"), { status: 404 });
-    return source;
-  }
-
-  private async fetchSourceIndex(source: ExtensionSourceEntity): Promise<ExtensionSourceIndex> {
-    const response = await this.fetchImpl(source.url);
-    if (!response.ok) {
-      throw Object.assign(new Error(`Extension source refresh failed: HTTP ${response.status}`), { status: 502 });
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(await response.text());
-    } catch (error) {
-      throw Object.assign(new Error(`Extension source index is not valid JSON: ${(error as Error).message}`), { status: 400 });
-    }
-    return parseExtensionSourceIndex(parsed, source.allowUnsignedAssets);
-  }
-
-  private async allowUnsignedRemote(extension: ExtensionEntity): Promise<boolean> {
-    if (!extension.sourceId) return false;
-    const source = await this.options.repository.getExtensionSource(extension.sourceId);
-    return source?.allowUnsignedAssets === true;
-  }
-
   private async assertNoAddedPermissionsForUpdate(extension: ExtensionEntity): Promise<void> {
     const nextManifest = await this.readInstallCandidateManifest(extension);
     const candidate = { ...extension, ...extensionFieldsFromManifest(nextManifest) };
@@ -2277,22 +2244,6 @@ export class ExtensionService {
       }
       return this.readManifestFromAsset(bytes, extension.sourceKind === "local-crx" ? "crx" : "zip", extension.id);
     }
-    if (extension.sourceKind === "remote-zip" || extension.sourceKind === "remote-crx") {
-      const allowUnsigned = await this.allowUnsignedRemote(extension);
-      if (!extension.sha256 && !allowUnsigned) {
-        throw Object.assign(new Error("Remote extension sha256 is required"), { status: 400 });
-      }
-      const response = await this.fetchImpl(extension.sourceUrl);
-      if (!response.ok) {
-        throw Object.assign(new Error(`Remote extension download failed: HTTP ${response.status}`), { status: 502 });
-      }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      const actualSha256 = sha256Hex(bytes);
-      if (extension.sha256 && actualSha256 !== extension.sha256.toLowerCase()) {
-        throw Object.assign(new Error("Remote extension checksum mismatch"), { status: 409 });
-      }
-      return this.readManifestFromAsset(bytes, extension.sourceKind === "remote-crx" ? "crx" : "zip", extension.id);
-    }
     throw Object.assign(new Error("Chrome Web Store metadata cannot be installed without a verified asset"), {
       status: 409,
       code: "EXTENSION_WEB_STORE",
@@ -2325,6 +2276,17 @@ export class ExtensionService {
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
+  }
+
+  private async acquireManifestKey(localPath: string, crxBytes?: Uint8Array): Promise<string> {
+    const existing = await readManifestKey(localPath);
+    if (existing) return existing;
+    // Local imports may be CRX3 packages with a verifiable developer key. Legacy
+    // remote URLs are intentionally never read here; their source authority has
+    // been retired and cannot influence browser identity.
+    const manifestKey = (crxBytes && extractCrxPublicKey(crxBytes)) || generateManifestKey();
+    await applyManifestKey(localPath, manifestKey);
+    return manifestKey;
   }
 
   canonicalArtifactPath(extensionId: string): string {
@@ -3195,71 +3157,6 @@ function isPermissionConfirmationError(error: unknown): boolean {
 
 function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
-}
-
-function extensionIdFromSourceEntry(sourceId: string, entryId: string): string {
-  const digest = sha256Hex(Buffer.from(`${sourceId}:${entryId}`, "utf8")).slice(0, 16);
-  return `extension-${digest}`;
-}
-
-function parseExtensionSourceIndex(input: unknown, allowUnsignedAssets: boolean): ExtensionSourceIndex {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw Object.assign(new Error("Extension source index must be an object"), { status: 400 });
-  }
-  const record = input as Record<string, unknown>;
-  if (record.schemaVersion !== 1) {
-    throw Object.assign(new Error("Extension source index schemaVersion must be 1"), { status: 400 });
-  }
-  if (!Array.isArray(record.extensions)) {
-    throw Object.assign(new Error("Extension source index must include extensions array"), { status: 400 });
-  }
-  return {
-    name: readOptionalString(record.name) ?? "Extension Source",
-    extensions: record.extensions.map((entry, index) => parseExtensionSourceEntry(entry, index, allowUnsignedAssets)),
-  };
-}
-
-function parseExtensionSourceEntry(input: unknown, index: number, allowUnsignedAssets: boolean): ExtensionSourceIndexEntry {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw Object.assign(new Error(`Extension source entry ${index + 1} must be an object`), { status: 400 });
-  }
-  const record = input as Record<string, unknown>;
-  const id = readRequiredString(record.id, `Extension source entry ${index + 1} id`);
-  const name = readRequiredString(record.name, `Extension source entry ${index + 1} name`);
-  const version = readRequiredString(record.version, `Extension source entry ${index + 1} version`);
-  const assetKind = readRequiredString(record.assetKind, `Extension source entry ${index + 1} assetKind`);
-  if (assetKind !== "zip" && assetKind !== "crx") {
-    throw Object.assign(new Error(`Extension source entry ${index + 1} assetKind must be zip or crx`), { status: 400 });
-  }
-  const assetUrl = readRequiredString(record.assetUrl, `Extension source entry ${index + 1} assetUrl`);
-  const sha256 = readOptionalString(record.sha256)?.toLowerCase();
-  if (!sha256 && !allowUnsignedAssets) {
-    throw Object.assign(new Error(`Extension source entry ${index + 1} sha256 is required`), { status: 400 });
-  }
-  if (sha256 && !/^[a-f0-9]{64}$/i.test(sha256)) {
-    throw Object.assign(new Error(`Extension source entry ${index + 1} sha256 must be 64 hex characters`), { status: 400 });
-  }
-  return {
-    id,
-    name,
-    description: readOptionalString(record.description),
-    version,
-    assetKind,
-    assetUrl,
-    sha256,
-    webStoreId: readOptionalString(record.webStoreId),
-    storeUrl: readOptionalString(record.storeUrl),
-  };
-}
-
-function readRequiredString(value: unknown, label: string): string {
-  const normalized = readOptionalString(value);
-  if (!normalized) throw Object.assign(new Error(`${label} cannot be empty`), { status: 400 });
-  return normalized;
-}
-
-function readOptionalString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 /**

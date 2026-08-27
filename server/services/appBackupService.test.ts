@@ -127,6 +127,70 @@ test("schema-v2 backup round-trips retained verified CRX evidence with receiving
   targetRepository.close();
 });
 
+test("schema-v1 backup restores legacy remote rows only through inert retirement provenance", async () => {
+  const sourceDirectory = await makeTempDir();
+  const sourceRepository = new SqlitePanelRepository({ dataDir: sourceDirectory, seed: () => [] });
+  const extensionRoot = await writeExtensionDirectory(sourceDirectory, "legacy-v1-extension");
+  const extension = await sourceRepository.createExtension({
+    id: "legacy-v1-extension",
+    name: "Legacy V1 Extension",
+    sourceKind: "local-directory",
+    sourceUrl: extensionRoot,
+    localPath: extensionRoot,
+    installState: "installed",
+    updatePolicy: "auto",
+    manifestKey: "legacy-browser-key",
+  });
+  const backupPath = path.join(sourceDirectory, "legacy-v1.cbpb");
+  await makeService(sourceDirectory, sourceRepository).exportToBackup({ outputPath: backupPath });
+
+  const entries = unzipSync(await fs.readFile(backupPath));
+  const manifest = JSON.parse(Buffer.from(entries["manifest.json"]).toString("utf8"));
+  const data = JSON.parse(Buffer.from(entries["data.json"]).toString("utf8"));
+  manifest.schemaVersion = 1;
+  manifest.counts.extensionSources = 1;
+  delete manifest.counts.retainedExtensionArtifacts;
+  data.schemaVersion = 1;
+  data.extensionSources = [{
+    id: "legacy-source",
+    name: "Legacy source",
+    url: "https://legacy.example/index.json",
+    status: "enabled",
+    allowUnsignedAssets: false,
+    createdAt: "2025-01-01T00:00:00.000Z",
+    updatedAt: "2025-01-02T00:00:00.000Z",
+  }];
+  delete data.retainedExtensionArtifacts;
+  Object.assign(data.extensions[0], {
+    sourceKind: "remote-zip",
+    sourceUrl: "https://legacy.example/extension.zip",
+    sourceId: "legacy-source",
+    updatePolicy: "auto",
+    installState: "installed",
+  });
+  entries["manifest.json"] = Buffer.from(JSON.stringify(manifest));
+  entries["data.json"] = Buffer.from(JSON.stringify(data));
+  await fs.writeFile(backupPath, zipSync(entries));
+  sourceRepository.close();
+
+  const targetDirectory = await makeTempDir();
+  const targetRepository = new SqlitePanelRepository({ dataDir: targetDirectory, seed: () => [] });
+  await makeService(targetDirectory, targetRepository).restoreFromBackup({ inputPath: backupPath });
+  const restored = await targetRepository.getExtension(extension.id);
+
+  assert.equal(restored?.id, extension.id);
+  assert.equal(restored?.sourceKind, "managed-snapshot");
+  assert.equal(restored?.sourceUrl, "");
+  assert.equal(restored?.sourceId, undefined);
+  assert.equal(restored?.updateProviderId, undefined);
+  assert.equal(restored?.updatePolicy, "pinned");
+  assert.equal(restored?.localPath, path.join(targetDirectory, "extensions", extension.id));
+  assert.equal(restored?.manifestKey, "legacy-browser-key");
+  assert.equal(restored?.provenance?.verification.level, "legacy-unknown");
+  assert.equal(restored?.provenance?.artifact.legacySourceUrl, "https://legacy.example/extension.zip");
+  targetRepository.close();
+});
+
 test("app backup export and restore replaces app data, browser data, and extension files", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
@@ -178,6 +242,13 @@ test("app backup export and restore replaces app data, browser data, and extensi
   assert.equal(exported.counts.runtimeExtensions, 1);
   const exportedEntries = unzipSync(await fs.readFile(backupPath));
   assert.equal(Object.keys(exportedEntries).some((entry) => entry.startsWith("extension-runtimes/")), false);
+  const exportedData = JSON.parse(Buffer.from(exportedEntries["data.json"]).toString("utf8")) as {
+    extensions: Array<{ sourceKind?: string; sourceUrl?: string; localPath?: string; directoryMode?: string }>;
+  };
+  assert.equal(exportedData.extensions[0]?.sourceKind, "managed-snapshot");
+  assert.equal(exportedData.extensions[0]?.sourceUrl, "");
+  assert.equal(exportedData.extensions[0]?.localPath, undefined);
+  assert.equal(exportedData.extensions[0]?.directoryMode, undefined);
 
   await repository.createProfile({ name: "Will Be Removed" });
   await fs.rm(path.join(directory, "browser-data", profile.id), { recursive: true, force: true });

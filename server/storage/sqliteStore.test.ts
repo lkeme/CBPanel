@@ -25,6 +25,42 @@ test("empty SQLite store seeds default profiles and settings", async () => {
   repository.close();
 });
 
+test("storage info reports every legacy source migration issue, including omitted details", async () => {
+  const directory = await makeTempDir();
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  await repository.initialize();
+  repository.close();
+
+  const database = new DatabaseSync(path.join(directory, "cbpanel.sqlite"));
+  database.prepare(`
+    INSERT INTO storage_metadata (key, value)
+    VALUES (?, ?)
+  `).run("extension_source_retirement_migration", JSON.stringify({
+    migrationVersion: 1,
+    completedAt: "2026-08-27T00:00:00.000Z",
+    report: {
+      issues: [
+        { extensionId: "legacy-1", code: "LEGACY_SOURCE_MIGRATED" },
+        { extensionId: "legacy-2", code: "LEGACY_SOURCE_LOCAL_MISSING" },
+      ],
+      counts: { migrated: 2, issuesOmitted: 3 },
+      snapshot: { snapshotPath: path.join(directory, "before-retirement.sqlite") },
+    },
+  }));
+  database.close();
+
+  const reopened = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const info = await reopened.getInfo();
+  assert.deepEqual(info.extensionSourceRetirement, {
+    migrationVersion: 1,
+    completedAt: "2026-08-27T00:00:00.000Z",
+    snapshotPath: path.join(directory, "before-retirement.sqlite"),
+    migrated: 2,
+    issues: 5,
+  });
+  reopened.close();
+});
+
 test("valid legacy profiles.json migrates into SQLite and creates a backup copy", async () => {
   const directory = await makeTempDir();
   const legacyProfile = defaultProfile({
@@ -438,21 +474,6 @@ test("registry create methods ignore blank ids instead of overwriting existing r
   assert.equal(extensions.some((extension) => extension.name === "Extension A"), true);
   assert.equal(extensions.some((extension) => extension.name === "Extension B"), true);
 
-  const firstSource = await repository.createExtensionSource({
-    id: "",
-    name: "Source A",
-    url: "https://extensions-a.example.test/index.json",
-  });
-  const secondSource = await repository.createExtensionSource({
-    id: "",
-    name: "Source B",
-    url: "https://extensions-b.example.test/index.json",
-  });
-  const sources = await repository.listExtensionSources();
-  assert.notEqual(firstSource.id, secondSource.id);
-  assert.equal(sources.some((source) => source.name === "Source A"), true);
-  assert.equal(sources.some((source) => source.name === "Source B"), true);
-
   repository.close();
 });
 
@@ -505,20 +526,6 @@ test("registry create methods reject duplicate ids instead of upserting existing
     }),
   );
   assert.equal((await repository.listExtensions()).find((item) => item.id === extension.id)?.name, "Extension A");
-
-  const source = await repository.createExtensionSource({
-    id: "extension-source-duplicate",
-    name: "Source A",
-    url: "https://extensions-a.example.test/index.json",
-  });
-  await assertDuplicateId(
-    repository.createExtensionSource({
-      id: source.id,
-      name: "Source B",
-      url: "https://extensions-b.example.test/index.json",
-    }),
-  );
-  assert.equal((await repository.listExtensionSources()).find((item) => item.id === source.id)?.name, "Source A");
 
   repository.close();
 });
@@ -1108,6 +1115,69 @@ test("older extension tables gain nullable acquisition columns without invented 
     assert.equal(columns.includes(column), true, column);
   }
   verify.close();
+});
+
+test("unknown persisted HTTP source kinds stay inert even after the retirement marker exists", async () => {
+  const directory = await makeTempDir();
+  const databasePath = path.join(directory, "cbpanel.sqlite");
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const extension = await repository.createExtension({
+    name: "Intermediate remote row",
+    sourceKind: "chrome-web-store",
+    installState: "metadata-only",
+  });
+  repository.close();
+
+  const raw = new DatabaseSync(databasePath);
+  raw.prepare(`
+    UPDATE extensions
+    SET source_kind = ?, source_url = ?, source_id = NULL
+    WHERE id = ?
+  `).run("intermediate-remote", "https://legacy.example/intermediate.crx", extension.id);
+  raw.prepare("INSERT INTO storage_metadata (key, value) VALUES (?, ?)").run(
+    "extension_source_retirement_migration",
+    JSON.stringify({ migrationVersion: 1, completedAt: "2026-08-27T00:00:00.000Z", report: { issues: [], counts: { migrated: 0, issuesOmitted: 0 } } }),
+  );
+  raw.close();
+
+  const reopened = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const projected = await reopened.getExtension(extension.id);
+  assert.equal(projected?.sourceKind, "managed-snapshot");
+  assert.equal(projected?.sourceUrl, "");
+  assert.equal(projected?.sourceId, undefined);
+  assert.equal(projected?.updateProviderId, undefined);
+  assert.equal(projected?.updateState?.status, "provider-disabled");
+  assert.equal(projected?.updatePolicy, "pinned");
+  reopened.close();
+});
+
+test("stale installed legacy authority without local bytes projects as local-missing", async () => {
+  const directory = await makeTempDir();
+  const databasePath = path.join(directory, "cbpanel.sqlite");
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const extension = await repository.createExtension({
+    name: "Stale installed remote row",
+    sourceKind: "local-directory",
+    installState: "installed",
+  });
+  repository.close();
+
+  const raw = new DatabaseSync(databasePath);
+  raw.prepare(`
+    UPDATE extensions
+    SET source_kind = 'remote-crx', source_url = ?, source_id = 'retired-source',
+        install_state = 'update-available', local_path = NULL
+    WHERE id = ?
+  `).run("https://legacy.example/stale.crx", extension.id);
+  raw.close();
+
+  const reopened = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const projected = await reopened.getExtension(extension.id);
+  assert.equal(projected?.sourceKind, "managed-snapshot");
+  assert.equal(projected?.sourceUrl, "");
+  assert.equal(projected?.installState, "local-missing");
+  assert.equal(projected?.updatePolicy, "pinned");
+  reopened.close();
 });
 
 test("malformed or unknown persisted acquisition authority fails closed", async () => {

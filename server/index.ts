@@ -21,7 +21,6 @@ import {
   readExtensionPreferencePatch,
   readImportConflictHeaders,
   readImportConflictOptions,
-  readLegacyRemoteExtensionCreateBody,
   readUnbindEnvironmentIds,
   readUploadedArchive,
 } from "./lib/extensionRequest";
@@ -247,7 +246,6 @@ async function panelState(): Promise<PanelState> {
     tags,
     proxies,
     extensions,
-    extensionSources,
     trash,
     settings,
     storage,
@@ -258,7 +256,6 @@ async function panelState(): Promise<PanelState> {
     repository.listTags(),
     repository.listProxies(),
     repository.listExtensions(),
-    repository.listExtensionSources(),
     repository.listTrashEnvironments(),
     repository.getSettings(),
     repository.getInfo(),
@@ -270,7 +267,6 @@ async function panelState(): Promise<PanelState> {
     tags,
     proxies,
     extensions,
-    extensionSources,
     trash,
     sessions: sessionService.listSessions(),
     meta: {
@@ -315,9 +311,8 @@ async function proxyUrlForEntity(proxyId: string): Promise<string> {
 // IP, timezone and locale a `geoip: true` launch through that proxy would apply. Without one nothing is
 // resolved and no network call is made, which is how upstream leaves plain `info`.
 async function systemDiagnostics(proxyUrl?: string): Promise<SystemDiagnostics> {
-  const [storage, extensionSources, extensions, settings, browserCoreDiagnostics] = await Promise.all([
+  const [storage, extensions, settings, browserCoreDiagnostics] = await Promise.all([
     repository.getInfo(),
-    repository.listExtensionSources(),
     repository.listExtensions(),
     repository.getSettings(),
     binaryService.readWrapperDiagnostics({ quick: true, proxy: proxyUrl }),
@@ -331,14 +326,6 @@ async function systemDiagnostics(proxyUrl?: string): Promise<SystemDiagnostics> 
       source: `extension:${extension.name}`,
       message: extension.lastError ?? "",
     }));
-  const sourceErrors = extensionSources
-    .filter((source) => source.lastError)
-    .map((source) => ({
-      at: source.lastRefreshedAt ?? source.updatedAt,
-      source: `extension-source:${source.name}`,
-      message: source.lastError ?? "",
-    }));
-
   return {
     checkedAt: new Date().toISOString(),
     schemaVersion: 3,
@@ -362,17 +349,12 @@ async function systemDiagnostics(proxyUrl?: string): Promise<SystemDiagnostics> 
       providerUrl: traceProvider.url,
       timeoutSeconds: settings.networkTrace.timeoutSeconds,
     },
-    extensionSources: {
-      total: extensionSources.length,
-      enabled: extensionSources.filter((source) => source.status === "enabled").length,
-      lastError: sourceErrors.at(-1)?.message,
-    },
     extensionCache: {
       directory: path.join(DATA_DIR, "extensions"),
       installedCount: extensions.filter((extension) => extension.installState === "installed").length,
     },
     browserCoreDiagnostics,
-    recentErrors: [...extensionErrors, ...sourceErrors]
+    recentErrors: extensionErrors
       .sort((left, right) => right.at.localeCompare(left.at))
       .slice(0, 20),
   };
@@ -783,7 +765,6 @@ async function createApp(): Promise<express.Express> {
         tags: await repository.listTags(),
         proxies: await repository.listProxies({ includeSecrets }),
         extensions: await repository.listExtensions(),
-        extensionSources: await repository.listExtensionSources(),
       });
     } catch (error) {
       sendError(response, error);
@@ -1156,15 +1137,6 @@ async function createApp(): Promise<express.Express> {
     }
   });
 
-  app.post("/api/extensions", async (request, response) => {
-    try {
-      const body = readLegacyRemoteExtensionCreateBody(request.body);
-      response.status(201).json(await extensionService.createRemote(body));
-    } catch (error) {
-      sendError(response, error);
-    }
-  });
-
   app.put("/api/extensions/:id", async (request, response) => {
     try {
       const patch = readExtensionPreferencePatch(request.body);
@@ -1319,25 +1291,6 @@ async function createApp(): Promise<express.Express> {
     }
   });
 
-  app.post("/api/extensions/:id/update-provider", async (request, response) => {
-    try {
-      if (!request.body || typeof request.body !== "object" || Array.isArray(request.body)) {
-        throw Object.assign(new Error("Update provider request must be an object."), { status: 400, code: "ACQUISITION_INPUT_UNSUPPORTED" });
-      }
-      const keys = Object.keys(request.body);
-      if (keys.length !== 1 || !keys.includes("providerId")) {
-        throw Object.assign(new Error("Update provider request contains unsupported fields."), { status: 400, code: "ACQUISITION_INPUT_UNSUPPORTED" });
-      }
-      const providerId = request.body.providerId;
-      if (providerId !== "chrome-web-store" && providerId !== "crxsoso") {
-        throw Object.assign(new Error("Update provider is unsupported."), { status: 400, code: "ACQUISITION_UPDATE_PROVIDER_INVALID" });
-      }
-      response.json(await extensionService.transitionUpdateProvider(request.params.id, providerId));
-    } catch (error) {
-      sendError(response, error);
-    }
-  });
-
   app.post("/api/extensions/:id/reinstall", async (request, response) => {
     try {
       response.json(await extensionService.reinstall(request.params.id));
@@ -1367,47 +1320,6 @@ async function createApp(): Promise<express.Express> {
     try {
       const environmentIds = readUnbindEnvironmentIds(request.body?.environmentIds);
       response.json(await extensionService.unbindFromEnvironments(request.params.id, environmentIds));
-    } catch (error) {
-      sendError(response, error);
-    }
-  });
-
-  app.get("/api/extension-sources", async (_request, response) => {
-    try {
-      response.json(await repository.listExtensionSources());
-    } catch (error) {
-      sendError(response, error);
-    }
-  });
-
-  app.post("/api/extension-sources", async (request, response) => {
-    try {
-      response.status(201).json(await repository.createExtensionSource(request.body ?? {}));
-    } catch (error) {
-      sendError(response, error);
-    }
-  });
-
-  app.put("/api/extension-sources/:id", async (request, response) => {
-    try {
-      response.json(await repository.updateExtensionSource(request.params.id, request.body ?? {}));
-    } catch (error) {
-      sendError(response, error);
-    }
-  });
-
-  app.post("/api/extension-sources/:id/refresh", async (request, response) => {
-    try {
-      response.json(await extensionService.refreshSource(request.params.id));
-    } catch (error) {
-      sendError(response, error);
-    }
-  });
-
-  app.delete("/api/extension-sources/:id", async (request, response) => {
-    try {
-      await repository.deleteExtensionSource(request.params.id);
-      response.status(204).end();
     } catch (error) {
       sendError(response, error);
     }
@@ -1821,6 +1733,15 @@ let server: http.Server;
 let shutdownPromise: Promise<void> | undefined;
 
 async function main(): Promise<void> {
+  await repository.initialize();
+  const retirementLease = dataMutationCoordinator.enter("extension-cache-commit");
+  try {
+    await retirementLease.runWithExtensions(["extension-source-retirement"], () => (
+      repository.retireLegacyExtensionSources(path.join(DATA_DIR, "migration-backups", "before-extension-source-retirement.sqlite"))
+    ));
+  } finally {
+    retirementLease.release();
+  }
   await extensionService.initialize();
   await extensionAcquisitionSessionService.initialize();
   const app = await createApp();

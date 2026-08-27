@@ -9,13 +9,14 @@ import type {
 } from "./extensionAcquisition";
 
 export type EntityStatus = "enabled" | "disabled";
+/** Decode-only values retained for live-DB/v1 retirement; never new network authority. */
+export type LegacyExtensionSourceKind = "remote-zip" | "remote-crx";
 export type ExtensionSourceKind =
   | "local-directory"
   | "local-zip"
   | "local-crx"
   | "managed-snapshot"
-  | "remote-zip"
-  | "remote-crx"
+  | LegacyExtensionSourceKind
   | "chrome-web-store";
 export type ExtensionInstallState =
   | "metadata-only"
@@ -145,6 +146,7 @@ export interface ExtensionEntity {
   description: string;
   sourceKind: ExtensionSourceKind;
   sourceUrl: string;
+  /** Decode-only legacy source relation; migration clears it before normal use. */
   sourceId?: string;
   storeId?: string;
   storeUrl?: string;
@@ -226,26 +228,6 @@ export function normalizeExtensionBindingMetadata(input: unknown): ExtensionBind
 
 function invalidExtensionBindingMetadata(message: string): Error {
   return Object.assign(new Error(message), { status: 400 });
-}
-
-export interface ExtensionSourceEntity {
-  id: string;
-  name: string;
-  url: string;
-  status: EntityStatus;
-  allowUnsignedAssets: boolean;
-  lastRefreshedAt?: string;
-  lastError?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface ExtensionSourceRefreshResult {
-  source: ExtensionSourceEntity;
-  imported: number;
-  updated: number;
-  skipped: number;
-  extensions: ExtensionEntity[];
 }
 
 export interface ExtensionDirectoryCandidate {
@@ -346,11 +328,6 @@ export interface SystemDiagnostics {
     providerUrl: string;
     timeoutSeconds: number;
   };
-  extensionSources: {
-    total: number;
-    enabled: number;
-    lastError?: string;
-  };
   extensionCache: ExtensionCacheDiagnostics;
   browserCoreDiagnostics?: CloakBrowserDiagnostics;
   recentErrors: Array<{
@@ -366,6 +343,5 @@ export interface RegistryState {
   tags: TagEntity[];
   proxies: ProxyEntity[];
   extensions: ExtensionEntity[];
-  extensionSources: ExtensionSourceEntity[];
   trash: TrashEnvironment[];
 }

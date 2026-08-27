@@ -77,7 +77,7 @@ export function RegistryListShell<T>({
   filterEmptyBody: string;
   filterEmptyTitle: string;
   filterResetLabel: string;
-  /** Rendered after the list, still inside the scrolling body — the extension sources subsection. */
+  /** Rendered after the list, still inside the scrolling body. */
   footer?: ReactNode;
   haystack: (item: T) => string;
   icon: ReactNode;

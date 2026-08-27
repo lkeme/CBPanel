@@ -239,6 +239,106 @@ test("one canonical metadata-only row upgrades in place after verified acquisiti
   repository.close();
 });
 
+test("verified reinstall rebuilds a missing unpacked tree from the retained CRX without network access", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-retained-reinstall-"));
+  const setup = await committedStoreExtension(directory);
+  const beforeBinding = await setup.repository.listEnvironmentExtensionBindings(setup.environmentId);
+  const artifactPath = setup.extension.artifactArchivePath as string;
+  const artifactBytes = await fs.readFile(artifactPath);
+  await fs.rm(setup.extension.localPath as string, { recursive: true, force: true });
+
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = (async () => {
+    fetchCalls += 1;
+    throw new Error("retained reinstall must not fetch");
+  }) as typeof fetch;
+  try {
+    const restored = await setup.service.reinstall(setup.extension.id);
+    assert.equal(fetchCalls, 0);
+    assert.equal(restored.id, setup.extension.id);
+    assert.equal(restored.createdAt, setup.extension.createdAt);
+    assert.equal(restored.storeIdentity?.storeId, setup.fixture.storeId);
+    assert.equal(restored.provenance?.verification.level, "cws-publisher-verified");
+    assert.equal(restored.manifestKey, setup.fixture.developerSpkiBase64);
+    assert.equal(restored.installState, "installed");
+    assert.equal(restored.localPath, path.join(directory, "extensions", restored.id));
+    assert.equal(await exists(path.join(restored.localPath, "manifest.json")), true);
+    assert.deepEqual(await fs.readFile(artifactPath), artifactBytes);
+    assert.deepEqual(
+      await setup.repository.listEnvironmentExtensionBindings(setup.environmentId),
+      beforeBinding,
+    );
+    assert.deepEqual(await fs.readdir(path.join(directory, "extension-acquisition-journal")), []);
+  } finally {
+    globalThis.fetch = originalFetch;
+    setup.repository.close();
+  }
+});
+
+for (const phase of ["files-published", "database-written"] as const) {
+  test(`retained reinstall reconciles a ${phase} publication fault`, async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), `cbpanel-retained-${phase}-`));
+    const setup = await committedStoreExtension(directory);
+    const artifactPath = setup.extension.artifactArchivePath as string;
+    const artifactBytes = await fs.readFile(artifactPath);
+    await fs.rm(setup.extension.localPath as string, { recursive: true, force: true });
+    let injected = false;
+    const recovering = new ExtensionService({
+      repository: setup.repository,
+      extensionCacheDir: path.join(directory, "extensions"),
+      extensionArtifactDir: path.join(directory, "extension-artifacts"),
+      extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
+      readSettings: async () => normalizeSettings(),
+      verifyStoreCrxFileForTesting: setup.verifier.verifyFile,
+      acquisitionCommitFaultForTesting: (current) => {
+        if (!injected && current === phase) {
+          injected = true;
+          throw new Error(`fault:${phase}`);
+        }
+      },
+      activeEnvironmentIds: () => new Set(),
+    });
+    await recovering.initialize();
+
+    if (phase === "database-written") {
+      const restored = await recovering.reinstall(setup.extension.id);
+      assert.equal(restored.installState, "installed");
+      assert.equal(await exists(path.join(restored.localPath as string, "manifest.json")), true);
+    } else {
+      await assert.rejects(
+        recovering.reinstall(setup.extension.id),
+        (error: unknown) => (error as { code?: string }).code === "ACQUISITION_COMMIT_FAILED",
+      );
+      const failed = await setup.repository.getExtension(setup.extension.id);
+      assert.equal(failed?.installState, "local-missing");
+      assert.equal(await exists(path.join(directory, "extensions", setup.extension.id)), false);
+      const retried = await setup.service.reinstall(setup.extension.id);
+      assert.equal(retried.installState, "installed");
+    }
+    assert.deepEqual(await fs.readFile(artifactPath), artifactBytes);
+    assert.deepEqual(await fs.readdir(path.join(directory, "extension-acquisition-journal")), []);
+    setup.repository.close();
+  });
+}
+
+test("verified reinstall rejects a tampered retained CRX and leaves the row local-missing", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-retained-tamper-"));
+  const setup = await committedStoreExtension(directory);
+  await fs.rm(setup.extension.localPath as string, { recursive: true, force: true });
+  const artifactPath = setup.extension.artifactArchivePath as string;
+  const bytes = await fs.readFile(artifactPath);
+  bytes[bytes.byteLength - 1] ^= 0xff;
+  await fs.writeFile(artifactPath, bytes);
+
+  await assert.rejects(setup.service.reinstall(setup.extension.id));
+  const failed = await setup.repository.getExtension(setup.extension.id);
+  assert.equal(failed?.installState, "local-missing");
+  assert.equal(await exists(path.join(directory, "extensions", setup.extension.id)), false);
+  assert.deepEqual(await fs.readdir(path.join(directory, "extension-acquisition-journal")), []);
+  setup.repository.close();
+});
+
 async function prepareAcquisition(
   directory: string,
   bytes: Uint8Array,
@@ -316,6 +416,40 @@ async function prepareAcquisition(
       conflicts: [],
     },
   };
+}
+
+async function committedStoreExtension(directory: string): Promise<{
+  repository: SqlitePanelRepository;
+  service: ExtensionService;
+  extension: Awaited<ReturnType<ExtensionService["commitPreparedAcquisition"]>>;
+  environmentId: string;
+  fixture: ReturnType<typeof createSyntheticStoreCrx3>;
+  verifier: ReturnType<typeof createCrx3VerifierForTesting>;
+}> {
+  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
+  const environment = await repository.createProfile({ name: "Retained Reinstall Environment" });
+  const fixture = createSyntheticStoreCrx3({
+    name: "Retained Reinstall Extension",
+    version: "1.0.0",
+    permissions: ["storage"],
+    hostPermissions: [],
+  });
+  const verifier = createCrx3VerifierForTesting(fixture.publisherSpkiSha256);
+  const service = new ExtensionService({
+    repository,
+    extensionCacheDir: path.join(directory, "extensions"),
+    extensionArtifactDir: path.join(directory, "extension-artifacts"),
+    extensionAcquisitionDir: path.join(directory, "extension-acquisitions"),
+    readSettings: async () => normalizeSettings(),
+    verifyStoreCrxFileForTesting: verifier.verifyFile,
+    activeEnvironmentIds: () => new Set(),
+  });
+  await service.initialize();
+  const extension = await service.commitPreparedAcquisition(
+    await prepareAcquisition(directory, fixture.bytes, fixture.storeId, verifier.verifyFile),
+    { disposition: "create", environmentIds: [environment.id] },
+  );
+  return { repository, service, extension, environmentId: environment.id, fixture, verifier };
 }
 
 async function exists(candidate: string): Promise<boolean> {

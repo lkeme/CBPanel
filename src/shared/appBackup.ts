@@ -3,7 +3,6 @@ import {
   type BrowserEnvironment,
   type ExtensionEntity,
   type ExtensionBindingMetadata,
-  type ExtensionSourceEntity,
   type GroupEntity,
   type ProxyEntity,
   type TagEntity,
@@ -38,6 +37,19 @@ export interface AppBackupCountsV1 {
   runtimeExtensions: number;
 }
 
+/** V1 compatibility payload only; never exposed as a live source authority. */
+export interface LegacyExtensionSourceRecord {
+  id: string;
+  name: string;
+  url: string;
+  status: "enabled" | "disabled";
+  allowUnsignedAssets: boolean;
+  lastRefreshedAt?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AppBackupManifestV1 {
   kind: typeof APP_BACKUP_KIND;
   schemaVersion: typeof APP_BACKUP_SCHEMA_VERSION_V1;
@@ -57,7 +69,7 @@ export interface AppBackupDataV1 {
   tags: TagEntity[];
   proxies: ProxyEntity[];
   extensions: LegacyTransferExtension[];
-  extensionSources: ExtensionSourceEntity[];
+  extensionSources: LegacyExtensionSourceRecord[];
   environmentExtensionBindings?: ExtensionBindingMetadata[];
 }
 
@@ -111,7 +123,7 @@ export function decodeAppBackupData(input: unknown): AnyAppBackupData {
       schemaVersion: APP_BACKUP_SCHEMA_VERSION_V1,
       ...common,
       extensions: common.extensions.map((extension) => extensionForLegacyTransfer(extension)),
-      extensionSources: record.extensionSources as ExtensionSourceEntity[],
+      extensionSources: record.extensionSources as LegacyExtensionSourceRecord[],
       environmentExtensionBindings: normalizeExtensionBindingMetadata(record.environmentExtensionBindings),
     };
   }

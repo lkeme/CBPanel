@@ -11,7 +11,6 @@ import {
   readExtensionPreferencePatch,
   readImportConflictHeaders,
   readImportConflictOptions,
-  readLegacyRemoteExtensionCreateBody,
   readUnbindEnvironmentIds,
   readUploadedArchive,
 } from "./extensionRequest";
@@ -111,31 +110,6 @@ test("extension preference patches construct a strict status/update-policy allow
     assert.equal((error as { code?: string }).code, "EXTENSION_UPDATE_POLICY_INVALID");
     return true;
   });
-});
-
-test("legacy remote creation has a separate bounded decoder", () => {
-  assert.deepEqual(readLegacyRemoteExtensionCreateBody({
-    sourceKind: "remote-crx",
-    sourceUrl: " https://example.com/extension.crx ",
-    sha256: "A".repeat(64),
-    storeId: "attacker-store-id",
-    provenance: { verification: { level: "cws-publisher-verified" } },
-  }), {
-    sourceKind: "remote-crx",
-    sourceUrl: "https://example.com/extension.crx",
-    sha256: "a".repeat(64),
-  });
-  for (const invalid of [
-    {},
-    { sourceKind: "local-crx", sourceUrl: "https://example.com/a.crx", sha256: "a".repeat(64) },
-    { sourceKind: "remote-crx", sourceUrl: "", sha256: "a".repeat(64) },
-    { sourceKind: "remote-crx", sourceUrl: "https://example.com/a.crx", sha256: "bad" },
-  ]) {
-    assert.throws(() => readLegacyRemoteExtensionCreateBody(invalid), (error: unknown) => {
-      assert.equal((error as { status?: number }).status, 400);
-      return true;
-    });
-  }
 });
 
 test("sanitized PUT bodies cannot rewrite the pinned identity or the copy snapshot", async () => {

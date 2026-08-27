@@ -2967,26 +2967,6 @@ dl.browser-core-download-details .mono-cell {
   }
 }
 
-.module-list-row.extension-source-row {
-  grid-template-columns: minmax(260px, 1fr) auto auto minmax(220px, auto);
-  align-items: center;
-}
-
-/* Source urls are long, so this cell also clips instead of wrapping. */
-.extension-source-row > span > strong,
-.extension-source-row > span > small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.extension-source-row > small {
-  min-width: 0;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
 @media (max-width: 980px) {
   .registry-filter-summary {
     margin-left: 0;

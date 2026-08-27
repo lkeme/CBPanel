@@ -16,7 +16,6 @@ import type {
   ExtensionEntity,
   ExtensionInstallState,
   ExtensionPermissionRisk,
-  ExtensionSourceEntity,
   ExtensionSourceKind,
   ExtensionUpdatePolicy,
   GroupEntity,
@@ -53,6 +52,13 @@ import type {
   ExtensionAcquisitionDatabaseCommitInput,
   PanelRepository,
 } from "./types";
+import {
+  createSqliteRetirementStore,
+  EXTENSION_SOURCE_RETIREMENT_MARKER_KEY,
+  runExtensionSourceRetirement,
+  type ExtensionSourceRetirementReport,
+  type LegacySourceRetirementStore,
+} from "../services/extensionSourceRetirementMigration";
 
 type SqliteStoreOptions = {
   dataDir: string;
@@ -162,18 +168,6 @@ type ExtensionRow = {
   updated_at: string;
 };
 
-type ExtensionSourceRow = {
-  id: string;
-  name: string;
-  url: string;
-  status: EntityStatus;
-  allow_unsigned_assets: number;
-  last_refreshed_at: string | null;
-  last_error: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
 type IdRow = {
   id: string;
 };
@@ -184,7 +178,7 @@ type EnvironmentExtensionBindingRow = {
   lifecycle_revision: string | null;
 };
 
-type IdentityTable = "profiles" | "browser_environments" | "groups" | "tags" | "proxies" | "extensions" | "extension_sources";
+type IdentityTable = "profiles" | "browser_environments" | "groups" | "tags" | "proxies" | "extensions";
 
 type SettingsRow = {
   settings_json: string;
@@ -827,6 +821,24 @@ export class SqlitePanelRepository implements PanelRepository {
     return updated;
   }
 
+  /**
+   * Exposes the narrow, transaction-aware view used by the one-way legacy
+   * source retirement. It intentionally bypasses ordinary timestamp-updating
+   * extension writes so migration can preserve the historical row exactly.
+   */
+  legacySourceRetirementStore(): LegacySourceRetirementStore {
+    return createSqliteRetirementStore(this.database());
+  }
+
+  async retireLegacyExtensionSources(snapshotPath: string): Promise<ExtensionSourceRetirementReport> {
+    await this.initialize();
+    return runExtensionSourceRetirement({
+      store: this.legacySourceRetirementStore(),
+      databasePath: this.databasePath,
+      snapshotPath,
+    });
+  }
+
   async commitExtensionAcquisition(input: ExtensionAcquisitionDatabaseCommitInput): Promise<ExtensionEntity> {
     await this.initialize();
     const extension = normalizeExtensionEntity(input.extension);
@@ -1002,60 +1014,6 @@ export class SqlitePanelRepository implements PanelRepository {
     }
     this.refreshProfilesFromEnvironments(affected);
     return affected.map((environmentId) => this.getEnvironmentOrThrow(environmentId));
-  }
-
-  async listExtensionSources(): Promise<ExtensionSourceEntity[]> {
-    await this.initialize();
-    return this.database()
-      .prepare("SELECT * FROM extension_sources ORDER BY updated_at DESC")
-      .all()
-      .map((row) => extensionSourceFromRow(row as ExtensionSourceRow));
-  }
-
-  async getExtensionSource(id: string): Promise<ExtensionSourceEntity | undefined> {
-    await this.initialize();
-    const row = this.database().prepare("SELECT * FROM extension_sources WHERE id = ?").get(id) as ExtensionSourceRow | undefined;
-    return row ? extensionSourceFromRow(row) : undefined;
-  }
-
-  async createExtensionSource(input: Partial<ExtensionSourceEntity>): Promise<ExtensionSourceEntity> {
-    await this.initialize();
-    const timestamp = nowIso();
-    const source = normalizeExtensionSourceEntity({
-      ...input,
-      id: createEntityId(input.id, "extension-source"),
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    });
-    this.assertUnusedId("extension_sources", source.id);
-    this.insertExtensionSource(source);
-    return source;
-  }
-
-  async updateExtensionSource(id: string, patch: Partial<ExtensionSourceEntity>): Promise<ExtensionSourceEntity> {
-    await this.initialize();
-    const existing = this.getExtensionSourceOrThrow(id);
-    const updated = normalizeExtensionSourceEntity({
-      ...existing,
-      ...patch,
-      id: existing.id,
-      createdAt: existing.createdAt,
-      updatedAt: nowIso(),
-    });
-    this.insertExtensionSource(updated);
-    return updated;
-  }
-
-  async deleteExtensionSource(id: string): Promise<void> {
-    await this.initialize();
-    this.getExtensionSourceOrThrow(id);
-    const row = this.database()
-      .prepare("SELECT COUNT(*) AS count FROM extensions WHERE source_id = ?")
-      .get(id) as CountRow;
-    if (Number(row.count) > 0) {
-      throw Object.assign(new Error("Extension source is still referenced by extensions"), { status: 409 });
-    }
-    this.database().prepare("DELETE FROM extension_sources WHERE id = ?").run(id);
   }
 
   async getSettings(): Promise<AppSettings> {
@@ -1613,7 +1571,8 @@ export class SqlitePanelRepository implements PanelRepository {
     const timestamp = nowIso();
     const restoredFiles = Boolean(localPath);
     const restoredArtifact = Boolean(artifactArchivePath);
-    const missingInstalledFiles = !restoredFiles && extension.installState === "installed";
+    const missingInstalledFiles = !restoredFiles
+      && (extension.installState === "installed" || extension.installState === "update-available");
     const importedExtension = normalizeExtensionEntity({
       ...extension,
       id: cleanRequestedId,
@@ -2122,62 +2081,6 @@ export class SqlitePanelRepository implements PanelRepository {
     return extensionFromRow(row);
   }
 
-  private insertExtensionSource(source: ExtensionSourceEntity): void {
-    this.database()
-      .prepare(`
-        INSERT INTO extension_sources (
-          id, name, url, status, allow_unsigned_assets, last_refreshed_at,
-          last_error, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          name = excluded.name,
-          url = excluded.url,
-          status = excluded.status,
-          allow_unsigned_assets = excluded.allow_unsigned_assets,
-          last_refreshed_at = excluded.last_refreshed_at,
-          last_error = excluded.last_error,
-          updated_at = excluded.updated_at
-      `)
-      .run(
-        source.id,
-        source.name,
-        source.url,
-        source.status,
-        source.allowUnsignedAssets ? 1 : 0,
-        source.lastRefreshedAt ?? null,
-        source.lastError ?? null,
-        source.createdAt,
-        source.updatedAt,
-      );
-  }
-
-  insertExtensionSourceExact(source: ExtensionSourceEntity): void {
-    this.database()
-      .prepare(`
-        INSERT INTO extension_sources (
-          id, name, url, status, allow_unsigned_assets, last_refreshed_at,
-          last_error, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
-      .run(
-        source.id,
-        source.name,
-        source.url,
-        source.status,
-        source.allowUnsignedAssets ? 1 : 0,
-        source.lastRefreshedAt ?? null,
-        source.lastError ?? null,
-        source.createdAt,
-        source.updatedAt,
-      );
-  }
-
-  private getExtensionSourceOrThrow(id: string): ExtensionSourceEntity {
-    const row = this.database().prepare("SELECT * FROM extension_sources WHERE id = ?").get(id) as ExtensionSourceRow | undefined;
-    if (!row) throw Object.assign(new Error("Extension source does not exist"), { status: 404 });
-    return extensionSourceFromRow(row);
-  }
-
   private getEnvironmentOrThrow(id: string): BrowserEnvironment {
     const row = this.database().prepare("SELECT * FROM browser_environments WHERE id = ?").get(id) as EnvironmentRow | undefined;
     if (!row) throw Object.assign(new Error("环境不存在"), { status: 404 });
@@ -2483,12 +2386,14 @@ export class SqlitePanelRepository implements PanelRepository {
     const migratedFromJson = this.getMetadata("migrated_from_json") === "true";
     const migrationBackupPath = this.getMetadata("migration_backup_path") || undefined;
     const migrationError = (this.migrationError ?? this.getMetadata("migration_error")) || undefined;
+    const retirement = readRetirementStorageInfo(this.getMetadata(EXTENSION_SOURCE_RETIREMENT_MARKER_KEY));
     return {
       kind: "sqlite",
       databasePath: this.databasePath,
       legacyJsonPath: this.legacyJsonPath,
       migrationBackupPath,
       migrationError,
+      extensionSourceRetirement: retirement,
       portable: this.portable,
       migratedFromJson,
     };
@@ -2540,6 +2445,49 @@ function parseProfile(raw: string): BrowserProfile {
 
 function parseSettings(raw: string): AppSettings {
   return normalizeSettings(JSON.parse(raw) as Partial<AppSettings>);
+}
+
+function readRetirementStorageInfo(value: string | undefined): StorageInfo["extensionSourceRetirement"] {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value) as {
+      migrationVersion?: unknown;
+      completedAt?: unknown;
+      report?: { issues?: unknown; counts?: { migrated?: unknown; issuesOmitted?: unknown }; snapshot?: { snapshotPath?: unknown } };
+    };
+    const counts = parsed.report?.counts;
+    if (
+      !Number.isSafeInteger(parsed.migrationVersion)
+      || typeof parsed.completedAt !== "string"
+      || !Number.isSafeInteger(counts?.migrated)
+      || !Number.isSafeInteger(counts?.issuesOmitted)
+      || !Array.isArray(parsed.report?.issues)
+    ) return undefined;
+    const migrated = counts!.migrated as number;
+    const reportedIssues = parsed.report!.issues.length;
+    const omittedIssues = counts!.issuesOmitted as number;
+    if (
+      migrated < 0
+      || omittedIssues < 0
+      || !Number.isSafeInteger(reportedIssues)
+      || reportedIssues > 5_000
+      || reportedIssues + omittedIssues > Number.MAX_SAFE_INTEGER
+    ) {
+      return undefined;
+    }
+    const issues = reportedIssues + omittedIssues;
+    return {
+      migrationVersion: parsed.migrationVersion as number,
+      completedAt: parsed.completedAt,
+      snapshotPath: typeof parsed.report?.snapshot?.snapshotPath === "string"
+        ? parsed.report.snapshot.snapshotPath
+        : undefined,
+      migrated,
+      issues,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizeFullBackupData(data: AppBackupData, receivingDataDir: string): AppBackupData {
@@ -2691,25 +2639,6 @@ function normalizeExtensionEntity(input: Partial<ExtensionEntity>): ExtensionEnt
   };
 }
 
-function normalizeExtensionSourceEntity(input: Partial<ExtensionSourceEntity>): ExtensionSourceEntity {
-  const now = nowIso();
-  const id = createEntityId(input.id, "extension-source");
-  const name = typeof input.name === "string" && input.name.trim() ? input.name.trim() : "Extension Source";
-  const url = typeof input.url === "string" ? input.url.trim() : "";
-  if (!url) throw Object.assign(new Error("Extension source URL cannot be empty"), { status: 400 });
-  return {
-    id,
-    name,
-    url,
-    status: input.status === "disabled" ? "disabled" : "enabled",
-    allowUnsignedAssets: input.allowUnsignedAssets === true,
-    lastRefreshedAt: typeof input.lastRefreshedAt === "string" && input.lastRefreshedAt.trim() ? input.lastRefreshedAt.trim() : undefined,
-    lastError: typeof input.lastError === "string" && input.lastError.trim() ? input.lastError.trim() : undefined,
-    createdAt: input.createdAt ?? now,
-    updatedAt: input.updatedAt ?? now,
-  };
-}
-
 function proxyToProfileSettings(proxy: ProxyEntity): BrowserProfile["proxy"] {
   return {
     enabled: proxy.status === "enabled",
@@ -2839,6 +2768,14 @@ function proxyFromRow(row: ProxyRow, options: { includeSecrets: boolean }): Prox
 }
 
 function extensionFromRow(row: ExtensionRow): ExtensionEntity {
+  const retiredLegacyAuthority = row.source_kind === "remote-zip"
+    || row.source_kind === "remote-crx"
+    || Boolean(row.source_id);
+  const unknownHttpSource = /^https?:\/\//i.test(row.source_url)
+    && row.source_kind !== "local-directory"
+    && row.source_kind !== "local-zip"
+    && row.source_kind !== "local-crx"
+    && row.source_kind !== "managed-snapshot";
   const decodedAuthority = normalizeExtensionAuthorityFields({
     sourceKind: row.source_kind,
     sourceUrl: row.source_url,
@@ -2861,20 +2798,24 @@ function extensionFromRow(row: ExtensionRow): ExtensionEntity {
   }, { allowLegacyIncomplete: true });
   const authority = downgradeIncompleteStoredVerification(decodedAuthority);
   const downgraded = authority.provenance?.verification.level === "legacy-unknown";
+  const inertLegacy = retiredLegacyAuthority || unknownHttpSource || downgraded;
+  const missingInertPackage = inertLegacy
+    && (row.install_state === "installed" || row.install_state === "update-available")
+    && !row.local_path;
   return {
     id: row.id,
     name: row.name,
     description: row.description,
-    sourceKind: downgraded ? "managed-snapshot" : row.source_kind,
-    sourceUrl: downgraded ? "" : row.source_url,
-    sourceId: downgraded ? undefined : row.source_id ?? undefined,
+    sourceKind: inertLegacy ? "managed-snapshot" : row.source_kind,
+    sourceUrl: inertLegacy ? "" : row.source_url,
+    sourceId: inertLegacy ? undefined : row.source_id ?? undefined,
     storeId: row.store_id ?? undefined,
     storeUrl: row.store_url ?? undefined,
     storeIdentity: authority.storeIdentity,
     provenance: authority.provenance,
-    artifactArchivePath: downgraded ? undefined : authority.artifactArchivePath,
-    updateProviderId: downgraded ? undefined : authority.updateProviderId,
-    updateState: downgraded ? { status: "provider-disabled" } : authority.updateState,
+    artifactArchivePath: inertLegacy ? undefined : authority.artifactArchivePath,
+    updateProviderId: inertLegacy ? undefined : authority.updateProviderId,
+    updateState: inertLegacy ? { status: "provider-disabled" } : authority.updateState,
     version: row.version,
     manifestVersion: row.manifest_version ?? undefined,
     permissions: parseJson<string[]>(row.permissions_json, []),
@@ -2882,13 +2823,13 @@ function extensionFromRow(row: ExtensionRow): ExtensionEntity {
     optionalPermissions: parseJson<string[]>(row.optional_permissions_json, []),
     optionalHostPermissions: parseJson<string[]>(row.optional_host_permissions_json, []),
     permissionRisks: parseJson<ExtensionPermissionRisk[]>(row.permission_risks_json, []),
-    installState: downgraded && row.install_state === "installed" ? "local-missing" : row.install_state,
-    updatePolicy: downgraded ? "pinned" : row.update_policy,
+    installState: missingInertPackage ? "local-missing" : row.install_state,
+    updatePolicy: inertLegacy ? "pinned" : row.update_policy,
     sha256: row.sha256 ?? undefined,
     manifestSha256: row.manifest_sha256 ?? undefined,
     localPath: row.local_path ?? undefined,
     manifestKey: row.manifest_key ?? undefined,
-    directoryMode: normalizeExtensionDirectoryMode(downgraded ? "managed-snapshot" : row.source_kind, row.directory_mode),
+    directoryMode: normalizeExtensionDirectoryMode(inertLegacy ? "managed-snapshot" : row.source_kind, row.directory_mode),
     lastInstalledAt: row.last_installed_at ?? undefined,
     lastCheckedAt: row.last_checked_at ?? undefined,
     lastError: row.last_error ?? undefined,
@@ -2905,6 +2846,7 @@ function downgradeIncompleteStoredVerification(
   if (
     !provenance
     || provenance.verification.level !== "cws-publisher-verified"
+    || provenance.artifact.providerId === "legacy"
     || (provenance.verification.publisherKeySha256 && provenance.verification.treeSha256)
   ) return authority;
   return {
@@ -2927,20 +2869,6 @@ function downgradeIncompleteStoredVerification(
     artifactArchivePath: undefined,
     updateProviderId: undefined,
     updateState: { status: "provider-disabled" },
-  };
-}
-
-function extensionSourceFromRow(row: ExtensionSourceRow): ExtensionSourceEntity {
-  return {
-    id: row.id,
-    name: row.name,
-    url: row.url,
-    status: row.status,
-    allowUnsignedAssets: row.allow_unsigned_assets === 1,
-    lastRefreshedAt: row.last_refreshed_at ?? undefined,
-    lastError: row.last_error ?? undefined,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
   };
 }
 

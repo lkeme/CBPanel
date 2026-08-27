@@ -168,11 +168,20 @@ test("environment package import creates new environments and restores browser d
   const legacyEntries = unzipSync(await fs.readFile(packagePath));
   const legacyManifest = JSON.parse(Buffer.from(legacyEntries["manifest.json"]).toString("utf8"));
   const legacyData = JSON.parse(Buffer.from(legacyEntries["data.json"]).toString("utf8"));
+  assert.equal(legacyData.extensions[0].sourceKind, "managed-snapshot");
+  assert.equal(legacyData.extensions[0].sourceUrl, "");
+  assert.equal(legacyData.extensions[0].localPath, undefined);
+  assert.equal(legacyData.extensions[0].directoryMode, undefined);
   legacyManifest.schemaVersion = 1;
   delete legacyManifest.counts.retainedExtensionArtifacts;
   legacyData.schemaVersion = 1;
   delete legacyData.retainedExtensionArtifacts;
   Object.assign(legacyData.extensions[0], {
+    sourceKind: "remote-zip",
+    sourceUrl: "https://legacy.example/environment-extension.zip",
+    sourceId: "legacy-source",
+    installState: "installed",
+    updatePolicy: "auto",
     storeIdentity: { namespace: "attacker", storeId: "forged", listingUrl: "https://evil.test" },
     provenance: { schemaVersion: 99, verification: { level: "cws-publisher-verified" } },
     artifactArchivePath: "C:/exporting-machine/forged.crx",
@@ -210,11 +219,16 @@ test("environment package import creates new environments and restores browser d
   assert.equal(proxies.length, 0);
   assert.deepEqual(importedProfile?.runtime.extensionPaths, [path.join(targetDir, "extensions", newExtensionId)]);
   const importedExtension = await targetRepository.getExtension(newExtensionId);
+  assert.equal(importedExtension?.sourceKind, "managed-snapshot");
+  assert.equal(importedExtension?.sourceUrl, "");
+  assert.equal(importedExtension?.sourceId, undefined);
   assert.equal(importedExtension?.storeIdentity, undefined);
-  assert.equal(importedExtension?.provenance, undefined);
+  assert.equal(importedExtension?.provenance?.verification.level, "legacy-unknown");
+  assert.equal(importedExtension?.provenance?.artifact.legacySourceUrl, "https://legacy.example/environment-extension.zip");
   assert.equal(importedExtension?.artifactArchivePath, undefined);
   assert.equal(importedExtension?.updateProviderId, undefined);
-  assert.equal(importedExtension?.updateState, undefined);
+  assert.equal(importedExtension?.updateState?.status, "provider-disabled");
+  assert.equal(importedExtension?.updatePolicy, "pinned");
   assert.equal(
     (await targetRepository.listEnvironmentExtensionBindings(newEnvironmentId))[0]?.lifecycleRevision,
     sourceLifecycleRevision,

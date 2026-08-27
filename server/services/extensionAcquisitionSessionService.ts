@@ -486,7 +486,20 @@ export class ExtensionAcquisitionSessionService {
             : { status: "available", availableVersion: packageFacts.version },
           session.targetUpdatedAt,
         );
-        if (observed?.updatedAt) session.targetUpdatedAt = observed.updatedAt;
+        // Recording the provider observation is itself a server-owned row
+        // write, so it may advance `updatedAt`. Use the exact revision returned
+        // by that write, then prove the row is still at that revision before
+        // making the session ready. Blindly adopting a later read would absorb
+        // a concurrent edit made between the observation and this check.
+        const expectedObservedUpdatedAt = observed?.updatedAt ?? session.targetUpdatedAt;
+        const observedTarget = await this.options.repository.getExtension(session.targetExtensionId);
+        if (
+          !observedTarget
+          || (expectedObservedUpdatedAt && observedTarget.updatedAt !== expectedObservedUpdatedAt)
+        ) {
+          throw new ExtensionAcquisitionError("ACQUISITION_CONFLICT_TARGET_INVALID", "The update target changed while its provider observation was recorded.");
+        }
+        session.targetUpdatedAt = observedTarget.updatedAt;
       }
       const report = buildReport({
         session,
@@ -539,14 +552,6 @@ export class ExtensionAcquisitionSessionService {
   ): Promise<ExtensionAcquisitionConflictCandidate[]> {
     const extensions = await this.options.repository.listExtensions();
     const candidates: ExtensionAcquisitionConflictCandidate[] = [];
-    const legacyMetadataMatches = extensions.filter((extension) => (
-      !extension.storeIdentity && extension.storeId === storeId
-    ));
-    const canonicalMetadataMatches = extensions.filter((extension) => (
-      extension.storeIdentity?.namespace === "chrome-web-store"
-      && extension.storeIdentity.storeId === storeId
-      && extension.installState === "metadata-only"
-    ));
     const knownDifferentDeveloper = extensions.some((extension) => (
       extension.storeIdentity?.namespace === "chrome-web-store"
       && extension.storeIdentity.storeId === storeId
@@ -574,10 +579,15 @@ export class ExtensionAcquisitionSessionService {
         : developerMatches
           ? "developer-identity" as const
           : "metadata-store-id" as const;
-      const metadataOnlyUpgrade = storeIdentityMatches
+      // A duplicate metadata row has no package/developer authority to merge
+      // automatically, but the verified acquisition report names every exact
+      // server row. Mark each matching metadata-only row eligible so the user
+      // can explicitly choose the one record to upgrade in place. The selected
+      // target is rechecked again under the store/developer mutation keys at
+      // commit; no rows are silently merged or deleted.
+      const metadataOnlyUpgrade = (storeIdentityMatches || legacyMetadataMatchesId)
         && extension.installState === "metadata-only"
         && !persistedDeveloperSha
-        && canonicalMetadataMatches.length === 1
         && !knownDifferentDeveloper;
       const eligible = !storeIdentityConflicts
         && (metadataOnlyUpgrade || (developerMatches && extension.installState !== "metadata-only"));
@@ -587,9 +597,7 @@ export class ExtensionAcquisitionSessionService {
           ? "developer-identity-mismatch" as const
         : persistedDeveloperSha
           ? "developer-identity-mismatch" as const
-          : legacyMetadataMatches.length > 1
-            ? "ambiguous-metadata" as const
-            : "installed-identity-missing" as const;
+          : "installed-identity-missing" as const;
       candidates.push({
         extensionId: extension.id,
         name: extension.name,

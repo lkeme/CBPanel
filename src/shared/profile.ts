@@ -2,7 +2,6 @@ import type { AppSettings, StorageInfo } from "./settings";
 import type {
   BrowserEnvironment,
   ExtensionEntity,
-  ExtensionSourceEntity,
   GroupEntity,
   NetworkCheckResult,
   ProxyEntity,
@@ -306,7 +305,6 @@ export interface PanelState {
   tags?: TagEntity[];
   proxies?: ProxyEntity[];
   extensions?: ExtensionEntity[];
-  extensionSources?: ExtensionSourceEntity[];
   trash?: TrashEnvironment[];
   sessions: SessionSummary[];
   meta: {

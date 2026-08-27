@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { translate, type TranslationKey } from "../../i18n";
 import type { CloakBrowserDiagnosticsGeoIpResolved } from "../../shared/browserCore";
 import type { ProxyEntity, SystemDiagnostics } from "../../shared/entities";
+import type { StorageInfo } from "../../shared/settings";
 import { TooltipProvider } from "../ui/tooltip";
 import { SystemStatusContent } from "./SystemStatusContent";
 
@@ -86,6 +87,28 @@ test("the resolve action is unavailable until a proxy is selected", () => {
   assert.equal(enabled.includes(t("system.geoipResolveProxy")), false);
 });
 
+test("legacy source retirement evidence exposes both migrated records and issue totals", () => {
+  const storage: StorageInfo = {
+    kind: "sqlite",
+    databasePath: "D:/data/cbpanel.sqlite",
+    legacyJsonPath: "D:/data/profiles.json",
+    extensionSourceRetirement: {
+      migrationVersion: 1,
+      completedAt: "2026-08-27T00:00:00.000Z",
+      snapshotPath: "D:/data/migration-backups/before-extension-source-retirement.sqlite",
+      migrated: 4,
+      issues: 2,
+    },
+    portable: false,
+    migratedFromJson: false,
+  };
+  const html = renderPanel(undefined, [proxy()], storage);
+
+  assert.ok(hasRow(html, t("system.extensionSourceRetirementCount")));
+  assert.ok(hasRow(html, t("system.extensionSourceRetirementIssues")));
+  assert.ok(html.includes("before-extension-source-retirement.sqlite"));
+});
+
 function t(key: TranslationKey, params?: Record<string, string | number>): string {
   return translate("zh-CN", key, params);
 }
@@ -104,6 +127,7 @@ function enabledButtonLabels(html: string): string[] {
 function renderPanel(
   resolved: CloakBrowserDiagnosticsGeoIpResolved | undefined,
   proxies: ProxyEntity[] = [proxy()],
+  storage?: StorageInfo,
 ): string {
   return renderToStaticMarkup(
     React.createElement(
@@ -121,6 +145,7 @@ function renderPanel(
         refreshDiagnostics: async () => {},
         runtime: null,
         state: null,
+        storage,
         t,
       }),
     ),
@@ -128,7 +153,7 @@ function renderPanel(
 }
 
 function diagnostics(resolved: CloakBrowserDiagnosticsGeoIpResolved | undefined): SystemDiagnostics {
-  return {
+  const base: SystemDiagnostics = {
     checkedAt: "2026-08-06T00:00:00.000Z",
     schemaVersion: 3,
     dataDir: "D:/data",
@@ -137,7 +162,6 @@ function diagnostics(resolved: CloakBrowserDiagnosticsGeoIpResolved | undefined)
     storage: { kind: "sqlite", migratedFromJson: false },
     sessions: { total: 0, running: 0, launching: 0, error: 0 },
     networkTrace: { providerId: "cloudflare-www", providerName: "Cloudflare", providerUrl: "https://example.test", timeoutSeconds: 8 },
-    extensionSources: { total: 0, enabled: 0 },
     extensionCache: { directory: "D:/data/extensions", installedCount: 0 },
     browserCoreDiagnostics: {
       checkedAt: "2026-08-06T00:00:00.000Z",
@@ -146,6 +170,7 @@ function diagnostics(resolved: CloakBrowserDiagnosticsGeoIpResolved | undefined)
     },
     recentErrors: [],
   };
+  return base;
 }
 
 function proxy(): ProxyEntity {

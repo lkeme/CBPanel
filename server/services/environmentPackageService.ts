@@ -9,7 +9,6 @@ import {
   type ExtensionEntity,
   type GroupEntity,
 } from "../../src/shared/entities";
-import type { LegacyTransferExtension } from "../../src/shared/extensionAcquisition";
 import {
   ENVIRONMENT_PACKAGE_KIND,
   ENVIRONMENT_PACKAGE_SCHEMA_VERSION,
@@ -47,6 +46,7 @@ import { verifyChromeWebStoreCrx3File } from "./crx3Verifier";
 import { preflightExtensionPackage } from "./extensionPackagePreflight";
 import { validateTransferredExtensionArtifact } from "./extensionArtifactTransferVerifier";
 import { fingerprintStagedExtensionTree } from "./boundedZipAnalyzer";
+import { retireLegacyTransferredExtension } from "./extensionSourceRetirementMigration";
 
 type EnvironmentPackageServiceOptions = {
   repository: PanelRepository;
@@ -766,7 +766,7 @@ function migratePackageDataToCurrent(data: AnyEnvironmentPackageData): Environme
         schemaVersion: ENVIRONMENT_PACKAGE_SCHEMA_VERSION_V2,
         environments: data.environments,
         groups: data.groups,
-        extensions: data.extensions.map(migrateLegacyPackageExtension),
+        extensions: data.extensions.map(retireLegacyTransferredExtension),
         retainedExtensionArtifacts: [],
         environmentExtensionBindings: data.environmentExtensionBindings,
       };
@@ -774,37 +774,6 @@ function migratePackageDataToCurrent(data: AnyEnvironmentPackageData): Environme
     ...current,
     environments: current.environments.map(withoutPackageExtensionPaths),
     extensions: current.extensions.map(sanitizeTransferredPackageExtension),
-  };
-}
-
-function migrateLegacyPackageExtension(extension: LegacyTransferExtension): ExtensionEntity {
-  const remote = extension.sourceKind === "remote-zip"
-    || extension.sourceKind === "remote-crx"
-    || Boolean(extension.sourceId);
-  if (!remote) return { ...extension };
-  return {
-    ...extension,
-    sourceKind: "managed-snapshot",
-    sourceUrl: "",
-    sourceId: undefined,
-    updatePolicy: "pinned",
-    artifactArchivePath: undefined,
-    updateProviderId: undefined,
-    updateState: { status: "provider-disabled" },
-    provenance: {
-      schemaVersion: 1,
-      artifact: {
-        providerId: "legacy",
-        legacySourceUrl: extension.sourceUrl || undefined,
-        format: extension.sourceKind === "remote-zip" ? "zip" : "unknown",
-        sha256: extension.sha256,
-        retained: false,
-      },
-      verification: {
-        level: "legacy-unknown",
-        manifestSha256: extension.manifestSha256,
-      },
-    },
   };
 }
 
@@ -842,23 +811,7 @@ function sanitizeTransferredPackageExtension(extension: ExtensionEntity): Extens
       directoryMode: undefined,
     };
   }
-  const hadRemoteAuthority = extension.sourceKind === "remote-zip"
-    || extension.sourceKind === "remote-crx"
-    || Boolean(extension.sourceId)
-    || Boolean(extension.updateProviderId)
-    || Boolean(extension.provenance?.artifact.legacySourceUrl);
-  return {
-    ...extension,
-    sourceKind: "managed-snapshot",
-    sourceUrl: "",
-    sourceId: undefined,
-    artifactArchivePath: undefined,
-    updateProviderId: undefined,
-    updateState: hadRemoteAuthority ? { status: "provider-disabled" } : undefined,
-    updatePolicy: "pinned",
-    localPath: undefined,
-    directoryMode: undefined,
-  };
+  return retireLegacyTransferredExtension(extension, { stripPaths: true });
 }
 
 async function validateStagedRetainedArtifacts(

@@ -39,12 +39,11 @@ function isPermissionGateError(error: unknown): error is ApiError & { permission
   return error instanceof Error && Array.isArray((error as ApiError).permissions) && ((error as ApiError).permissions?.length ?? 0) > 0;
 }
 
-function canAutoCheckExtension(extension: ExtensionEntity): boolean {
+export function canAutoCheckExtension(extension: ExtensionEntity): boolean {
   if (extension.updatePolicy === "pinned") return false;
   // Verified store updates use acquisition sessions and explicit preflight/permission confirmation.
   // The legacy auto-check contract expects an ExtensionEntity response and must not consume a session view.
   if (extension.updateProviderId || extension.storeIdentity) return false;
-  if (extension.sourceId) return true;
   if (extension.sourceKind === "local-zip" || extension.sourceKind === "local-crx") return Boolean(extension.sourceUrl);
   if (extension.sourceKind === "local-directory") return Boolean(extension.sourceUrl || extension.localPath);
   return false;

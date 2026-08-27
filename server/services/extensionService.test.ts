@@ -36,21 +36,16 @@ test("local directory import reads manifest and permission risks", async () => {
 test("new bindings validate local package state while preserving existing binding revisions", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  let fetchCalls = 0;
   const service = new ExtensionService({
     repository,
     extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => {
-      fetchCalls += 1;
-      throw new Error("bind validation must not fetch");
-    },
   });
   const firstEnvironment = await repository.createProfile({ name: "First Bind Env" });
   const secondEnvironment = await repository.createProfile({ name: "Second Bind Env" });
   const pending = await repository.createExtension({
-    name: "Pending Remote",
-    sourceKind: "remote-zip",
-    sourceUrl: "https://example.test/extension.zip",
+    name: "Pending Snapshot",
+    sourceKind: "managed-snapshot",
+    sourceUrl: "",
     installState: "download-pending",
   });
   await assert.rejects(service.bindToEnvironments(pending.id, [firstEnvironment.id]), (error: unknown) => {
@@ -58,7 +53,6 @@ test("new bindings validate local package state while preserving existing bindin
     return true;
   });
   assert.deepEqual(await repository.listEnvironmentExtensionBindings(firstEnvironment.id), []);
-  assert.equal(fetchCalls, 0);
 
   const extensionDir = await writeExtensionDirectory(directory, "bindable-extension");
   const installed = await service.importDirectory(extensionDir, "reference");
@@ -75,7 +69,6 @@ test("new bindings validate local package state while preserving existing bindin
   });
   assert.deepEqual(await repository.listEnvironmentExtensionBindings(secondEnvironment.id), []);
   assert.equal((await repository.listEnvironmentExtensionBindings(firstEnvironment.id))[0]?.lifecycleRevision, firstRevision);
-  assert.equal(fetchCalls, 0);
 
   repository.close();
 });
@@ -271,33 +264,6 @@ test("ensureExtensionsInstalled reports disabled bound extensions instead of dro
   repository.close();
 });
 
-test("remote checksum mismatch fails without replacing an installed extension", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const bytes = makeExtensionZip();
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => new Response(Buffer.from(bytes)),
-  });
-  const installed = await service.importDirectory(await writeExtensionDirectory(directory, "stable-extension"));
-  const localPath = installed.localPath;
-  await repository.updateExtension(installed.id, {
-    sourceKind: "remote-zip",
-    sourceUrl: "https://example.test/extension.zip",
-    sha256: "0".repeat(64),
-  });
-
-  await assert.rejects(service.install(installed.id), /checksum mismatch/);
-  const after = await repository.getExtension(installed.id);
-
-  assert.equal(after?.installState, "installed");
-  assert.equal(after?.localPath, localPath);
-  assert.match(after?.lastError ?? "", /checksum mismatch/);
-
-  repository.close();
-});
-
 test("metadata-only Web Store extension blocks runtime ensure", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
@@ -306,248 +272,13 @@ test("metadata-only Web Store extension blocks runtime ensure", async () => {
   const extension = await repository.createExtension({
     name: "Store Metadata",
     sourceKind: "chrome-web-store",
-    sourceUrl: "https://chromewebstore.google.com/detail/example/abcdefghijklmnop",
+    sourceUrl: "",
     storeId: "abcdefghijklmnop",
     installState: "metadata-only",
   });
   await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
 
   await assert.rejects(service.ensureExtensionsInstalled(profile.id), /metadata cannot be installed/);
-
-  repository.close();
-});
-
-test("extension source refresh imports remote entries and marks installed updates", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const zipBytes = makeExtensionZip();
-  const zipSha256 = sha256Hex(zipBytes);
-  const updatedSha256 = sha256Hex(Buffer.from("updated"));
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => new Response(JSON.stringify(makeSourceIndex("1.2.3", zipSha256))),
-  });
-  const source = await repository.createExtensionSource({ name: "Catalog", url: "https://example.test/source.json" });
-
-  const first = await service.refreshSource(source.id);
-
-  assert.equal(first.imported, 1);
-  assert.equal(first.updated, 0);
-  assert.equal(first.extensions[0]?.sourceKind, "remote-zip");
-  assert.equal(first.extensions[0]?.sourceId, source.id);
-  assert.equal(first.extensions[0]?.installState, "download-pending");
-
-  const installed = await repository.updateExtension(first.extensions[0]!.id, {
-    installState: "installed",
-    localPath: await writeExtensionDirectory(directory, "installed-extension"),
-    version: "1.2.3",
-  });
-  const updateService = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => new Response(JSON.stringify(makeSourceIndex("2.0.0", updatedSha256))),
-  });
-
-  const second = await updateService.refreshSource(source.id);
-
-  assert.equal(second.imported, 0);
-  assert.equal(second.updated, 1);
-  assert.equal(second.extensions[0]?.id, installed.id);
-  assert.equal(second.extensions[0]?.installState, "update-available");
-  assert.equal(second.extensions[0]?.localPath, installed.localPath);
-  assert.equal(second.source.lastError, undefined);
-  assert.ok(second.source.lastRefreshedAt);
-
-  repository.close();
-});
-
-test("extension source refresh rejects missing hashes without creating extensions", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => new Response(JSON.stringify(makeSourceIndex("1.2.3", undefined))),
-  });
-  const source = await repository.createExtensionSource({ name: "Catalog", url: "https://example.test/source.json" });
-
-  await assert.rejects(service.refreshSource(source.id), /sha256 is required/);
-  const after = await repository.getExtensionSource(source.id);
-
-  assert.equal((await repository.listExtensions()).length, 0);
-  assert.match(after?.lastError ?? "", /sha256 is required/);
-
-  repository.close();
-});
-
-test("unsigned extension sources can refresh and install remote assets", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const zipBytes = makeExtensionZip();
-  let requestCount = 0;
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => {
-      requestCount += 1;
-      return requestCount === 1
-        ? new Response(JSON.stringify(makeSourceIndex("1.2.3", undefined)))
-        : new Response(Buffer.from(zipBytes));
-    },
-  });
-  const source = await repository.createExtensionSource({
-    name: "Unsigned Catalog",
-    url: "https://example.test/source.json",
-    allowUnsignedAssets: true,
-  });
-
-  const refresh = await service.refreshSource(source.id);
-  const installed = await service.install(refresh.extensions[0]!.id);
-
-  assert.equal(installed.installState, "installed");
-  assert.equal(installed.sha256, sha256Hex(zipBytes));
-  assert.ok(installed.localPath);
-
-  repository.close();
-});
-
-test("extension update installs remote asset when permissions do not increase", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const oldPath = await writeExtensionDirectory(directory, "old-extension", { version: "1.0.0" });
-  const zipBytes = makeExtensionZip({ version: "2.0.0" });
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => new Response(Buffer.from(zipBytes)),
-  });
-  const source = await repository.createExtensionSource({ name: "Catalog", url: "https://example.test/source.json" });
-  const extension = await repository.createExtension({
-    name: "Test Extension",
-    sourceKind: "remote-zip",
-    sourceUrl: "https://example.test/extension.zip",
-    sourceId: source.id,
-    sha256: sha256Hex(zipBytes),
-    version: "2.0.0",
-    permissions: ["storage"],
-    hostPermissions: [],
-    installState: "update-available",
-    localPath: oldPath,
-  });
-
-  const updated = await service.update(extension.id);
-
-  assert.equal(updated.installState, "installed");
-  assert.equal(updated.version, "2.0.0");
-  assert.notEqual(updated.localPath, oldPath);
-  assert.equal(await fileExists(path.join(updated.localPath!, "manifest.json")), true);
-
-  repository.close();
-});
-
-test("extension update blocks permission increases without replacing installed path", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const oldPath = await writeExtensionDirectory(directory, "old-extension", { version: "1.0.0" });
-  const zipBytes = makeExtensionZip({ version: "2.0.0", permissions: ["storage", "cookies"] });
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => new Response(Buffer.from(zipBytes)),
-  });
-  const source = await repository.createExtensionSource({ name: "Catalog", url: "https://example.test/source.json" });
-  const extension = await repository.createExtension({
-    name: "Test Extension",
-    sourceKind: "remote-zip",
-    sourceUrl: "https://example.test/extension.zip",
-    sourceId: source.id,
-    sha256: sha256Hex(zipBytes),
-    version: "2.0.0",
-    permissions: ["storage"],
-    hostPermissions: [],
-    installState: "update-available",
-    localPath: oldPath,
-  });
-
-  await assert.rejects(service.update(extension.id), /requires confirmation/);
-  const after = await repository.getExtension(extension.id);
-
-  assert.equal(after?.installState, "update-available");
-  assert.equal(after?.localPath, oldPath);
-  assert.match(after?.lastError ?? "", /cookies/);
-
-  repository.close();
-});
-
-test("install and reinstall block permission increases when state is update-available", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const oldPath = await writeExtensionDirectory(directory, "old-extension", { version: "1.0.0" });
-  const zipBytes = makeExtensionZip({ version: "2.0.0", permissions: ["storage", "cookies"] });
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => new Response(Buffer.from(zipBytes)),
-  });
-  const extension = await repository.createExtension({
-    name: "Test Extension",
-    sourceKind: "remote-zip",
-    sourceUrl: "https://example.test/extension.zip",
-    sha256: sha256Hex(zipBytes),
-    version: "2.0.0",
-    permissions: ["storage"],
-    hostPermissions: [],
-    installState: "update-available",
-    localPath: oldPath,
-  });
-
-  await assert.rejects(service.install(extension.id), /requires confirmation/);
-  const afterInstall = await repository.getExtension(extension.id);
-  assert.equal(afterInstall?.installState, "update-available");
-  assert.equal(afterInstall?.localPath, oldPath);
-  assert.match(afterInstall?.lastError ?? "", /cookies/);
-
-  await assert.rejects(service.reinstall(extension.id), /requires confirmation/);
-  const afterReinstall = await repository.getExtension(extension.id);
-  assert.equal(afterReinstall?.installState, "update-available");
-  assert.equal(afterReinstall?.localPath, oldPath);
-  assert.match(afterReinstall?.lastError ?? "", /cookies/);
-
-  repository.close();
-});
-
-test("install applies an update-available package when permissions do not increase", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const oldPath = await writeExtensionDirectory(directory, "old-extension", {
-    version: "1.0.0",
-    permissions: ["storage"],
-  });
-  const zipBytes = makeExtensionZip({ version: "2.0.0", permissions: ["storage"] });
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => new Response(Buffer.from(zipBytes)),
-  });
-  const extension = await repository.createExtension({
-    name: "Test Extension",
-    sourceKind: "remote-zip",
-    sourceUrl: "https://example.test/extension.zip",
-    sha256: sha256Hex(zipBytes),
-    version: "2.0.0",
-    permissions: ["storage"],
-    hostPermissions: [],
-    installState: "update-available",
-    localPath: oldPath,
-  });
-
-  const installed = await service.install(extension.id);
-
-  assert.equal(installed.installState, "installed");
-  assert.equal(installed.version, "2.0.0");
-  assert.notEqual(installed.localPath, oldPath);
-  assert.equal(installed.lastError, undefined);
 
   repository.close();
 });
@@ -748,39 +479,6 @@ test("CRX import falls back to a generated key when the header cannot be parsed"
   assert.ok(imported.manifestKey);
   assert.ok(Buffer.from(imported.manifestKey!, "base64").byteLength > 100);
   assert.equal(await readManifestKeyFromDirectory(imported.localPath!), imported.manifestKey);
-
-  repository.close();
-});
-
-test("remote extensions still acquire a manifest key after a failed first install", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const zipBytes = makeExtensionZip();
-  let attempt = 0;
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => {
-      attempt += 1;
-      return attempt === 1 ? new Response("unavailable", { status: 502 }) : new Response(Buffer.from(zipBytes));
-    },
-  });
-  const extension = await repository.createExtension({
-    name: "Remote Extension",
-    sourceKind: "remote-zip",
-    sourceUrl: "https://example.test/extension.zip",
-    sha256: sha256Hex(zipBytes),
-    installState: "download-pending",
-  });
-
-  await assert.rejects(service.install(extension.id), /download failed/);
-  assert.equal((await repository.getExtension(extension.id))?.installState, "install-failed");
-
-  const installed = await service.install(extension.id);
-
-  assert.equal(installed.installState, "installed");
-  assert.ok(installed.manifestKey);
-  assert.equal(await readManifestKeyFromDirectory(installed.localPath!), installed.manifestKey);
 
   repository.close();
 });
@@ -1137,7 +835,7 @@ test("migrateIdentity rejects Web Store metadata and already-pinned extensions",
   const storeExtension = await repository.createExtension({
     name: "Store Metadata",
     sourceKind: "chrome-web-store",
-    sourceUrl: "https://chromewebstore.google.com/detail/example/abcdefghijklmnop",
+    sourceUrl: "",
     storeId: "abcdefghijklmnop",
     installState: "metadata-only",
   });
@@ -1164,34 +862,6 @@ test("migrateIdentity adopts the verified developer key of a local CRX", async (
   await makeLegacyExtension(repository, imported.id);
 
   const migrated = await service.migrateIdentity(imported.id);
-
-  assert.equal(migrated.manifestKey, keyPair.publicKey.toString("base64"));
-  assert.equal(await readManifestKeyFromDirectory(migrated.localPath!), migrated.manifestKey);
-
-  repository.close();
-});
-
-test("migrateIdentity on a remote CRX recovers the same developer key a first install would extract", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const keyPair = makeCrxDeveloperKeyPair();
-  const crxBytes = makeSignedCrx3(keyPair, makeExtensionZip());
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => new Response(Buffer.from(crxBytes)),
-  });
-  const extension = await repository.createExtension({
-    name: "Remote CRX",
-    sourceKind: "remote-crx",
-    sourceUrl: "https://example.test/extension.crx",
-    sha256: sha256Hex(crxBytes),
-    installState: "installed",
-    localPath: await writeExtensionDirectory(directory, "remote-crx-snapshot"),
-    lastInstalledAt: "2026-01-01T00:00:00.000Z",
-  });
-
-  const migrated = await service.migrateIdentity(extension.id);
 
   assert.equal(migrated.manifestKey, keyPair.publicKey.toString("base64"));
   assert.equal(await readManifestKeyFromDirectory(migrated.localPath!), migrated.manifestKey);
@@ -1277,9 +947,8 @@ test("check keeps the update-available flag so a later update is still offered",
   const service = new ExtensionService({ repository, extensionCacheDir: path.join(directory, "extensions") });
   const extension = await repository.createExtension({
     name: "Pending Update",
-    sourceKind: "remote-zip",
-    sourceUrl: "https://example.test/extension.zip",
-    sha256: "c".repeat(64),
+    sourceKind: "managed-snapshot",
+    sourceUrl: "",
     installState: "update-available",
     localPath: await writeExtensionDirectory(directory, "pending-update"),
   });
@@ -1456,38 +1125,6 @@ test("check backfills an on-disk manifest key for a managed copy before runtime 
   repository.close();
 });
 
-test("failed install keeps the previous snapshot path even when it started from update-available", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const zipBytes = makeExtensionZip();
-  let allowDownload = true;
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => (allowDownload ? new Response(Buffer.from(zipBytes)) : new Response("gone", { status: 502 })),
-  });
-  const extension = await repository.createExtension({
-    name: "Remote Extension",
-    sourceKind: "remote-zip",
-    sourceUrl: "https://example.test/extension.zip",
-    sha256: sha256Hex(zipBytes),
-    installState: "download-pending",
-  });
-  const installed = await service.install(extension.id);
-  await repository.updateExtension(extension.id, { installState: "update-available" });
-  allowDownload = false;
-
-  await assert.rejects(service.install(extension.id), /download failed/);
-  const afterFailure = await repository.getExtension(extension.id);
-
-  assert.equal(afterFailure?.localPath, installed.localPath);
-  assert.equal(afterFailure?.installState, "update-available");
-  assert.match(afterFailure?.lastError ?? "", /download failed/);
-  assert.equal((await service.check(extension.id)).installState, "update-available");
-
-  repository.close();
-});
-
 test("copy mode install falls back to the snapshot when the source directory disappeared", async () => {
   const directory = await makeTempDir();
   const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
@@ -1522,126 +1159,6 @@ test("copy mode update diffs the source candidate instead of the snapshot", asyn
   assert.equal(after?.installState, "update-available");
   assert.equal(after?.version, "1.2.3");
   assert.match(after?.lastError ?? "", /cookies/);
-
-  repository.close();
-});
-
-test("update keeps the pinned key on the entity and inside the reinstalled manifest", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const zipBytes = makeExtensionZip({ version: "2.0.0" });
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => new Response(Buffer.from(zipBytes)),
-  });
-  const extension = await repository.createExtension({
-    name: "Pinned Remote Extension",
-    sourceKind: "remote-zip",
-    sourceUrl: "https://example.test/extension.zip",
-    sha256: sha256Hex(zipBytes),
-    version: "2.0.0",
-    permissions: ["storage"],
-    manifestKey: PRESET_MANIFEST_KEY,
-    installState: "update-available",
-    localPath: await writeExtensionDirectory(directory, "pinned-old-snapshot"),
-    lastInstalledAt: "2026-01-01T00:00:00.000Z",
-  });
-
-  const updated = await service.update(extension.id);
-
-  assert.equal(updated.installState, "installed");
-  assert.equal(updated.manifestKey, PRESET_MANIFEST_KEY);
-  assert.equal(await readManifestKeyFromDirectory(updated.localPath!), PRESET_MANIFEST_KEY);
-
-  repository.close();
-});
-
-test("source refresh does not clobber a pinned manifest key", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const zipSha256 = sha256Hex(makeExtensionZip());
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => new Response(JSON.stringify(makeSourceIndex("2.0.0", zipSha256))),
-  });
-  const source = await repository.createExtensionSource({ name: "Catalog", url: "https://example.test/source.json" });
-  const first = await service.refreshSource(source.id);
-  await repository.updateExtension(first.extensions[0]!.id, {
-    manifestKey: PRESET_MANIFEST_KEY,
-    installState: "installed",
-    localPath: await writeExtensionDirectory(directory, "catalog-extension"),
-  });
-
-  const second = await service.refreshSource(source.id);
-
-  assert.equal(second.extensions[0]?.manifestKey, PRESET_MANIFEST_KEY);
-  assert.equal((await repository.getExtension(first.extensions[0]!.id))?.manifestKey, PRESET_MANIFEST_KEY);
-
-  repository.close();
-});
-
-test("a previously installed keyless remote extension stays keyless after a reinstall", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  const zipBytes = makeExtensionZip();
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => new Response(Buffer.from(zipBytes)),
-  });
-  const extension = await repository.createExtension({
-    name: "Legacy Remote Extension",
-    sourceKind: "remote-zip",
-    sourceUrl: "https://example.test/extension.zip",
-    sha256: sha256Hex(zipBytes),
-    installState: "installed",
-    localPath: await writeExtensionDirectory(directory, "legacy-remote-snapshot"),
-    lastInstalledAt: "2026-01-01T00:00:00.000Z",
-  });
-
-  const reinstalled = await service.reinstall(extension.id);
-
-  assert.equal(reinstalled.installState, "installed");
-  assert.equal(reinstalled.manifestKey, undefined);
-  assert.equal(await readManifestKeyFromDirectory(reinstalled.localPath!), undefined);
-
-  repository.close();
-});
-
-test("launch loads the current snapshot of an update-available extension and warns instead of installing", async () => {
-  const directory = await makeTempDir();
-  const repository = new SqlitePanelRepository({ dataDir: directory, seed: () => [] });
-  let downloads = 0;
-  const service = new ExtensionService({
-    repository,
-    extensionCacheDir: path.join(directory, "extensions"),
-    fetchImpl: async () => {
-      downloads += 1;
-      return new Response(Buffer.from(makeExtensionZip({ version: "2.0.0", permissions: ["storage", "cookies"] })));
-    },
-  });
-  const profile = await repository.createProfile({ name: "Pending Update Runtime" });
-  const localPath = await writeExtensionDirectory(directory, "pending-runtime-extension");
-  const extension = await repository.createExtension({
-    name: "Pending Update Extension",
-    sourceKind: "remote-zip",
-    sourceUrl: "https://example.test/extension.zip",
-    sha256: "d".repeat(64),
-    installState: "update-available",
-    localPath,
-  });
-  await repository.bindExtensionToEnvironments(extension.id, [profile.id]);
-
-  const ensured = await service.ensureExtensionsInstalled(profile.id);
-
-  assert.deepEqual(ensured.paths, [localPath]);
-  assert.equal(downloads, 0);
-  assert.equal(ensured.warnings.length, 2);
-  assert.equal(ensured.warnings.some((warning) => /有可用更新未安装/.test(warning.reason)), true);
-  assert.equal(ensured.warnings.some((warning) => /固定插件身份/.test(warning.reason)), true);
-  assert.equal((await repository.getExtension(extension.id))?.installState, "update-available");
 
   repository.close();
 });
@@ -2384,26 +1901,6 @@ function makeManifestZip(manifestContent: string): Uint8Array {
     "manifest.json": Buffer.from(manifestContent, "utf8"),
     "background.js": Buffer.from("", "utf8"),
   });
-}
-
-function makeSourceIndex(version: string, sha256: string | undefined): Record<string, unknown> {
-  return {
-    schemaVersion: 1,
-    name: "CBPanel Test Source",
-    updatedAt: "2026-06-01T00:00:00.000Z",
-    extensions: [
-      {
-        id: "test-extension",
-        name: "Test Extension",
-        version,
-        assetKind: "zip",
-        assetUrl: "https://example.test/extension.zip",
-        sha256,
-        webStoreId: "abcdefghijklmnop",
-        storeUrl: "https://chromewebstore.google.com/detail/example/abcdefghijklmnop",
-      },
-    ],
-  };
 }
 
 async function writeExtensionDirectory(

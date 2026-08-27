@@ -3,7 +3,6 @@ import type {
   BrowserEnvironment,
   ExtensionEntity,
   ExtensionBindingMetadata,
-  ExtensionSourceEntity,
   GroupEntity,
   NetworkCheckResult,
   ProxyEntity,
@@ -118,11 +117,6 @@ export interface RegistryRepository {
   listExtensionEnvironmentBindings(extensionId: string): Promise<EnvironmentExtensionBinding[]>;
   bindExtensionToEnvironments(id: string, environmentIds: string[]): Promise<BrowserEnvironment[]>;
   unbindExtensionFromEnvironments(id: string, environmentIds?: string[]): Promise<BrowserEnvironment[]>;
-  listExtensionSources(): Promise<ExtensionSourceEntity[]>;
-  getExtensionSource(id: string): Promise<ExtensionSourceEntity | undefined>;
-  createExtensionSource(input: Partial<ExtensionSourceEntity>): Promise<ExtensionSourceEntity>;
-  updateExtensionSource(id: string, patch: Partial<ExtensionSourceEntity>): Promise<ExtensionSourceEntity>;
-  deleteExtensionSource(id: string): Promise<void>;
 }
 
 export type PanelRepository = ProfileRepository

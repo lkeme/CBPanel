@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { TranslationKey } from "../../i18n";
 import type { ExtensionEntity } from "../../shared/entities";
 import type { ExtensionAcquisitionSettings } from "../../shared/settings";
+import { canAutoCheckExtension } from "../../hooks/useExtensionActions";
 import { ExtensionAcquisitionSessionPanel } from "./ExtensionAcquisitionSessionPanel";
 import {
   allExtensionRemoteCapabilitiesDisabled,
@@ -174,6 +175,27 @@ test("verified rows always route updates through acquisition and success exposes
     t,
   }));
   assert.ok(html.includes("extension.acquisition.bindNext"));
+});
+
+test("legacy remote source ids never qualify for the old background updater", () => {
+  const legacy = verifiedExtension({
+    sourceKind: "remote-zip",
+    sourceId: "retired-source",
+    sourceUrl: "https://legacy.invalid/extension.zip",
+    storeIdentity: undefined,
+    provenance: undefined,
+    updateProviderId: undefined,
+    updatePolicy: "auto",
+  });
+  assert.equal(canAutoCheckExtension(legacy), false);
+  assert.equal(canAutoCheckExtension(verifiedExtension({
+    sourceKind: "local-zip",
+    sourceUrl: "D:/extensions/local.zip",
+    storeIdentity: undefined,
+    provenance: undefined,
+    updateProviderId: undefined,
+    updatePolicy: "notify",
+  })), true);
 });
 
 function renderDetail(
