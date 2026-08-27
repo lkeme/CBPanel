@@ -8,10 +8,10 @@
     "cloakbrowser": {
       "repository": "https://github.com/CloakHQ/CloakBrowser",
       "fromCommit": "5a1e2978e4a21054550f83f67cb3627a64fa21db",
-      "syncedCommit": "d30572f0701039ded963093198d58a6f6f2768a3",
-      "latestCheckedCommit": "d30572f0701039ded963093198d58a6f6f2768a3",
-      "syncedAt": "2026-08-20",
-      "npmPackage": "cloakbrowser@0.5.8"
+      "syncedCommit": "0811704e7f5a5f67b5cc0b4a1f9b38810c7eb4d5",
+      "latestCheckedCommit": "8fb3350dd18db19445081da3e94a0904ea8c840f",
+      "syncedAt": "2026-08-27",
+      "npmPackage": "cloakbrowser@0.5.9"
     }
   },
   "scripts": {
@@ -49,16 +49,16 @@
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.2",
-    "@vitejs/plugin-react": "^6.0.5",
+    "@vitejs/plugin-react": "^6.1.0",
     "class-variance-authority": "^0.7.1",
-    "cloakbrowser": "^0.5.8",
+    "cloakbrowser": "^0.5.9",
     "clsx": "^2.1.1",
     "express": "^5.2.1",
     "fflate": "^0.8.3",
-    "lucide-react": "^1.33.0",
+    "lucide-react": "^1.34.0",
     "mmdb-lib": "^3.0.3",
     "playwright-core": "^1.62.1",
-    "puppeteer-core": "^25.8.0",
+    "puppeteer-core": "^25.9.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "socks-proxy-agent": "^10.1.0",
@@ -68,14 +68,14 @@
     "tailwindcss": "^4.3.3",
     "tar": "^7.5.22",
     "undici": "^8.10.0",
-    "vite": "^8.2.1"
+    "vite": "^8.2.2"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",
     "@types/express": "^5.0.6",
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.4.0",
     "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4",
+    "@types/react-dom": "^19.2.5",
     "@yao-pkg/pkg": "^6.22.0",
     "cross-env": "^10.1.0",
     "esbuild": "^0.28.2",
