@@ -407,8 +407,10 @@
   -webkit-line-clamp: 2;
 }
 
-/* Four-column cards: a wide screenshot-style banner up top, then title,
-   chips, a clamped description, and metrics pinned to the bottom. */
+/* Four-column cards: a tinted banner band up top with the thumbnail centered
+   (the catalog ships one square thumbnail, so it is never stretched to fill),
+   then title, chips, a clamped description, and metrics pinned to the
+   bottom. */
 .acquisition-result-list.view-four .acquisition-result-card {
   grid-template-columns: 1fr;
   align-items: start;
@@ -417,29 +419,58 @@
 
 .acquisition-result-list.view-four .acquisition-result-card-surface {
   gap: 12px;
-  padding: 14px;
+  padding: 0 14px 14px;
 }
 
 .acquisition-result-banner {
+  position: relative;
   display: grid;
   place-items: center;
-  height: 108px;
-  margin: 0;
+  height: 128px;
+  margin: 0 -14px;
   overflow: hidden;
-  background: var(--surface-muted);
-  border-radius: var(--radius-control);
+  background:
+    radial-gradient(circle at 30% 20%, color-mix(in srgb, var(--primary) 16%, transparent), transparent 60%),
+    linear-gradient(145deg, color-mix(in srgb, var(--primary-soft) 82%, var(--surface)) 0%, var(--surface-muted) 100%);
+  border-radius: var(--radius) var(--radius) 0 0;
 }
 
 .acquisition-result-banner .acquisition-result-icon.icon-banner {
-  width: 100%;
-  height: 100%;
-  font-size: 30px;
-  border-radius: inherit;
-  box-shadow: none;
+  width: 76px;
+  height: 76px;
+  font-size: 26px;
+  border-radius: 18px;
+  box-shadow: 0 10px 22px color-mix(in srgb, var(--primary) 18%, transparent);
 }
 
 .acquisition-result-banner .acquisition-result-icon.icon-banner img {
+  object-fit: contain;
+}
+
+/* With a real catalog screenshot the band shows the wide image edge to edge;
+   the square icon only stays as the pre-load/failure backdrop. */
+.acquisition-result-banner.has-screenshot {
+  background: var(--surface-muted);
+}
+
+.acquisition-result-banner.has-screenshot > img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
   object-fit: cover;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.acquisition-result-banner.has-screenshot > img.loaded {
+  opacity: 1;
+}
+
+.acquisition-result-banner-fallback {
+  display: grid;
+  place-items: center;
 }
 
 .acquisition-result-list.view-four .acquisition-result-copy {
@@ -1500,11 +1531,14 @@
   }
 
   .acquisition-result-banner {
-    height: 92px;
+    height: 108px;
   }
 
   .acquisition-result-banner .acquisition-result-icon.icon-banner {
-    font-size: 24px;
+    width: 64px;
+    height: 64px;
+    font-size: 22px;
+    border-radius: 15px;
   }
 
   .acquisition-detail-bottom {

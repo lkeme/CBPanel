@@ -217,6 +217,12 @@ export interface ExtensionCatalogItem {
   developer?: string;
   /** Optional CRX搜搜 thumbnail after strict host/scheme normalization. */
   iconUrl?: string;
+  /**
+   * Wide screenshot/banner URLs for rich cards and the detail page, from the
+   * same catalog response after the same strict host/scheme projection. The
+   * square `iconUrl` stays the compact-card icon; these never replace it.
+   */
+  bannerUrls?: string[];
   rating?: number;
   userCount?: number;
 }

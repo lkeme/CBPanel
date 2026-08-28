@@ -198,6 +198,43 @@ test("CRX搜搜 catalog projects only reviewed thumbnail hosts", () => {
   assert.equal(JSON.stringify(page).includes("token=must-not-leak"), false);
 });
 
+test("CRX搜搜 screenshots become banner URLs under the same reviewed host projection", () => {
+  const page = normalizeCrxsosoSearchResponse({
+    code: 200,
+    data: {
+      extensionList: [
+        {
+          crxId: TAMPERMONKEY_ID,
+          name: "Tampermonkey",
+          thumbnail: "https://lhimg.crxsoso.com/icon",
+          images: [
+            { uri: "https://lhimg.crxsoso.com/shot-one" },
+            { uri: "https://lhimg.crxsoso.com/shot-one" },
+            { uri: "https://lhimg.crxsoso.com/shot-two" },
+            { uri: "https://evil.example.com/shot" },
+            { uri: "https://lhimg.crxsoso.com/icon" },
+            { uri: "https://lhimg.crxsoso.com/shot?token=must-not-leak" },
+          ],
+        },
+        {
+          crxId: UBLOCK_ORIGIN_ID,
+          name: "uBlock Origin",
+          images: "not-an-array",
+        },
+      ],
+      hasMorePages: false,
+    },
+  }, FIXED_NOW);
+
+  assert.deepEqual(page.items[0]?.bannerUrls, [
+    "https://lhimg.crxsoso.com/shot-one",
+    "https://lhimg.crxsoso.com/shot-two",
+  ]);
+  assert.equal(page.items[1]?.bannerUrls, undefined);
+  assert.equal(JSON.stringify(page).includes("token=must-not-leak"), false);
+  assert.equal(JSON.stringify(page).includes("evil.example.com"), false);
+});
+
 test("CRX搜搜 business rate limit is mapped without leaking its raw message", () => {
   assert.throws(
     () => normalizeCrxsosoSearchResponse({ code: 429, message: "raw-provider-message" }, FIXED_NOW),

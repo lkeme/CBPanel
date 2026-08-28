@@ -308,10 +308,10 @@ function CatalogResultCard({
           onClick={activate}
           type="button"
         >
-          {/* Screenshot-style banner: the icon fills the top band, centered. */}
-          <div className="acquisition-result-banner">
-            <CatalogIcon item={item} size="banner" />
-          </div>
+          {/* Four-column cards use the wide screenshot from the catalog
+              (bannerUrls); items without one keep the square icon centered on
+              the tinted band, never stretched. */}
+          <CatalogBanner item={item} />
           <div className="acquisition-result-copy">
             <div className="acquisition-result-heading">
               <span className="acquisition-result-title" id={titleId}>{item.name}</span>
@@ -434,6 +434,47 @@ function CatalogIcon({ item, size = "md" }: { item: ExtensionCatalogItem; size?:
         />
       )}
     </span>
+  );
+}
+
+/**
+ * Four-column banner: the wide catalog screenshot when one exists, falling
+ * back to the centered square icon on the tinted band. The first failing
+ * screenshot steps to the next candidate before degrading to the icon.
+ */
+function CatalogBanner({ item }: { item: ExtensionCatalogItem }) {
+  const banners = item.bannerUrls ?? [];
+  const [failedCount, setFailedCount] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+  const bannerUrl = banners[failedCount];
+  if (!bannerUrl) {
+    return (
+      <div className="acquisition-result-banner">
+        <CatalogIcon item={item} size="banner" />
+      </div>
+    );
+  }
+  return (
+    <div className="acquisition-result-banner has-screenshot">
+      {!loaded && (
+        <span className="acquisition-result-banner-fallback" aria-hidden="true">
+          <CatalogIcon item={item} size="banner" />
+        </span>
+      )}
+      <img
+        alt=""
+        aria-hidden="true"
+        className={loaded ? "loaded" : ""}
+        decoding="async"
+        onError={() => {
+          setLoaded(false);
+          setFailedCount((count) => count + 1);
+        }}
+        onLoad={() => setLoaded(true)}
+        referrerPolicy="no-referrer"
+        src={bannerUrl}
+      />
+    </div>
   );
 }
 

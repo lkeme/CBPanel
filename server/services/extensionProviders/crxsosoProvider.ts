@@ -257,6 +257,10 @@ export function normalizeCrxsosoSearchResponse(value: unknown, observedAtValue: 
     // only expose it after the shared strict host/scheme projection.
     const iconUrl = normalizeCrxsosoCatalogIconUrl(item.thumbnail)
       ?? normalizeCrxsosoCatalogIconUrl(item.iconUrl);
+    // `images` carries the wide store screenshots for rich cards and the
+    // detail page. Each entry passes the exact same icon host/scheme
+    // projection, and the thumbnail is never duplicated into the banner list.
+    const bannerUrls = normalizeCrxsosoBannerUrls(item.images, iconUrl);
     if (description !== undefined) normalized.description = description;
     if (overview !== undefined) normalized.overview = overview;
     if (category !== undefined) normalized.category = category;
@@ -268,6 +272,7 @@ export function normalizeCrxsosoSearchResponse(value: unknown, observedAtValue: 
     if (userCount !== undefined) normalized.userCount = userCount;
     if (rating !== undefined) normalized.rating = rating;
     if (iconUrl !== undefined) normalized.iconUrl = iconUrl;
+    if (bannerUrls !== undefined) normalized.bannerUrls = bannerUrls;
     items.push(normalized);
   }
 
@@ -294,6 +299,24 @@ function normalizeCrxsosoCatalogUpdatedAt(value: unknown): string | undefined {
     : typeof value === "string" && value.trim() ? Date.parse(value) : Number.NaN;
   if (!Number.isFinite(timestampMs) || timestampMs < 0 || timestampMs > Date.UTC(2100, 0, 1)) return undefined;
   return new Date(timestampMs).toISOString();
+}
+
+/** Project the screenshot list: each entry must pass the icon host contract; the icon URL is never repeated as a banner. */
+function normalizeCrxsosoBannerUrls(value: unknown, iconUrl: string | undefined): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  const banners: string[] = [];
+  for (const entry of value) {
+    if (banners.length >= 6) break;
+    const record = entry && typeof entry === "object" && !Array.isArray(entry)
+      ? entry as Record<string, unknown>
+      : undefined;
+    const normalized = normalizeCrxsosoCatalogIconUrl(record?.uri);
+    if (!normalized || normalized === iconUrl || seen.has(normalized)) continue;
+    seen.add(normalized);
+    banners.push(normalized);
+  }
+  return banners.length > 0 ? banners : undefined;
 }
 
 function normalizeCrxsosoArtifactResponse(value: unknown, expectedUpstreamHint: string): string {
