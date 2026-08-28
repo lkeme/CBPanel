@@ -104,6 +104,15 @@
   border-radius: var(--radius);
 }
 
+/* Embedded in the detail hero, the channel choice dissolves into the action
+   row; the hero band already supplies the boundary. */
+.acquisition-detail-hero .acquisition-channel-choice {
+  display: contents;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
 /* Keep one visible boundary around the search control. The workspace itself is
    already inside the module surface, so a second card border around the form
    made the input look double-framed at narrow widths. */
@@ -653,6 +662,10 @@
   font-size: 12px;
 }
 
+.acquisition-detail-back {
+  gap: 6px;
+}
+
 /* Hero: icon + copy + action cluster, like crxsoso's detail top. A soft
    tinted band separates it from the overview below. */
 .acquisition-detail-hero {
@@ -665,6 +678,7 @@
   background: linear-gradient(145deg, color-mix(in srgb, var(--primary-soft) 72%, var(--surface)) 0%, var(--surface) 82%);
   border: 1px solid color-mix(in srgb, var(--primary) 18%, var(--border));
   border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
 }
 
 .acquisition-detail-hero-copy {
@@ -716,15 +730,6 @@
   align-items: center;
   justify-content: flex-end;
   margin-left: auto;
-}
-
-/* The channel choice inside the hero is just a compact action row; the
-   channel detail stays in Download channel settings. */
-.acquisition-detail-hero-actions .acquisition-channel-choice {
-  display: contents;
-  padding: 0;
-  background: transparent;
-  border: 0;
 }
 
 .acquisition-channel-toolbar {
@@ -813,7 +818,9 @@
   background: color-mix(in srgb, var(--accent-soft) 82%, var(--surface));
 }
 
-/* Bottom: overview on the left, plain facts on the right. */
+/* Bottom: overview on the left, plain facts on the right. Both panels get
+   the crxsoso treatment — a bordered card with an accent tick before the
+   heading — so the two columns read as siblings instead of loose text. */
 .acquisition-detail-bottom {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(240px, 320px);
@@ -821,16 +828,35 @@
   align-items: start;
 }
 
-.acquisition-detail-overview {
+.acquisition-detail-overview,
+.acquisition-detail-sidebar {
   min-width: 0;
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 
 .acquisition-detail-overview h4,
 .acquisition-detail-sidebar h4 {
-  margin: 0 0 10px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 0 0 12px;
   color: var(--foreground);
   font-size: 15px;
   font-weight: 800;
+}
+
+/* crxsoso's coloured tick ahead of each section heading. */
+.acquisition-detail-overview h4::before,
+.acquisition-detail-sidebar h4::before {
+  flex: 0 0 auto;
+  width: 4px;
+  height: 15px;
+  content: "";
+  background: linear-gradient(180deg, var(--primary), var(--accent));
+  border-radius: 2px;
 }
 
 .acquisition-detail-no-overview {
@@ -959,14 +985,11 @@
   font-weight: 700;
 }
 
-/* Facts in the sidebar read as plain label/value lines, not boxed cards. */
-.acquisition-detail-sidebar {
-  min-width: 0;
-}
-
+/* Facts in the sidebar read as plain label/value lines separated by soft
+   rules, not boxed cards. */
 .acquisition-detail-facts {
   display: grid;
-  gap: 12px;
+  gap: 0;
   margin: 0;
 }
 
@@ -974,6 +997,11 @@
   display: grid;
   gap: 3px;
   min-width: 0;
+  padding: 9px 0;
+}
+
+.acquisition-detail-fact + .acquisition-detail-fact {
+  border-top: 1px solid var(--border-subtle);
 }
 
 .acquisition-detail-facts dt {
@@ -1133,11 +1161,19 @@
 .acquisition-source-heading,
 .acquisition-source-health,
 .acquisition-pagination-status,
-.acquisition-progress-summary,
 .acquisition-mirror-fallback {
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
+  align-items: center;
+}
+
+/* Install progress summary: keep the spinner and status copy on one calm
+   baseline; the bar below carries the motion. */
+.acquisition-progress-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
   align-items: center;
 }
 
@@ -1269,6 +1305,35 @@
   color: var(--primary-strong);
   background: var(--primary-soft);
   border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
+}
+
+/* The determinate session bar borrows the operation pill bar's look: a slim
+   rounded track with the primary→accent gradient fill, matching the rest of
+   the app instead of the browser-default progress chrome. */
+.acquisition-session-progress progress {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--border) 58%, transparent);
+  border: 0;
+  border-radius: 999px;
+  appearance: none;
+}
+
+.acquisition-session-progress progress::-webkit-progress-bar {
+  background: color-mix(in srgb, var(--border) 58%, transparent);
+  border-radius: 999px;
+}
+
+.acquisition-session-progress progress::-webkit-progress-value {
+  background: linear-gradient(90deg, var(--primary), var(--accent));
+  border-radius: 999px;
+  transition: width 240ms var(--motion-ease);
+}
+
+.acquisition-session-progress progress::-moz-progress-bar {
+  background: linear-gradient(90deg, var(--primary), var(--accent));
+  border-radius: 999px;
 }
 
 .acquisition-permission-list,

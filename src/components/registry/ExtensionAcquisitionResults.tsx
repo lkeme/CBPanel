@@ -1,4 +1,5 @@
 import {
+  ArrowLeft,
   CircleAlert,
   CircleX,
   Columns2,
@@ -511,10 +512,10 @@ export function ExtensionCatalogDetail({
   return (
     <section aria-labelledby={headingId} className="acquisition-result-detail">
       <header className="acquisition-detail-header">
-        <button className="command subtle" onClick={onBack} type="button">
+        <button className="command subtle acquisition-detail-back" onClick={onBack} type="button">
+          <ArrowLeft aria-hidden="true" size={16} />
           {t("extension.acquisition.results.back")}
         </button>
-        <span className="acquisition-detail-breadcrumb">{t("extension.acquisition.results.title")}</span>
       </header>
 
       {/* Top section, crxsoso-style: icon + identity on the left, actions on

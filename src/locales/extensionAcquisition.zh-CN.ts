@@ -191,7 +191,7 @@ export const extensionAcquisitionZhCN = {
   "extension.acquisition.progress.ready": "已准备好安装，等待确认",
   "extension.acquisition.progress.verifying": "正在验证 CRX3 开发者与发布者证明…",
   "extension.acquisition.results.cancelled": "搜索已取消",
-  "extension.acquisition.results.back": "返回搜索结果",
+  "extension.acquisition.results.back": "返回",
   "extension.acquisition.results.noDescription": "暂无描述",
   "extension.acquisition.results.rating": "评分",
   "extension.acquisition.results.downloads": "下载量",

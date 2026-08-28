@@ -193,7 +193,7 @@ export const extensionAcquisitionEnUS = {
   "extension.acquisition.progress.ready": "Ready to install and waiting for confirmation",
   "extension.acquisition.progress.verifying": "Verifying CRX3 developer and publisher proofs…",
   "extension.acquisition.results.cancelled": "Search cancelled",
-  "extension.acquisition.results.back": "Back to results",
+  "extension.acquisition.results.back": "Back",
   "extension.acquisition.results.noDescription": "No description available",
   "extension.acquisition.results.rating": "Rating",
   "extension.acquisition.results.downloads": "Downloads",
