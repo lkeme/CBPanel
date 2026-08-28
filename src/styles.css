@@ -192,8 +192,6 @@
 
 .acquisition-input-hint,
 .acquisition-section-header p,
-.acquisition-result-copy p,
-.acquisition-channel-copy small,
 .acquisition-source-copy p {
   margin: 0;
   color: var(--foreground-muted);
@@ -271,7 +269,6 @@
 
 .acquisition-result-list,
 .acquisition-source-list,
-.acquisition-channel-list,
 .acquisition-confirmation-choices {
   display: grid;
   gap: 8px;
@@ -294,7 +291,6 @@
 
 .acquisition-result-card,
 .acquisition-source-card,
-.acquisition-channel-card,
 .confirm-choice {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -308,16 +304,17 @@
   transition: border-color 160ms ease, background-color 160ms ease;
 }
 
-/* Marketplace cards borrow CRX搜搜's visual rhythm: a cool tinted surface,
-   bright border accent and compact metadata chips make each result scannable
-   without relying on a separate action button. */
+/* Marketplace cards follow CRX搜搜's rhythm: a tinted surface, a soft
+   border, the icon beside title+store/category chips, a description that
+   always reserves two lines, and rating/download metrics pinned to the
+   bottom edge of the card. */
 .acquisition-result-card {
   position: relative;
   overflow: hidden;
   cursor: pointer;
-  padding: 16px;
-  background: linear-gradient(145deg, color-mix(in srgb, var(--primary-soft) 78%, var(--surface)) 0%, var(--surface) 78%);
-  border-color: color-mix(in srgb, var(--primary) 24%, var(--border));
+  padding: 0;
+  background: var(--surface);
+  border-color: var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow-card);
   transition: transform var(--motion-standard) var(--motion-ease),
@@ -327,8 +324,8 @@
 
 .acquisition-result-card:hover {
   transform: translateY(-2px);
-  border-color: color-mix(in srgb, var(--primary) 58%, var(--border));
-  box-shadow: 0 10px 24px color-mix(in srgb, var(--primary) 12%, transparent);
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--primary) 10%, transparent);
 }
 
 .acquisition-result-card:focus-visible {
@@ -336,18 +333,17 @@
   outline-offset: 2px;
 }
 
-/* The card surface is the whole clickable area; it stacks the icon+title row
-   above the copy so the icon never owns an entire side of the card. */
+/* The card surface is the whole clickable area, stacked vertically. */
 .acquisition-result-card-surface {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   grid-column: 1 / -1;
   width: 100%;
   height: 100%;
   align-self: stretch;
   min-width: 0;
-  padding: 0;
+  padding: 16px;
   color: inherit;
   font: inherit;
   text-align: left;
@@ -363,11 +359,12 @@
   border-radius: var(--radius-control);
 }
 
-/* Top row: compact icon at the start, title beside it, chevron at the end. */
+/* Two-column top row: icon left; title sits on the first line and the
+   store/category chips share the icon row right underneath it. */
 .acquisition-result-card-top {
   display: flex;
-  gap: 10px;
-  align-items: center;
+  gap: 12px;
+  align-items: flex-start;
   min-width: 0;
 }
 
@@ -385,28 +382,76 @@
 }
 
 .acquisition-result-card-top .acquisition-result-heading {
+  display: grid;
+  gap: 4px;
   flex: 1 1 auto;
+  align-content: start;
 }
 
-/* Four-column cards center the icon in the top half like CRX搜搜's compact
-   tiles; copy below stays left-aligned and evenly spaced. */
+.acquisition-result-card-top .acquisition-result-title {
+  line-height: 1.3;
+}
+
+/* The description always keeps two lines of space so the metrics row lands
+   at the same height on every card, like crxsoso's grid. */
+.acquisition-result-card-description {
+  display: -webkit-box;
+  flex: 1 0 auto;
+  min-height: calc(1.5em * 2);
+  margin: 0;
+  overflow: hidden;
+  color: var(--foreground-muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* Four-column cards: a wide screenshot-style banner up top, then title,
+   chips, a clamped description, and metrics pinned to the bottom. */
 .acquisition-result-list.view-four .acquisition-result-card {
   grid-template-columns: 1fr;
   align-items: start;
   min-height: 0;
-  padding: 16px;
 }
 
-.acquisition-result-list.view-four .acquisition-result-card-top {
+.acquisition-result-list.view-four .acquisition-result-card-surface {
+  gap: 12px;
+  padding: 14px;
+}
+
+.acquisition-result-banner {
+  display: grid;
+  place-items: center;
+  height: 108px;
+  margin: 0;
+  overflow: hidden;
+  background: var(--surface-muted);
+  border-radius: var(--radius-control);
+}
+
+.acquisition-result-banner .acquisition-result-icon.icon-banner {
+  width: 100%;
+  height: 100%;
+  font-size: 30px;
+  border-radius: inherit;
+  box-shadow: none;
+}
+
+.acquisition-result-banner .acquisition-result-icon.icon-banner img {
+  object-fit: cover;
+}
+
+.acquisition-result-list.view-four .acquisition-result-copy {
+  display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 0 2px;
-  text-align: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  width: 100%;
 }
 
 .acquisition-result-list.view-four .acquisition-result-heading {
-  justify-content: center;
+  justify-content: flex-start;
   width: 100%;
 }
 
@@ -415,31 +460,11 @@
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-  text-align: center;
 }
 
-.acquisition-result-list.view-four .acquisition-result-icon {
-  width: 72px;
-  height: 72px;
-  border-radius: 16px;
-}
-
-.acquisition-result-list.view-four .acquisition-result-glyph {
-  width: 72px;
-  height: 72px;
-  font-size: 26px;
-}
-
-.acquisition-result-list.view-four .acquisition-result-arrow {
-  display: none;
-}
-
-.acquisition-result-list.view-four .acquisition-result-copy {
-  width: 100%;
-}
-
-.acquisition-result-list.view-four .acquisition-result-copy p {
+.acquisition-result-list.view-four .acquisition-result-card-description {
   -webkit-line-clamp: 3;
+  min-height: calc(1.5em * 3);
 }
 
 .acquisition-result-metrics {
@@ -447,6 +472,7 @@
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
+  margin-top: auto;
   color: var(--foreground-muted);
 }
 
@@ -461,22 +487,32 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  align-items: center;
   margin-top: 1px;
 }
 
 .acquisition-result-badge {
   display: inline-flex;
+  gap: 4px;
   align-items: center;
   max-width: 100%;
-  padding: 3px 8px;
+  padding: 2px 8px;
   overflow: hidden;
   color: var(--foreground-muted);
   text-overflow: ellipsis;
   white-space: nowrap;
-  background: color-mix(in srgb, var(--surface) 72%, var(--primary-soft));
+  background: var(--surface-muted);
   border-radius: 999px;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
+}
+
+/* crxsoso chips: the store mark stays neutral, the category keeps an accent
+   tint, rating reads warm, downloads read cool. */
+.acquisition-result-badge.store {
+  gap: 5px;
+  color: var(--foreground);
+  background: var(--surface-muted);
 }
 
 .acquisition-result-badge.provider {
@@ -490,10 +526,12 @@
 }
 
 .acquisition-result-metrics span {
-  padding: 3px 8px;
+  padding: 2px 8px;
   color: color-mix(in srgb, var(--foreground) 76%, var(--warning));
   background: color-mix(in srgb, var(--warning-soft) 80%, var(--surface));
   border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .acquisition-result-metrics span + span {
@@ -542,18 +580,6 @@
   height: 18px;
 }
 
-.acquisition-selected-channel {
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  min-width: 0;
-  padding: 10px 12px;
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-}
-
 .acquisition-channel-selected-mark {
   color: var(--success);
 }
@@ -580,10 +606,6 @@
   display: grid;
   gap: 20px;
   min-width: 0;
-  padding: 20px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
 }
 
 .acquisition-detail-header,
@@ -600,13 +622,18 @@
   font-size: 12px;
 }
 
-/* Hero: icon + copy + optional external action, like crxsoso's detail top. */
+/* Hero: icon + copy + action cluster, like crxsoso's detail top. A soft
+   tinted band separates it from the overview below. */
 .acquisition-detail-hero {
   display: flex;
   flex-wrap: wrap;
   gap: 16px;
   align-items: flex-start;
   min-width: 0;
+  padding: 18px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--primary-soft) 72%, var(--surface)) 0%, var(--surface) 82%);
+  border: 1px solid color-mix(in srgb, var(--primary) 18%, var(--border));
+  border-radius: var(--radius);
 }
 
 .acquisition-detail-hero-copy {
@@ -653,9 +680,47 @@
 
 .acquisition-detail-hero-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  align-items: flex-start;
+  align-items: center;
+  justify-content: flex-end;
   margin-left: auto;
+}
+
+/* The channel choice inside the hero is just a compact action row; the
+   channel detail stays in Download channel settings. */
+.acquisition-detail-hero-actions .acquisition-channel-choice {
+  display: contents;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+.acquisition-channel-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.acquisition-channel-start {
+  position: relative;
+  gap: 6px;
+}
+
+/* Corner badge naming the active download channel; full detail is the
+   button tooltip. */
+.acquisition-channel-corner {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  margin-left: 6px;
+  padding: 2px 7px;
+  color: var(--primary-foreground);
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .acquisition-detail-badges {
@@ -665,17 +730,56 @@
   align-items: center;
 }
 
+/* Coloured metric chips in the detail hero, mirroring crxsoso's accents:
+   store neutral, rating warm, downloads cool, version/Manifest violet. */
+.acquisition-detail-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.acquisition-detail-chip.category {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  color: color-mix(in srgb, var(--accent) 72%, var(--foreground));
+  background: color-mix(in srgb, var(--accent-soft) 82%, var(--surface));
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .acquisition-detail-metric {
   display: inline-flex;
   gap: 4px;
   align-items: center;
-  padding: 3px 8px;
-  color: var(--foreground-muted);
-  background: var(--surface-muted);
-  border: 1px solid var(--border-subtle);
+  padding: 3px 9px;
   border-radius: 999px;
   font-size: 12px;
   font-weight: 700;
+}
+
+.acquisition-detail-metric.store {
+  gap: 5px;
+  color: var(--foreground);
+  background: var(--surface-muted);
+}
+
+.acquisition-detail-metric.rating {
+  color: color-mix(in srgb, var(--warning) 80%, var(--foreground));
+  background: color-mix(in srgb, var(--warning-soft) 82%, var(--surface));
+}
+
+.acquisition-detail-metric.downloads {
+  color: color-mix(in srgb, var(--info) 78%, var(--foreground));
+  background: color-mix(in srgb, var(--info-soft) 82%, var(--surface));
+}
+
+.acquisition-detail-metric.version,
+.acquisition-detail-metric.manifest {
+  color: color-mix(in srgb, var(--accent) 75%, var(--foreground));
+  background: color-mix(in srgb, var(--accent-soft) 82%, var(--surface));
 }
 
 /* Bottom: overview on the left, plain facts on the right. */
@@ -875,7 +979,6 @@
 }
 
 .acquisition-result-card.selected,
-.acquisition-channel-card.selected,
 .confirm-choice.active,
 .acquisition-source-card.enabled {
   background: color-mix(in srgb, var(--primary) 7%, var(--surface));
@@ -883,8 +986,7 @@
 }
 
 .acquisition-result-icon,
-.acquisition-source-icon,
-.acquisition-channel-icon {
+.acquisition-source-icon {
   display: grid;
   place-items: center;
   width: 38px;
@@ -990,7 +1092,6 @@
 
 .acquisition-result-copy,
 .acquisition-source-copy,
-.acquisition-channel-copy,
 .confirm-choice-text {
   display: grid;
   gap: 5px;
@@ -1278,8 +1379,7 @@
   cursor: pointer;
 }
 
-.confirm-choice input,
-.acquisition-channel-card input {
+.confirm-choice input {
   width: 18px;
   height: 18px;
   accent-color: var(--primary);
@@ -1364,7 +1464,6 @@
 
   .acquisition-result-card,
   .acquisition-source-card,
-  .acquisition-channel-card,
   .confirm-choice {
     grid-template-columns: auto minmax(0, 1fr);
   }
@@ -1400,19 +1499,20 @@
     min-height: 0;
   }
 
-  .acquisition-result-list.view-four .acquisition-result-icon {
-    width: 60px;
-    height: 60px;
+  .acquisition-result-banner {
+    height: 92px;
   }
 
-  .acquisition-result-list.view-four .acquisition-result-glyph {
-    width: 60px;
-    height: 60px;
-    font-size: 22px;
+  .acquisition-result-banner .acquisition-result-icon.icon-banner {
+    font-size: 24px;
   }
 
   .acquisition-detail-bottom {
     grid-template-columns: 1fr;
+  }
+
+  .acquisition-detail-hero {
+    padding: 14px;
   }
 
   .acquisition-detail-hero .acquisition-result-icon.icon-xl {
@@ -1423,7 +1523,9 @@
   }
 
   .acquisition-detail-hero-actions {
+    justify-content: flex-start;
     margin-left: 0;
+    width: 100%;
   }
 
   .acquisition-progress-steps {
@@ -1457,7 +1559,6 @@
 @media (prefers-reduced-motion: reduce) {
   .acquisition-result-card,
   .acquisition-source-card,
-  .acquisition-channel-card,
   .confirm-choice {
     transition: none;
   }

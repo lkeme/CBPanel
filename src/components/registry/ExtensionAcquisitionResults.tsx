@@ -23,6 +23,7 @@ import {
   type ExtensionReferenceResolution,
 } from "../../shared/extensionAcquisition";
 import { StatusPill } from "../ui/StatusPill";
+import { ChromeMark } from "./ChromeMark";
 import {
   ExtensionAcquisitionErrorText,
   type ExtensionAcquisitionUiError,
@@ -294,6 +295,61 @@ function CatalogResultCard({
   const titleId = useId();
   const activate = () => (onOpenDetail ? onOpenDetail(item) : onChoose(item));
 
+  if (viewMode === "four") {
+    return (
+      <article
+        aria-labelledby={titleId}
+        className={`acquisition-result-card ${selected ? "selected" : ""}`.trim()}
+        role="listitem"
+      >
+        <button
+          aria-labelledby={titleId}
+          className="acquisition-result-card-surface"
+          onClick={activate}
+          type="button"
+        >
+          {/* Screenshot-style banner: the icon fills the top band, centered. */}
+          <div className="acquisition-result-banner">
+            <CatalogIcon item={item} size="banner" />
+          </div>
+          <div className="acquisition-result-copy">
+            <div className="acquisition-result-heading">
+              <span className="acquisition-result-title" id={titleId}>{item.name}</span>
+              {selected && <StatusPill tone="running">{t("extension.acquisition.channel.selected")}</StatusPill>}
+              {installed && <StatusPill tone="neutral">{t("extension.acquisition.results.installed")}</StatusPill>}
+            </div>
+            <div className="acquisition-result-badges">
+              <span className="acquisition-result-badge store">
+                <ChromeMark size={12} />
+                Chrome
+              </span>
+              {item.category && <span className="acquisition-result-badge category">{item.category}</span>}
+            </div>
+            <p className="acquisition-result-card-description">
+              {item.description || t("extension.acquisition.results.noDescription")}
+            </p>
+            <div className="acquisition-result-metrics">
+              {item.rating !== undefined && (
+                <span className="acquisition-result-metric rating">
+                  <Star aria-hidden="true" size={13} /> {item.rating.toFixed(1)}
+                </span>
+              )}
+              {item.userCount !== undefined && (
+                <span
+                  aria-label={`${t("extension.acquisition.results.downloads")}: ${formatAcquisitionCount(item.userCount)}`}
+                  className="acquisition-result-metric downloads"
+                  title={t("extension.acquisition.results.downloads")}
+                >
+                  <Download aria-hidden="true" size={13} /> {formatAcquisitionCount(item.userCount)}
+                </span>
+              )}
+            </div>
+          </div>
+        </button>
+      </article>
+    );
+  }
+
   return (
     <article
       aria-labelledby={titleId}
@@ -306,31 +362,41 @@ function CatalogResultCard({
         onClick={activate}
         type="button"
       >
+        {/* Two-column: icon at left, title + badges parallel on its right;
+            description reserves two lines; metrics pin to the bottom. */}
         <div className="acquisition-result-card-top">
           <CatalogIcon item={item} />
           <div className="acquisition-result-heading">
             <span className="acquisition-result-title" id={titleId}>{item.name}</span>
-            {selected && <StatusPill tone="running">{t("extension.acquisition.channel.selected")}</StatusPill>}
-            {installed && <StatusPill tone="neutral">{t("extension.acquisition.results.installed")}</StatusPill>}
-            {viewMode === "two" && <span className="acquisition-result-arrow" aria-hidden="true">›</span>}
-          </div>
-        </div>
-        <div className="acquisition-result-copy">
-          {item.category && (
             <div className="acquisition-result-badges">
-              <span className="acquisition-result-badge category">{item.category}</span>
+              <span className="acquisition-result-badge store">
+                <ChromeMark size={12} />
+                Chrome
+              </span>
+              {item.category && <span className="acquisition-result-badge category">{item.category}</span>}
+              {selected && <StatusPill tone="running">{t("extension.acquisition.channel.selected")}</StatusPill>}
+              {installed && <StatusPill tone="neutral">{t("extension.acquisition.results.installed")}</StatusPill>}
             </div>
+          </div>
+          <span className="acquisition-result-arrow" aria-hidden="true">›</span>
+        </div>
+        <p className="acquisition-result-card-description">
+          {item.description || t("extension.acquisition.results.noDescription")}
+        </p>
+        <div className="acquisition-result-metrics">
+          {item.rating !== undefined && (
+            <span className="acquisition-result-metric rating">
+              <Star aria-hidden="true" size={13} /> {item.rating.toFixed(1)}
+            </span>
           )}
-          {item.description && <p>{item.description}</p>}
-          {(item.rating !== undefined || item.userCount !== undefined) && (
-            <div className="acquisition-result-metrics">
-              {item.rating !== undefined && <span className="acquisition-result-metric rating"><Star aria-hidden="true" size={13} /> {item.rating.toFixed(1)}</span>}
-              {item.userCount !== undefined && <span
-                aria-label={`${t("extension.acquisition.results.downloads")}: ${formatAcquisitionCount(item.userCount)}`}
-                className="acquisition-result-metric downloads"
-                title={t("extension.acquisition.results.downloads")}
-              ><Download aria-hidden="true" size={13} /> {formatAcquisitionCount(item.userCount)}</span>}
-            </div>
+          {item.userCount !== undefined && (
+            <span
+              aria-label={`${t("extension.acquisition.results.downloads")}: ${formatAcquisitionCount(item.userCount)}`}
+              className="acquisition-result-metric downloads"
+              title={t("extension.acquisition.results.downloads")}
+            >
+              <Download aria-hidden="true" size={13} /> {formatAcquisitionCount(item.userCount)}
+            </span>
           )}
         </div>
       </button>
@@ -347,7 +413,7 @@ function extensionGlyph(item: ExtensionCatalogItem): { label: string; tone: numb
   return { label, tone: Math.abs(hash) % 6 };
 }
 
-function CatalogIcon({ item, size = "md" }: { item: ExtensionCatalogItem; size?: "sm" | "md" | "lg" | "xl" }) {
+function CatalogIcon({ item, size = "md" }: { item: ExtensionCatalogItem; size?: "sm" | "md" | "lg" | "xl" | "banner" }) {
   const [iconFailed, setIconFailed] = useState(false);
   const [iconLoaded, setIconLoaded] = useState(false);
   const glyph = extensionGlyph(item);
@@ -410,46 +476,56 @@ export function ExtensionCatalogDetail({
         <span className="acquisition-detail-breadcrumb">{t("extension.acquisition.results.title")}</span>
       </header>
 
-      {/* Top section: hero with icon, name, developer, description, badges */}
+      {/* Top section, crxsoso-style: icon + identity on the left, actions on
+          the right; metrics carry their own accent colours. */}
       <div className="acquisition-detail-hero">
         <CatalogIcon item={item} size="xl" />
         <div className="acquisition-detail-hero-copy">
           <div className="acquisition-detail-title-row">
             <h3 id={headingId}>{item.name}</h3>
+            {item.category && <span className="acquisition-detail-chip category">{item.category}</span>}
             {installed && <StatusPill tone="running">{t("extension.acquisition.results.installed")}</StatusPill>}
           </div>
           {item.developer && <p className="acquisition-detail-developer">{item.developer}</p>}
           <p className="acquisition-detail-description">{item.description || t("extension.acquisition.results.noDescription")}</p>
-          <div className="acquisition-detail-badges">
-            {item.category && <StatusPill tone="neutral">{item.category}</StatusPill>}
+          <div className="acquisition-detail-metrics">
+            <span className="acquisition-detail-metric store">
+              <ChromeMark size={14} />
+              Chrome
+            </span>
             {item.rating !== undefined && (
-              <span className="acquisition-detail-metric">
+              <span className="acquisition-detail-metric rating">
                 <Star aria-hidden="true" size={14} /> {item.rating.toFixed(1)}
               </span>
             )}
             {item.userCount !== undefined && (
-              <span className="acquisition-detail-metric">
+              <span className="acquisition-detail-metric downloads">
                 <Download aria-hidden="true" size={14} /> {formatAcquisitionCount(item.userCount)}
               </span>
             )}
-            {item.version && <span className="acquisition-detail-metric">v{item.version}</span>}
-            {item.manifestVersion !== undefined && <span className="acquisition-detail-metric">MV{item.manifestVersion}</span>}
+            {item.version && (
+              <span className="acquisition-detail-metric version">v{item.version}</span>
+            )}
+            {item.manifestVersion !== undefined && (
+              <span className="acquisition-detail-metric manifest">MV{item.manifestVersion}</span>
+            )}
           </div>
         </div>
-        {providerId && (
-          <div className="acquisition-detail-hero-actions">
-            <button className="command primary" onClick={() => onOpenListing(item, providerId)} type="button">
+        {/* One action cluster: open the listing, then install. The download
+            channel itself is only a corner badge on the install action — the
+            single-choice channel is configured in Download channel settings. */}
+        <div className="acquisition-detail-hero-actions">
+          {footer}
+          {providerId && !footer && (
+            <button className="command subtle" onClick={() => onOpenListing(item, providerId)} type="button">
               <ExternalLink aria-hidden="true" size={15} />
               {providerId === "crxsoso"
                 ? t("extension.acquisition.results.openProvider")
                 : t("extension.acquisition.openWebStore")}
             </button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
-
-      {/* Footer (channel choice) - rendered as part of the top section */}
-      {footer}
 
       {/* Bottom section: two columns */}
       <div className="acquisition-detail-bottom">
@@ -487,6 +563,18 @@ export function ExtensionCatalogDetail({
                 </a>
               </dd>
             </div>
+            {item.developer && (
+              <div className="acquisition-detail-fact">
+                <dt>{t("extension.acquisition.results.developer")}</dt>
+                <dd>{item.developer}</dd>
+              </div>
+            )}
+            {item.version && (
+              <div className="acquisition-detail-fact">
+                <dt>{t("extension.acquisition.results.version")}</dt>
+                <dd>{item.version}</dd>
+              </div>
+            )}
             {item.updatedAt && (
               <div className="acquisition-detail-fact">
                 <dt>{t("extension.acquisition.results.updatedAt")}</dt>
@@ -497,6 +585,12 @@ export function ExtensionCatalogDetail({
               <div className="acquisition-detail-fact">
                 <dt>{t("extension.acquisition.results.size")}</dt>
                 <dd>{item.size}</dd>
+              </div>
+            )}
+            {item.manifestVersion !== undefined && (
+              <div className="acquisition-detail-fact">
+                <dt>{t("extension.acquisition.results.manifestVersion")}</dt>
+                <dd>{item.manifestVersion}</dd>
               </div>
             )}
           </dl>
@@ -578,7 +672,7 @@ export function ExtensionArtifactChannelChoice({
   installed = false,
   onCancel,
   onOpenListing,
-  onSelect,
+  onSelect: _onSelect,
   onStart,
   providerFailure,
   resolution,
@@ -621,39 +715,54 @@ export function ExtensionArtifactChannelChoice({
     : undefined;
   const busy = Boolean(startingProviderId);
 
+  const channelSummary = selectedOffer
+    ? selectedOffer.artifactProviderId === "chrome-web-store"
+      ? t("extension.acquisition.channel.googleDescription")
+      : t("extension.acquisition.channel.mirrorDescription")
+    : undefined;
+
   return (
-    <section aria-labelledby={headingId} className="acquisition-channel-choice">
-      <header className="acquisition-section-header">
-        <div>
-          <h3 id={headingId}>{t("extension.acquisition.channel.title")}</h3>
-        </div>
-        <div className="acquisition-section-actions">
-          <button className="command subtle" disabled={busy} onClick={() => onOpenListing(resolution)} type="button">
-            <ExternalLink aria-hidden="true" size={15} />
-            {t("extension.acquisition.openWebStore")}
+    <section aria-label={t("extension.acquisition.channel.title")} className="acquisition-channel-choice">
+      <div className="acquisition-channel-toolbar">
+        <button className="command subtle" disabled={busy} onClick={() => onOpenListing(resolution)} type="button">
+          <ExternalLink aria-hidden="true" size={15} />
+          {t("extension.acquisition.openWebStore")}
+        </button>
+        {selectedOffer && !installed && (
+          <button
+            className="command primary acquisition-channel-start"
+            disabled={busy}
+            onClick={() => void onStart(selectedOffer)}
+            title={channelSummary}
+            type="button"
+          >
+            {startingProviderId === selectedOffer.artifactProviderId ? (
+              t("extension.acquisition.loading")
+            ) : (
+              <>
+                <Download aria-hidden="true" size={16} />
+                {t("extension.acquisition.channel.start", { provider: selectedOffer.providerLabel })}
+                {/* The single download channel is a corner badge on the install
+                    action; switching it lives in Download channel settings. */}
+                <span className="acquisition-channel-corner" title={channelSummary}>
+                  <Store aria-hidden="true" size={11} />
+                  {selectedOffer.providerLabel}
+                </span>
+              </>
+            )}
           </button>
-          {selectedOffer && !installed && (
-            <button
-              className="command primary acquisition-channel-start"
-              disabled={busy}
-              onClick={() => void onStart(selectedOffer)}
-              type="button"
-            >
-              {startingProviderId === selectedOffer.artifactProviderId
-                ? t("extension.acquisition.loading")
-                : t("extension.acquisition.channel.start", { provider: selectedOffer.providerLabel })}
-              </button>
-          )}
-          {selectedOffer && installed && (
-            <StatusPill tone="running">{t("extension.acquisition.results.installed")}</StatusPill>
-          )}
-          {busy && onCancel && (
-            <button className="command subtle" onClick={() => void onCancel()} type="button">
-              {t("actions.cancelOperation")}
-            </button>
-          )}
-        </div>
-      </header>
+        )}
+        {selectedOffer && installed && (
+          <StatusPill tone="running">{t("extension.acquisition.results.installed")}</StatusPill>
+        )}
+        {busy && onCancel && (
+          <button className="command subtle" onClick={() => void onCancel()} type="button">
+            {t("actions.cancelOperation")}
+          </button>
+        )}
+      </div>
+
+      <span className="acquisition-visually-hidden" id={headingId}>{t("extension.acquisition.channel.title")}</span>
 
       {!embedded && (
         <dl className="acquisition-identity-summary">
@@ -671,54 +780,12 @@ export function ExtensionArtifactChannelChoice({
         </div>
       )}
 
-      {resolution.offers.length === 0 ? (
+      {resolution.offers.length === 0 && (
         <div className="module-empty acquisition-channel-empty">
           <Store aria-hidden="true" size={20} />
           <strong>{t("extension.acquisition.channel.noneTitle")}</strong>
           <span>{t("extension.acquisition.channel.noneBody")}</span>
         </div>
-      ) : resolution.offers.length === 1 ? (
-        <div className="acquisition-selected-channel" role="status">
-          <span className="acquisition-channel-icon" aria-hidden="true"><Download size={18} /></span>
-          <span className="acquisition-channel-copy">
-            <strong>{resolution.offers[0]?.providerLabel}</strong>
-            <small>{resolution.offers[0]?.artifactProviderId === "chrome-web-store"
-              ? t("extension.acquisition.channel.googleDescription")
-              : t("extension.acquisition.channel.mirrorDescription")}</small>
-          </span>
-          <StatusPill tone="running">{t("extension.acquisition.channel.selected")}</StatusPill>
-        </div>
-      ) : (
-        <fieldset className="acquisition-channel-list" disabled={busy}>
-          <legend>{t("extension.acquisition.channel.title")}</legend>
-          {resolution.offers.map((offer) => {
-            const selected = offer.artifactProviderId === selectedProviderId;
-            const google = offer.artifactProviderId === "chrome-web-store";
-            return (
-              <label className={`acquisition-channel-card ${selected ? "selected" : ""}`} key={offer.artifactProviderId}>
-                <input
-                  checked={selected}
-                  name={`extension-channel-${resolution.storeId}`}
-                  onChange={() => onSelect(offer.artifactProviderId)}
-                  type="radio"
-                  value={offer.artifactProviderId}
-                />
-                <span className="acquisition-channel-icon" aria-hidden="true">
-                  <Download size={18} />
-                </span>
-                <span className="acquisition-channel-copy">
-                  <strong>{offer.providerLabel}</strong>
-                  <small>
-                    {google
-                      ? t("extension.acquisition.channel.googleDescription")
-                      : t("extension.acquisition.channel.mirrorDescription")}
-                  </small>
-                </span>
-                {selected && <StatusPill tone="running">{t("extension.acquisition.channel.selected")}</StatusPill>}
-              </label>
-            );
-          })}
-        </fieldset>
       )}
 
       {!installed && providerFailure && alternateOffer && (
@@ -739,7 +806,6 @@ export function ExtensionArtifactChannelChoice({
           </button>
         </div>
       )}
-
     </section>
   );
 }

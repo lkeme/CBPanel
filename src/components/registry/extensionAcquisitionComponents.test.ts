@@ -340,7 +340,9 @@ test("catalog supports four-column cards with Chrome marks and a detail child vi
   }));
   assert.ok(detail.includes("extension.acquisition.results.back"));
   assert.ok(detail.includes("channel-action"));
-  assert.ok(detail.includes("extension.acquisition.results.openProvider"), "the detail hero keeps an external listing action");
+  // With a footer embedded, the footer owns the channel/listing actions; the
+  // hero adds no duplicate listing button.
+  assert.ok(!detail.includes("extension.acquisition.openWebStore"), "the embedded channel footer owns the listing action");
   assert.ok(!detail.includes("extension.acquisition.results.choose"));
   assert.ok(detail.includes(item.storeId));
   assert.ok(detail.includes(`href="https://chromewebstore.google.com/detail/${item.storeId}"`));
@@ -460,7 +462,7 @@ test("exact ID resolution failures are announced as acquisition failures rather 
   assert.match(html, /role="alert"/);
 });
 
-test("a Google failure keeps Google selected and exposes mirror only as an explicit action", () => {
+test("a Google failure keeps Google as the corner channel and exposes mirror only as an explicit action", () => {
   const html = renderToStaticMarkup(React.createElement(ExtensionArtifactChannelChoice, {
     onOpenListing: () => undefined,
     onSelect: () => undefined,
@@ -479,8 +481,10 @@ test("a Google failure keeps Google selected and exposes mirror only as an expli
     t,
   }));
 
-  assert.match(html, /value="chrome-web-store"[^>]*checked=""|checked=""[^>]*value="chrome-web-store"/);
-  assert.doesNotMatch(html, /value="crxsoso"[^>]*checked=""|checked=""[^>]*value="crxsoso"/);
+  // The channel is a corner badge on the install action, not a radio card.
+  assert.ok(html.includes("acquisition-channel-corner"));
+  assert.ok(html.includes("Chrome Web Store"));
+  assert.ok(!html.includes('type="radio"'));
   assert.ok(html.includes("extension.acquisition.channel.mirrorDescription"));
   assert.ok(html.includes("extension.acquisition.channel.tryMirror"));
   assert.match(html, /role="alert"/);
@@ -556,8 +560,7 @@ test("session creation exposes a safe cancellation action while the chosen chann
 
   assert.ok(html.includes("extension.acquisition.loading"));
   assert.ok(html.includes("actions.cancelOperation"));
-  assert.match(html, /<button[^>]*disabled=""[^>]*>extension\.acquisition\.loading<\/button>/);
-});
+  assert.match(html, /<button[^>]*disabled=""[^>]*>extension\.acquisition\.loading<\/button>/);});
 
 test("an installed result exposes status without another Get-page install action", () => {
   const html = renderToStaticMarkup(React.createElement(ExtensionArtifactChannelChoice, {
