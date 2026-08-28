@@ -352,6 +352,57 @@ test("catalog supports four-column cards with Chrome marks and a detail child vi
   assert.ok(!detail.includes(item.observedAt));
 });
 
+test("catalog detail overview is rendered as sanitized markdown", () => {
+  const item = {
+    namespace: "chrome-web-store" as const,
+    storeId: "a".repeat(32),
+    storeUrl: `https://chromewebstore.google.com/detail/${"a".repeat(32)}`,
+    catalogProviderId: "crxsoso" as const,
+    observedAt: "2026-08-27T00:00:00.000Z",
+    name: "Example",
+    overview: [
+      "## Features",
+      "",
+      "- one",
+      "- two",
+      "",
+      "[docs](https://example.com/docs)",
+      "[tracker](http://insecure.example.com)",
+      "<script>alert(1)</script>",
+      "<b>bold raw html</b>",
+      "![promo](https://example.com/promo.png)",
+    ].join("\n"),
+  };
+  const detail = renderToStaticMarkup(React.createElement(ExtensionCatalogResults, {
+    detailItem: item,
+    detailProviderId: "crxsoso",
+    locale: "en-US",
+    onBackDetail: () => undefined,
+    onChoose: () => undefined,
+    onLoadMore: () => undefined,
+    onOpenListing: () => undefined,
+    onRetry: () => undefined,
+    page: { query: "example", items: [item], excludedNonCanonicalCount: 0, hasMore: false },
+    status: "ready",
+    t,
+  }));
+
+  // Structural markdown renders to real elements.
+  assert.ok(detail.includes("<h2>Features</h2>"));
+  assert.ok(detail.includes("<li>one</li>"));
+  // Links open externally with safe rel attributes.
+  assert.ok(detail.includes('href="https://example.com/docs"'));
+  assert.ok(detail.includes('rel="noopener noreferrer nofollow"'));
+  // Non-https links degrade to plain text (no href at all).
+  assert.ok(!detail.includes("insecure.example.com"));
+  assert.ok(detail.includes("tracker"));
+  // Raw HTML is stripped entirely (escaped or dropped, never executed).
+  assert.ok(!detail.includes("<script>"));
+  assert.ok(!detail.includes("<b>bold raw html</b>"));
+  // Images are dropped, leaving only their alt text.
+  assert.ok(!detail.includes("promo.png"));
+});
+
 test("catalog download counts use stable K/M/B units regardless of locale", () => {
   assert.equal(formatAcquisitionCount(999), "999");
   assert.equal(formatAcquisitionCount(1_200), "1.2K");

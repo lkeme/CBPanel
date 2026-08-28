@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-28T03:40:45.371Z",
+  "generatedAt": "2026-08-28T07:15:49.478Z",
   "tool": "scripts/check-bundle-baseline.mjs",
   "limits": {
     "perChunkBytes": 32768,
@@ -10,12 +10,12 @@
   },
   "chunks": [
     {
-      "file": "index-Ctp-8al5.js",
+      "file": "index-D4JM-Si2.js",
       "name": "index.js",
       "role": "entry",
       "bytes": 227556,
-      "gzipBytes": 67858,
-      "brotliBytes": 55387
+      "gzipBytes": 67849,
+      "brotliBytes": 55318
     },
     {
       "file": "react-vendor-BFqn7xQO.js",
@@ -34,28 +34,28 @@
       "brotliBytes": 30024
     },
     {
-      "file": "SettingsDrawer-BljxTWms.js",
+      "file": "SettingsDrawer-C5nh_mJ5.js",
       "name": "SettingsDrawer.js",
       "role": "settings",
       "bytes": 80354,
       "gzipBytes": 24174,
-      "brotliBytes": 19844
+      "brotliBytes": 19823
     },
     {
-      "file": "locale-en-US-BZU2VPxR.js",
+      "file": "locale-en-US-DWxoQKHq.js",
       "name": "locale-en-US.js",
       "role": "locale",
-      "bytes": 79388,
-      "gzipBytes": 21393,
-      "brotliBytes": 18263
+      "bytes": 79445,
+      "gzipBytes": 21406,
+      "brotliBytes": 18286
     },
     {
-      "file": "RegistryModuleView-DuT70jFB.js",
+      "file": "RegistryModuleView-BXcOYbst.js",
       "name": "RegistryModuleView.js",
       "role": "registry-view",
-      "bytes": 71232,
-      "gzipBytes": 17203,
-      "brotliBytes": 15400
+      "bytes": 71451,
+      "gzipBytes": 17259,
+      "brotliBytes": 15406
     },
     {
       "file": "ui-vendor-DmXYXT1M.js",
@@ -66,12 +66,20 @@
       "brotliBytes": 15661
     },
     {
-      "file": "ProfileEditorDrawer-DI_g4kZ4.js",
+      "file": "vendor-CK3ygBCg.js",
+      "name": "vendor.js",
+      "role": "vendor",
+      "bytes": 42888,
+      "gzipBytes": 12692,
+      "brotliBytes": 11564
+    },
+    {
+      "file": "ProfileEditorDrawer-QL5_0i_P.js",
       "name": "ProfileEditorDrawer.js",
       "role": "profile-editor",
       "bytes": 32060,
-      "gzipBytes": 8036,
-      "brotliBytes": 7185
+      "gzipBytes": 8039,
+      "brotliBytes": 7188
     },
     {
       "file": "icons-vendor-C8Yi89CA.js",
@@ -82,116 +90,116 @@
       "brotliBytes": 7738
     },
     {
-      "file": "RegistryDialogs--_4LCOqU.js",
+      "file": "RegistryDialogs-Cvcz8NnV.js",
       "name": "RegistryDialogs.js",
       "role": "registry-dialogs",
       "bytes": 21449,
-      "gzipBytes": 5660,
-      "brotliBytes": 5055
+      "gzipBytes": 5662,
+      "brotliBytes": 5057
     },
     {
-      "file": "locale-extensionAcquisition.zh-CN-CWUlVJ0l.js",
+      "file": "locale-extensionAcquisition.zh-CN-B5GmvgSB.js",
       "name": "locale-extensionAcquisition.zh-CN.js",
       "role": "locale",
-      "bytes": 20068,
-      "gzipBytes": 5683,
-      "brotliBytes": 4477
+      "bytes": 20120,
+      "gzipBytes": 5696,
+      "brotliBytes": 4489
     },
     {
-      "file": "ExtensionAcquisitionSessionPanel-DfkCk3Pm.js",
+      "file": "ExtensionAcquisitionSessionPanel-BPl0KT3-.js",
       "name": "ExtensionAcquisitionSessionPanel.js",
       "role": "other",
       "bytes": 17477,
-      "gzipBytes": 4146,
-      "brotliBytes": 3690
+      "gzipBytes": 4147,
+      "brotliBytes": 3693
     },
     {
-      "file": "ExtensionAcquisitionResults-CGdsAbp9.js",
+      "file": "ExtensionAcquisitionResults-DhN25VxL.js",
       "name": "ExtensionAcquisitionResults.js",
       "role": "other",
-      "bytes": 16535,
-      "gzipBytes": 3694,
-      "brotliBytes": 3273
+      "bytes": 17019,
+      "gzipBytes": 3852,
+      "brotliBytes": 3397
     },
     {
-      "file": "SystemStatusContent-CvfTAH2t.js",
+      "file": "SystemStatusContent-BAF5iHMM.js",
       "name": "SystemStatusContent.js",
       "role": "other",
       "bytes": 11023,
-      "gzipBytes": 2800,
-      "brotliBytes": 2480
+      "gzipBytes": 2802,
+      "brotliBytes": 2486
     },
     {
-      "file": "ExtensionRegistryDetail-BzCyfHXi.js",
+      "file": "ExtensionRegistryDetail-CiqL2jIv.js",
       "name": "ExtensionRegistryDetail.js",
       "role": "other",
       "bytes": 9525,
-      "gzipBytes": 2146,
+      "gzipBytes": 2145,
       "brotliBytes": 1923
     },
     {
-      "file": "ExtensionAcquisitionSources-Ky9vf9Tb.js",
+      "file": "ExtensionAcquisitionSources-w5XAesy7.js",
       "name": "ExtensionAcquisitionSources.js",
       "role": "other",
       "bytes": 4984,
-      "gzipBytes": 1466,
-      "brotliBytes": 1301
+      "gzipBytes": 1467,
+      "brotliBytes": 1307
     },
     {
-      "file": "ColumnSettingsDrawer-Dm01jiyy.js",
+      "file": "ColumnSettingsDrawer-CKBOFzJ5.js",
       "name": "ColumnSettingsDrawer.js",
       "role": "column-settings",
       "bytes": 4328,
-      "gzipBytes": 1678,
-      "brotliBytes": 1512
+      "gzipBytes": 1681,
+      "brotliBytes": 1515
     },
     {
-      "file": "form-controls-DevRxiaS.js",
+      "file": "form-controls-BzUeEinl.js",
       "name": "form-controls.js",
       "role": "other",
       "bytes": 4275,
-      "gzipBytes": 1616,
-      "brotliBytes": 1424
+      "gzipBytes": 1619,
+      "brotliBytes": 1426
     },
     {
-      "file": "BrowserCoreImportDialog-DEP3p5R3.js",
+      "file": "BrowserCoreImportDialog-C0k8LeN7.js",
       "name": "BrowserCoreImportDialog.js",
       "role": "browser-core-import",
       "bytes": 3163,
-      "gzipBytes": 1277,
+      "gzipBytes": 1279,
       "brotliBytes": 1130
     },
     {
-      "file": "proxyDisplay-CCGrYbgq.js",
+      "file": "proxyDisplay-CBj67tRe.js",
       "name": "proxyDisplay.js",
       "role": "other",
       "bytes": 2645,
-      "gzipBytes": 1217,
-      "brotliBytes": 1077
+      "gzipBytes": 1218,
+      "brotliBytes": 1075
     },
     {
-      "file": "appBackupClient-D2ScFpyp.js",
+      "file": "appBackupClient-DVAwuPR-.js",
       "name": "appBackupClient.js",
       "role": "other",
       "bytes": 1995,
-      "gzipBytes": 869,
-      "brotliBytes": 753
+      "gzipBytes": 870,
+      "brotliBytes": 759
     },
     {
-      "file": "EnvironmentPackageOperationDialog-B_gZt2FY.js",
+      "file": "EnvironmentPackageOperationDialog-BaE6y1Sx.js",
       "name": "EnvironmentPackageOperationDialog.js",
       "role": "other",
       "bytes": 1879,
-      "gzipBytes": 837,
-      "brotliBytes": 717
+      "gzipBytes": 838,
+      "brotliBytes": 750
     },
     {
-      "file": "RuntimeCheckContent-DZbzbmgO.js",
+      "file": "RuntimeCheckContent-BLQ98TkE.js",
       "name": "RuntimeCheckContent.js",
       "role": "other",
       "bytes": 1825,
-      "gzipBytes": 738,
-      "brotliBytes": 642
+      "gzipBytes": 739,
+      "brotliBytes": 644
     },
     {
       "file": "ConfirmDialog-DFahhDwS.js",
@@ -253,72 +261,72 @@
   "summary": [
     {
       "role": "vendor",
-      "files": 5,
-      "bytes": 369859,
-      "gzipBytes": 117223,
-      "brotliBytes": 102247
+      "files": 6,
+      "bytes": 412747,
+      "gzipBytes": 129915,
+      "brotliBytes": 113811
     },
     {
       "role": "entry",
       "files": 1,
       "bytes": 227556,
-      "gzipBytes": 67858,
-      "brotliBytes": 55387
+      "gzipBytes": 67849,
+      "brotliBytes": 55318
     },
     {
       "role": "locale",
       "files": 2,
-      "bytes": 99456,
-      "gzipBytes": 27076,
-      "brotliBytes": 22740
+      "bytes": 99565,
+      "gzipBytes": 27102,
+      "brotliBytes": 22775
     },
     {
       "role": "settings",
       "files": 1,
       "bytes": 80354,
       "gzipBytes": 24174,
-      "brotliBytes": 19844
+      "brotliBytes": 19823
     },
     {
       "role": "other",
       "files": 16,
-      "bytes": 78427,
-      "gzipBytes": 22767,
-      "brotliBytes": 20134
+      "bytes": 78911,
+      "gzipBytes": 22935,
+      "brotliBytes": 20314
     },
     {
       "role": "registry-view",
       "files": 1,
-      "bytes": 71232,
-      "gzipBytes": 17203,
-      "brotliBytes": 15400
+      "bytes": 71451,
+      "gzipBytes": 17259,
+      "brotliBytes": 15406
     },
     {
       "role": "profile-editor",
       "files": 1,
       "bytes": 32060,
-      "gzipBytes": 8036,
-      "brotliBytes": 7185
+      "gzipBytes": 8039,
+      "brotliBytes": 7188
     },
     {
       "role": "registry-dialogs",
       "files": 1,
       "bytes": 21449,
-      "gzipBytes": 5660,
-      "brotliBytes": 5055
+      "gzipBytes": 5662,
+      "brotliBytes": 5057
     },
     {
       "role": "column-settings",
       "files": 1,
       "bytes": 4328,
-      "gzipBytes": 1678,
-      "brotliBytes": 1512
+      "gzipBytes": 1681,
+      "brotliBytes": 1515
     },
     {
       "role": "browser-core-import",
       "files": 1,
       "bytes": 3163,
-      "gzipBytes": 1277,
+      "gzipBytes": 1279,
       "brotliBytes": 1130
     }
   ]

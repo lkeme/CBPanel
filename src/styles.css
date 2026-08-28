@@ -708,6 +708,7 @@
   font-size: 14px;
   line-height: 1.7;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .acquisition-detail-markdown > :first-child {
@@ -772,14 +773,16 @@
 
 .acquisition-detail-markdown pre {
   padding: 12px;
-  overflow: auto;
+  overflow-x: auto;
   background: var(--surface-muted);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-control);
 }
 
 .acquisition-detail-markdown pre code {
+  display: block;
   padding: 0;
+  white-space: pre;
   background: transparent;
   border: 0;
 }
@@ -802,7 +805,9 @@
 }
 
 .acquisition-detail-markdown table {
+  display: block;
   width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
   font-size: 13px;
 }

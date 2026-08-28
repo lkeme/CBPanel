@@ -10,7 +10,7 @@ import {
   Store,
   Star,
 } from "lucide-react";
-import { marked } from "marked";
+import { marked, Renderer } from "marked";
 import { useId, useMemo, useState, type ReactNode } from "react";
 
 import type { Locale } from "../../i18n";
@@ -398,7 +398,7 @@ export function ExtensionCatalogDetail({
   const headingId = useId();
   const overviewHtml = useMemo(() => {
     if (!item.overview) return "";
-    return marked.parse(item.overview, { async: false }) as string;
+    return renderOverviewMarkdown(item.overview);
   }, [item.overview]);
 
   return (
@@ -514,6 +514,42 @@ function formatDetailDate(value: string, locale: Locale): string {
     month: "2-digit",
     day: "2-digit",
   }).format(timestamp);
+}
+
+/**
+ * Render catalog overview markdown to HTML. Overview text is third-party
+ * (CRX搜搜) content, so the renderer deliberately strips raw HTML and
+ * external images: only structural markdown (headings, lists, code, quotes,
+ * tables, links) survives, and links always open externally.
+ */
+const overviewRenderer = new Renderer();
+overviewRenderer.html = () => "";
+overviewRenderer.image = ({ text }) => escapeHtmlText(text);
+overviewRenderer.link = ({ href, title, tokens }) => {
+  const text = overviewRenderer.parser.parseInline(tokens);
+  const safeHref = /^https:\/\//i.test(href) ? href : "";
+  if (!safeHref) return text;
+  const titleAttr = title ? ` title="${escapeHtmlAttribute(title)}"` : "";
+  return `<a href="${escapeHtmlAttribute(safeHref)}"${titleAttr} target="_blank" rel="noopener noreferrer nofollow">${text}</a>`;
+};
+
+function renderOverviewMarkdown(markdown: string): string {
+  return marked.parse(markdown, { async: false, renderer: overviewRenderer }) as string;
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeHtmlText(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 export function formatAcquisitionCount(value: number): string {
