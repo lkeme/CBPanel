@@ -412,9 +412,12 @@ export function extensionSessionMatchesResolution(
 }
 
 function ExtensionAcquisitionContentLoading({ t }: { t: Translate }) {
+  // Entering the Get tab lazy-loads the results chunk; a bare spinner reads
+  // better than a "Working…" sentence for what is usually a single frame.
   return (
-    <div aria-live="polite" className="preflight-empty" role="status">
-      {t("extension.acquisition.loading")}
+    <div aria-live="polite" className="acquisition-search-loading" role="status">
+      <span aria-hidden="true" className="acquisition-loading-spinner" />
+      <span className="acquisition-visually-hidden">{t("extension.acquisition.loading")}</span>
     </div>
   );
 }

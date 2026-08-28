@@ -125,6 +125,7 @@ export type ExtensionAcquisitionUiKey =
   | "extension.acquisition.results.manifestVersion"
   | "extension.acquisition.results.developer"
   | "extension.acquisition.results.overview"
+  | "extension.acquisition.results.info"
   | "extension.acquisition.results.openProvider"
   | "extension.acquisition.results.viewLabel"
   | "extension.acquisition.results.viewTwo"

@@ -340,15 +340,12 @@ test("catalog supports four-column cards with Chrome marks and a detail child vi
   }));
   assert.ok(detail.includes("extension.acquisition.results.back"));
   assert.ok(detail.includes("channel-action"));
-  assert.ok(!detail.includes("extension.acquisition.openWebStore"), "an embedded channel owns the selected-channel listing action");
+  assert.ok(detail.includes("extension.acquisition.results.openProvider"), "the detail hero keeps an external listing action");
   assert.ok(!detail.includes("extension.acquisition.results.choose"));
   assert.ok(detail.includes(item.storeId));
   assert.ok(detail.includes(`href="https://chromewebstore.google.com/detail/${item.storeId}"`));
-  assert.ok(detail.includes("extension.acquisition.results.version"));
   assert.ok(detail.includes("extension.acquisition.results.updatedAt"));
   assert.ok(detail.includes("extension.acquisition.results.size"));
-  assert.ok(detail.includes("extension.acquisition.results.manifestVersion"));
-  assert.ok(detail.includes("extension.acquisition.results.developer"));
   assert.ok(detail.includes("extension.acquisition.results.overview"));
   assert.ok(detail.includes("Full extension overview"));
   assert.ok(detail.includes("extension.acquisition.results.installed"));

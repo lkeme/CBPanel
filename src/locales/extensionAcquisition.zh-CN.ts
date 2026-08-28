@@ -202,6 +202,7 @@ export const extensionAcquisitionZhCN = {
   "extension.acquisition.results.manifestVersion": "Manifest 版本",
   "extension.acquisition.results.developer": "开发者",
   "extension.acquisition.results.overview": "概述",
+  "extension.acquisition.results.info": "其他信息",
   "extension.acquisition.results.openProvider": "打开渠道详情",
   "extension.acquisition.results.viewLabel": "结果视图",
   "extension.acquisition.results.viewTwo": "双列视图",

@@ -204,6 +204,7 @@ export const extensionAcquisitionEnUS = {
   "extension.acquisition.results.manifestVersion": "Manifest version",
   "extension.acquisition.results.developer": "Developer",
   "extension.acquisition.results.overview": "Overview",
+  "extension.acquisition.results.info": "Other information",
   "extension.acquisition.results.openProvider": "Open channel details",
   "extension.acquisition.results.viewLabel": "Result view",
   "extension.acquisition.results.viewTwo": "Two-column view",

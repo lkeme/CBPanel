@@ -315,10 +315,10 @@
   position: relative;
   overflow: hidden;
   cursor: pointer;
-  min-height: 154px;
-  padding: 18px;
+  padding: 16px;
   background: linear-gradient(145deg, color-mix(in srgb, var(--primary-soft) 78%, var(--surface)) 0%, var(--surface) 78%);
   border-color: color-mix(in srgb, var(--primary) 24%, var(--border));
+  border-radius: var(--radius);
   box-shadow: var(--shadow-card);
   transition: transform var(--motion-standard) var(--motion-ease),
     border-color var(--motion-standard) var(--motion-ease),
@@ -336,12 +336,13 @@
   outline-offset: 2px;
 }
 
-
+/* The card surface is the whole clickable area; it stacks the icon+title row
+   above the copy so the icon never owns an entire side of the card. */
 .acquisition-result-card-surface {
-  display: grid;
-  grid-template-columns: 54px minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   grid-column: 1 / -1;
-  gap: 14px;
   width: 100%;
   height: 100%;
   align-self: stretch;
@@ -362,21 +363,65 @@
   border-radius: var(--radius-control);
 }
 
+/* Top row: compact icon at the start, title beside it, chevron at the end. */
+.acquisition-result-card-top {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.acquisition-result-card-top .acquisition-result-icon {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: 11px;
+}
+
+.acquisition-result-card-top .acquisition-result-glyph {
+  width: 44px;
+  height: 44px;
+  font-size: 17px;
+}
+
+.acquisition-result-card-top .acquisition-result-heading {
+  flex: 1 1 auto;
+}
+
+/* Four-column cards center the icon in the top half like CRX搜搜's compact
+   tiles; copy below stays left-aligned and evenly spaced. */
 .acquisition-result-list.view-four .acquisition-result-card {
   grid-template-columns: 1fr;
   align-items: start;
-  min-height: 278px;
-  padding: 14px;
+  min-height: 0;
+  padding: 16px;
 }
 
-.acquisition-result-list.view-four .acquisition-result-card-surface {
-  grid-template-columns: 1fr;
+.acquisition-result-list.view-four .acquisition-result-card-top {
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0 2px;
+  text-align: center;
+}
+
+.acquisition-result-list.view-four .acquisition-result-heading {
+  justify-content: center;
+  width: 100%;
+}
+
+.acquisition-result-list.view-four .acquisition-result-title {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  text-align: center;
 }
 
 .acquisition-result-list.view-four .acquisition-result-icon {
   width: 72px;
   height: 72px;
-  border-radius: 14px;
+  border-radius: 16px;
 }
 
 .acquisition-result-list.view-four .acquisition-result-glyph {
@@ -389,9 +434,12 @@
   display: none;
 }
 
-.acquisition-result-list.view-two .acquisition-result-card {
-  grid-template-columns: 38px minmax(0, 1fr) auto;
-  align-items: start;
+.acquisition-result-list.view-four .acquisition-result-copy {
+  width: 100%;
+}
+
+.acquisition-result-list.view-four .acquisition-result-copy p {
+  -webkit-line-clamp: 3;
 }
 
 .acquisition-result-metrics {
@@ -530,9 +578,9 @@
 
 .acquisition-result-detail {
   display: grid;
-  gap: 16px;
+  gap: 20px;
   min-width: 0;
-  padding: 16px;
+  padding: 20px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -552,86 +600,266 @@
   font-size: 12px;
 }
 
+/* Hero: icon + copy + optional external action, like crxsoso's detail top. */
 .acquisition-detail-hero {
-  display: grid;
-  grid-template-columns: 64px minmax(0, 1fr);
-  gap: 14px;
-  align-items: start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-start;
   min-width: 0;
+}
+
+.acquisition-detail-hero-copy {
+  display: grid;
+  gap: 6px;
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.acquisition-detail-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 
 .acquisition-detail-hero h3 {
   margin: 0;
   font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
 }
 
-.acquisition-detail-hero p {
-  margin: 5px 0 0;
+.acquisition-detail-developer {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.acquisition-detail-hero p.acquisition-detail-description {
+  margin: 0;
   color: var(--foreground-muted);
+  line-height: 1.55;
   overflow-wrap: anywhere;
 }
 
-.acquisition-detail-hero .acquisition-result-icon {
-  width: 64px;
-  height: 64px;
-  margin-top: 2px;
+.acquisition-detail-hero .acquisition-result-icon.icon-xl {
+  width: 72px;
+  height: 72px;
+  border-radius: 16px;
+  font-size: 26px;
+}
+
+.acquisition-detail-hero-actions {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-left: auto;
 }
 
 .acquisition-detail-badges {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 8px;
+  align-items: center;
 }
 
-.acquisition-detail-facts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 8px;
-  margin: 0;
-}
-
-.acquisition-detail-facts > div {
-  min-width: 0;
-  padding: 10px;
+.acquisition-detail-metric {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 3px 8px;
+  color: var(--foreground-muted);
   background: var(--surface-muted);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
 }
 
-.acquisition-detail-facts > div:first-child {
-  grid-column: span 2;
+/* Bottom: overview on the left, plain facts on the right. */
+.acquisition-detail-bottom {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 320px);
+  gap: 20px;
+  align-items: start;
 }
 
 .acquisition-detail-overview {
   min-width: 0;
-  padding-top: 4px;
+}
+
+.acquisition-detail-overview h4,
+.acquisition-detail-sidebar h4 {
+  margin: 0 0 10px;
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.acquisition-detail-no-overview {
+  margin: 0;
+  color: var(--foreground-muted);
+}
+
+.acquisition-detail-markdown {
+  color: var(--foreground-muted);
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.acquisition-detail-markdown > :first-child {
+  margin-top: 0;
+}
+
+.acquisition-detail-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.acquisition-detail-markdown p,
+.acquisition-detail-markdown ul,
+.acquisition-detail-markdown ol,
+.acquisition-detail-markdown blockquote,
+.acquisition-detail-markdown pre,
+.acquisition-detail-markdown table {
+  margin: 0 0 12px;
+}
+
+.acquisition-detail-markdown h1,
+.acquisition-detail-markdown h2,
+.acquisition-detail-markdown h3,
+.acquisition-detail-markdown h4,
+.acquisition-detail-markdown h5,
+.acquisition-detail-markdown h6 {
+  margin: 18px 0 8px;
+  color: var(--foreground);
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.acquisition-detail-markdown h1 { font-size: 20px; }
+.acquisition-detail-markdown h2 { font-size: 18px; }
+.acquisition-detail-markdown h3 { font-size: 16px; }
+.acquisition-detail-markdown h4,
+.acquisition-detail-markdown h5,
+.acquisition-detail-markdown h6 { font-size: 14px; }
+
+.acquisition-detail-markdown ul,
+.acquisition-detail-markdown ol {
+  padding-left: 22px;
+}
+
+.acquisition-detail-markdown li + li {
+  margin-top: 4px;
+}
+
+.acquisition-detail-markdown a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.acquisition-detail-markdown code {
+  padding: 2px 5px;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+}
+
+.acquisition-detail-markdown pre {
+  padding: 12px;
+  overflow: auto;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
+}
+
+.acquisition-detail-markdown pre code {
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+.acquisition-detail-markdown blockquote {
+  padding-left: 12px;
+  color: var(--foreground-soft);
+  border-left: 3px solid var(--border-strong);
+}
+
+.acquisition-detail-markdown img {
+  max-width: 100%;
+  border-radius: var(--radius-control);
+}
+
+.acquisition-detail-markdown hr {
+  margin: 16px 0;
+  border: 0;
   border-top: 1px solid var(--border);
 }
 
-.acquisition-detail-overview h4 {
-  margin: 8px 0;
-  color: var(--foreground);
-  font-size: 14px;
+.acquisition-detail-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
 }
 
-.acquisition-detail-overview p {
+.acquisition-detail-markdown th,
+.acquisition-detail-markdown td {
+  padding: 7px 10px;
+  text-align: left;
+  border: 1px solid var(--border);
+}
+
+.acquisition-detail-markdown th {
+  background: var(--surface-muted);
+  font-weight: 700;
+}
+
+/* Facts in the sidebar read as plain label/value lines, not boxed cards. */
+.acquisition-detail-sidebar {
+  min-width: 0;
+}
+
+.acquisition-detail-facts {
+  display: grid;
+  gap: 12px;
   margin: 0;
-  color: var(--foreground-muted);
-  line-height: 1.7;
-  overflow-wrap: anywhere;
-  white-space: pre-line;
+}
+
+.acquisition-detail-fact {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
 }
 
 .acquisition-detail-facts dt {
   color: var(--foreground-soft);
-  font-size: 11px;
-  font-weight: 750;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .acquisition-detail-facts dd {
-  margin: 5px 0 0;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  margin: 0;
+  color: var(--foreground);
+  font-size: 14px;
   overflow-wrap: anywhere;
+}
+
+.acquisition-detail-store-link {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+.acquisition-detail-store-link:hover {
+  text-decoration: underline;
 }
 
 .acquisition-results-inline-error {
@@ -663,19 +891,19 @@
 }
 
 .acquisition-result-icon {
-  width: 54px;
-  height: 54px;
-  font-size: 22px;
+  width: 44px;
+  height: 44px;
+  font-size: 17px;
 }
 
 .acquisition-result-glyph {
   position: relative;
   display: grid;
   place-items: center;
-  width: 54px;
-  height: 54px;
+  width: 44px;
+  height: 44px;
   color: #fff;
-  font-size: 22px;
+  font-size: 17px;
   font-weight: 800;
   letter-spacing: 0;
 }
@@ -707,6 +935,41 @@
 
 .acquisition-result-glyph img.loaded {
   opacity: 1;
+}
+
+.acquisition-result-icon.icon-sm {
+  width: 32px;
+  height: 32px;
+  font-size: 13px;
+  border-radius: 9px;
+}
+
+.acquisition-result-icon.icon-md {
+  width: 44px;
+  height: 44px;
+  font-size: 17px;
+  border-radius: 11px;
+}
+
+.acquisition-result-icon.icon-lg {
+  width: 56px;
+  height: 56px;
+  font-size: 20px;
+  border-radius: 13px;
+}
+
+.acquisition-result-icon.icon-xl {
+  width: 72px;
+  height: 72px;
+  font-size: 26px;
+  border-radius: 16px;
+}
+
+.acquisition-result-icon.icon-sm .acquisition-result-icon-placeholder,
+.acquisition-result-icon.icon-md .acquisition-result-icon-placeholder,
+.acquisition-result-icon.icon-lg .acquisition-result-icon-placeholder,
+.acquisition-result-icon.icon-xl .acquisition-result-icon-placeholder {
+  font-size: inherit;
 }
 
 .acquisition-result-card-surface > .acquisition-result-icon {
@@ -1132,10 +1395,6 @@
     min-height: 0;
   }
 
-  .acquisition-result-list.view-four .acquisition-result-card-surface {
-    grid-template-columns: 1fr;
-  }
-
   .acquisition-result-list.view-four .acquisition-result-icon {
     width: 60px;
     height: 60px;
@@ -1147,27 +1406,19 @@
     font-size: 22px;
   }
 
-  .acquisition-result-list.view-two .acquisition-result-card {
-    grid-template-columns: 38px minmax(0, 1fr);
+  .acquisition-detail-bottom {
+    grid-template-columns: 1fr;
   }
 
-  .acquisition-result-card-surface {
-    grid-template-columns: 44px minmax(0, 1fr);
-    gap: 10px;
+  .acquisition-detail-hero .acquisition-result-icon.icon-xl {
+    width: 56px;
+    height: 56px;
+    border-radius: 13px;
+    font-size: 20px;
   }
 
-  .acquisition-result-list.view-two .acquisition-result-icon {
-    width: 44px;
-    height: 44px;
-  }
-
-  .acquisition-result-list.view-two .acquisition-result-glyph {
-    width: 44px;
-    height: 44px;
-  }
-
-  .acquisition-detail-hero {
-    grid-template-columns: 48px minmax(0, 1fr);
+  .acquisition-detail-hero-actions {
+    margin-left: 0;
   }
 
   .acquisition-progress-steps {

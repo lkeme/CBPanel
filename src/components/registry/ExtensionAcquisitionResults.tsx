@@ -10,7 +10,8 @@ import {
   Store,
   Star,
 } from "lucide-react";
-import { useId, useState, type ReactNode } from "react";
+import { marked } from "marked";
+import { useId, useMemo, useState, type ReactNode } from "react";
 
 import type { Locale } from "../../i18n";
 import {
@@ -291,7 +292,6 @@ function CatalogResultCard({
   t: ExtensionAcquisitionUiTranslator;
 }) {
   const titleId = useId();
-  const details = [item.category].filter(Boolean);
   const activate = () => (onOpenDetail ? onOpenDetail(item) : onChoose(item));
 
   return (
@@ -306,17 +306,19 @@ function CatalogResultCard({
         onClick={activate}
         type="button"
       >
-        <CatalogIcon item={item} />
-        <div className="acquisition-result-copy">
+        <div className="acquisition-result-card-top">
+          <CatalogIcon item={item} />
           <div className="acquisition-result-heading">
             <span className="acquisition-result-title" id={titleId}>{item.name}</span>
             {selected && <StatusPill tone="running">{t("extension.acquisition.channel.selected")}</StatusPill>}
             {installed && <StatusPill tone="neutral">{t("extension.acquisition.results.installed")}</StatusPill>}
             {viewMode === "two" && <span className="acquisition-result-arrow" aria-hidden="true">›</span>}
           </div>
-          {details.length > 0 && (
+        </div>
+        <div className="acquisition-result-copy">
+          {item.category && (
             <div className="acquisition-result-badges">
-              {item.category && <span className="acquisition-result-badge category">{item.category}</span>}
+              <span className="acquisition-result-badge category">{item.category}</span>
             </div>
           )}
           {item.description && <p>{item.description}</p>}
@@ -345,12 +347,12 @@ function extensionGlyph(item: ExtensionCatalogItem): { label: string; tone: numb
   return { label, tone: Math.abs(hash) % 6 };
 }
 
-function CatalogIcon({ item }: { item: ExtensionCatalogItem }) {
+function CatalogIcon({ item, size = "md" }: { item: ExtensionCatalogItem; size?: "sm" | "md" | "lg" | "xl" }) {
   const [iconFailed, setIconFailed] = useState(false);
   const [iconLoaded, setIconLoaded] = useState(false);
   const glyph = extensionGlyph(item);
   return (
-    <span className={`acquisition-result-icon acquisition-result-glyph glyph-${glyph.tone}`} aria-hidden="true">
+    <span className={`acquisition-result-icon acquisition-result-glyph glyph-${glyph.tone} icon-${size}`} aria-hidden="true">
       <span className={iconLoaded && !iconFailed ? "acquisition-result-icon-placeholder hidden" : "acquisition-result-icon-placeholder"}>
         {glyph.label}
       </span>
@@ -394,6 +396,11 @@ export function ExtensionCatalogDetail({
   t: ExtensionAcquisitionUiTranslator;
 }) {
   const headingId = useId();
+  const overviewHtml = useMemo(() => {
+    if (!item.overview) return "";
+    return marked.parse(item.overview, { async: false }) as string;
+  }, [item.overview]);
+
   return (
     <section aria-labelledby={headingId} className="acquisition-result-detail">
       <header className="acquisition-detail-header">
@@ -402,53 +409,99 @@ export function ExtensionCatalogDetail({
         </button>
         <span className="acquisition-detail-breadcrumb">{t("extension.acquisition.results.title")}</span>
       </header>
+
+      {/* Top section: hero with icon, name, developer, description, badges */}
       <div className="acquisition-detail-hero">
-        <CatalogIcon item={item} />
-        <div>
-          <h3 id={headingId}>{item.name}</h3>
+        <CatalogIcon item={item} size="xl" />
+        <div className="acquisition-detail-hero-copy">
+          <div className="acquisition-detail-title-row">
+            <h3 id={headingId}>{item.name}</h3>
+            {installed && <StatusPill tone="running">{t("extension.acquisition.results.installed")}</StatusPill>}
+          </div>
+          {item.developer && <p className="acquisition-detail-developer">{item.developer}</p>}
           <p className="acquisition-detail-description">{item.description || t("extension.acquisition.results.noDescription")}</p>
           <div className="acquisition-detail-badges">
             {item.category && <StatusPill tone="neutral">{item.category}</StatusPill>}
-            {installed && <StatusPill tone="running">{t("extension.acquisition.results.installed")}</StatusPill>}
+            {item.rating !== undefined && (
+              <span className="acquisition-detail-metric">
+                <Star aria-hidden="true" size={14} /> {item.rating.toFixed(1)}
+              </span>
+            )}
+            {item.userCount !== undefined && (
+              <span className="acquisition-detail-metric">
+                <Download aria-hidden="true" size={14} /> {formatAcquisitionCount(item.userCount)}
+              </span>
+            )}
+            {item.version && <span className="acquisition-detail-metric">v{item.version}</span>}
+            {item.manifestVersion !== undefined && <span className="acquisition-detail-metric">MV{item.manifestVersion}</span>}
           </div>
         </div>
+        {providerId && (
+          <div className="acquisition-detail-hero-actions">
+            <button className="command primary" onClick={() => onOpenListing(item, providerId)} type="button">
+              <ExternalLink aria-hidden="true" size={15} />
+              {providerId === "crxsoso"
+                ? t("extension.acquisition.results.openProvider")
+                : t("extension.acquisition.openWebStore")}
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* Footer (channel choice) - rendered as part of the top section */}
       {footer}
-      <dl className="acquisition-detail-facts">
-        <div><dt>{t("extension.acquisition.storeId")}</dt><dd className="mono-cell"><a
-          className="acquisition-detail-store-link"
-          href={chromeWebStoreListingUrl(item.storeId)}
-          onClick={(event) => {
-            event.preventDefault();
-            onOpenListing(item, "chrome-web-store");
-          }}
-          rel="noopener noreferrer"
-          target="_blank"
-        >{item.storeId}</a></dd></div>
-        {item.rating !== undefined && <div><dt>{t("extension.acquisition.results.rating")}</dt><dd><Star aria-hidden="true" size={14} /> {item.rating.toFixed(1)}</dd></div>}
-        {item.userCount !== undefined && <div><dt>{t("extension.acquisition.results.downloads")}</dt><dd><Download aria-hidden="true" size={14} /> {formatAcquisitionCount(item.userCount)}</dd></div>}
-        {item.version && <div><dt>{t("extension.acquisition.results.version")}</dt><dd>{item.version}</dd></div>}
-        {item.updatedAt && <div><dt>{t("extension.acquisition.results.updatedAt")}</dt><dd>{formatDetailDate(item.updatedAt, locale)}</dd></div>}
-        {item.size && <div><dt>{t("extension.acquisition.results.size")}</dt><dd>{item.size}</dd></div>}
-        {item.manifestVersion !== undefined && <div><dt>{t("extension.acquisition.results.manifestVersion")}</dt><dd>{item.manifestVersion}</dd></div>}
-        {item.developer && <div><dt>{t("extension.acquisition.results.developer")}</dt><dd>{item.developer}</dd></div>}
-      </dl>
-      {item.overview && (
+
+      {/* Bottom section: two columns */}
+      <div className="acquisition-detail-bottom">
+        {/* Left: overview with markdown */}
         <section className="acquisition-detail-overview">
           <h4>{t("extension.acquisition.results.overview")}</h4>
-          <p>{item.overview}</p>
+          {item.overview ? (
+            <div
+              className="acquisition-detail-markdown"
+              dangerouslySetInnerHTML={{ __html: overviewHtml }}
+            />
+          ) : (
+            <p className="acquisition-detail-no-overview">{t("extension.acquisition.results.noDescription")}</p>
+          )}
         </section>
-      )}
-      {!footer && providerId && (
-        <div className="acquisition-detail-actions">
-          <button className="command subtle" onClick={() => onOpenListing(item, providerId)} type="button">
-            <ExternalLink aria-hidden="true" size={15} />
-            {providerId === "crxsoso"
-              ? t("extension.acquisition.results.openProvider")
-              : t("extension.acquisition.openWebStore")}
-          </button>
-        </div>
-      )}
+
+        {/* Right: other information without boxes */}
+        <aside className="acquisition-detail-sidebar">
+          <h4>{t("extension.acquisition.results.info")}</h4>
+          <dl className="acquisition-detail-facts">
+            <div className="acquisition-detail-fact">
+              <dt>{t("extension.acquisition.storeId")}</dt>
+              <dd className="mono-cell">
+                <a
+                  className="acquisition-detail-store-link"
+                  href={chromeWebStoreListingUrl(item.storeId)}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    onOpenListing(item, "chrome-web-store");
+                  }}
+                  rel="noopener noreferrer"
+                  target="_blank"
+                >
+                  {item.storeId}
+                </a>
+              </dd>
+            </div>
+            {item.updatedAt && (
+              <div className="acquisition-detail-fact">
+                <dt>{t("extension.acquisition.results.updatedAt")}</dt>
+                <dd>{formatDetailDate(item.updatedAt, locale)}</dd>
+              </div>
+            )}
+            {item.size && (
+              <div className="acquisition-detail-fact">
+                <dt>{t("extension.acquisition.results.size")}</dt>
+                <dd>{item.size}</dd>
+              </div>
+            )}
+          </dl>
+        </aside>
+      </div>
     </section>
   );
 }
