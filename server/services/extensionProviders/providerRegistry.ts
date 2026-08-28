@@ -5,6 +5,7 @@ import {
   type ExtensionArtifactOffer,
   type ExtensionArtifactProviderId,
   type ExtensionCatalogProviderId,
+  type ExtensionCatalogItem,
 } from "../../../src/shared/extensionAcquisition";
 import { ExtensionProviderError } from "../providerHttpClient";
 import {
@@ -12,7 +13,7 @@ import {
   type ChromeWebStoreProviderOptions,
 } from "./chromeWebStoreProvider";
 import { CrxsosoProvider, type CrxsosoProviderOptions } from "./crxsosoProvider";
-import type { ArtifactProvider, CatalogSearchProvider } from "./types";
+import type { ArtifactProvider, CatalogDetailProvider, CatalogSearchProvider } from "./types";
 
 export interface BuiltInExtensionProviders {
   crxsosoSearch: CatalogSearchProvider;
@@ -37,6 +38,11 @@ export class ExtensionProviderRegistry {
   catalog(providerId: ExtensionCatalogProviderId): CatalogSearchProvider {
     if (providerId === "crxsoso") return this.providers.crxsosoSearch;
     return assertNever(providerId);
+  }
+
+  async catalogDetail(storeId: string, signal: AbortSignal): Promise<ExtensionCatalogItem | undefined> {
+    const provider = this.providers.crxsosoSearch as CatalogSearchProvider & Partial<CatalogDetailProvider>;
+    return provider.detail ? provider.detail(storeId, signal) : undefined;
   }
 
   artifact(providerId: ExtensionArtifactProviderId): ArtifactProvider {

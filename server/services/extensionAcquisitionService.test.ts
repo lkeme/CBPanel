@@ -399,6 +399,59 @@ test("exact resolution is local, re-reads the selected artifact channel, and del
   assert.equal(searchCalls, 0);
 });
 
+test("detail enrichment re-normalizes provider metadata and rejects non-canonical ids", async () => {
+  const provider = catalogProvider(async () => emptyPage());
+  const service = new ExtensionAcquisitionService({
+    readSettings: async () => acquisitionSettings(),
+    providerRegistry: {
+      ...registryFor(provider),
+      catalogDetail: async () => ({
+        ...catalogItem(STORE_ID, "Enriched extension"),
+        version: "5.5.0",
+        overview: "Full extension overview",
+        updatedAt: "2026-05-09T12:52:36.000Z",
+        size: "1.64MiB",
+        manifestVersion: 3,
+        developer: "Jan Biniok",
+        iconUrl: "https://lhimg.crxsoso.com/detail-icon",
+      }),
+    },
+  });
+
+  const item = await service.detail(STORE_ID);
+  assert.equal(item?.name, "Enriched extension");
+  assert.equal(item?.version, "5.5.0");
+  assert.equal(item?.overview, "Full extension overview");
+  assert.equal(item?.updatedAt, "2026-05-09T12:52:36.000Z");
+  assert.equal(item?.size, "1.64MiB");
+  assert.equal(item?.manifestVersion, 3);
+  assert.equal(item?.developer, "Jan Biniok");
+  assert.equal(item?.iconUrl, "https://lhimg.crxsoso.com/detail-icon");
+  await rejectsWithCode(service.detail("not-a-canonical-id"), "ACQUISITION_INPUT_UNSUPPORTED");
+});
+
+test("detail enrichment requires disclosure and rejects mismatched provider identity", async () => {
+  let calls = 0;
+  let settingsValue = acquisitionSettings({ crxsosoDisclosureVersionAccepted: 0 });
+  const provider = catalogProvider(async () => emptyPage());
+  const service = new ExtensionAcquisitionService({
+    readSettings: async () => settingsValue,
+    providerRegistry: {
+      ...registryFor(provider),
+      catalogDetail: async () => {
+        calls += 1;
+        return { ...catalogItem(SECOND_STORE_ID), storeUrl: chromeWebStoreListingUrl(STORE_ID) };
+      },
+    },
+  });
+
+  await rejectsWithCode(service.detail(STORE_ID), "CATALOG_DISCLOSURE_REQUIRED");
+  assert.equal(calls, 0);
+  settingsValue = acquisitionSettings();
+  await rejectsWithCode(service.detail(STORE_ID), "EXTENSION_CATALOG_SCHEMA_CHANGED");
+  assert.equal(calls, 1);
+});
+
 function createService(
   provider: CatalogSearchProvider,
   readSettings: (() => AppSettings) | undefined = undefined,

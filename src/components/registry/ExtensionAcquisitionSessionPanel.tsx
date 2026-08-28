@@ -201,6 +201,19 @@ export function ExtensionAcquisitionSessionPanel({
   if (!session.report) {
     return <div className="inline-error" role="alert"><CircleX aria-hidden="true" size={18} /><ExtensionAcquisitionErrorText error={failure} t={t} /></div>;
   }
+  // Once confirmation starts, the explicit decision (when one was required)
+  // is complete. Replace the review with compact install progress for both
+  // automatic and user-confirmed install/update paths.
+  if (operation === "confirming") {
+    return (
+      <section aria-busy="true" aria-live="polite" className="acquisition-session-progress" role="status">
+        <div className="acquisition-progress-summary">
+          <LoaderCircle aria-hidden="true" className="spin" size={22} />
+          <strong>{t("extension.acquisition.progress.committing")}</strong>
+        </div>
+      </section>
+    );
+  }
   return (
     <ExtensionAcquisitionPreflight
       error={failure}
@@ -292,30 +305,43 @@ function ExtensionAcquisitionPreflight({
   const selectedChoice = choices.find((choice) => choice.key === selectedKey);
   const request = buildExtensionAcquisitionConfirmationRequest(selectedChoice, report, permissionApproved);
   const confirming = operation === "confirming";
+  const requiresExplicitReview = Boolean(report.permissionApproval || report.conflicts.length > 0);
 
   return (
     <section className="acquisition-preflight">
       <header className="acquisition-section-header">
         <div>
-          <h3>{t("extension.acquisition.preflight.title")}</h3>
-          <p>{t("extension.acquisition.preflight.expiresAt", { time: formatAcquisitionDateTime(report.expiresAt, locale) })}</p>
+          <h3>{t("extension.acquisition.confirm.title")}</h3>
+          <p>{t("extension.acquisition.confirm.description")}</p>
         </div>
-        <StatusPill tone="running"><ShieldCheck aria-hidden="true" size={14} />{t("extension.acquisition.verification.evidenceOnly")}</StatusPill>
+        <StatusPill tone={requiresExplicitReview ? "warning" : "running"}>
+          {requiresExplicitReview ? <CircleAlert aria-hidden="true" size={14} /> : <ShieldCheck aria-hidden="true" size={14} />}
+          {requiresExplicitReview ? t("extension.acquisition.confirm.reviewRequired") : t("extension.acquisition.verification.evidenceOnly")}
+        </StatusPill>
       </header>
       {error && <div className="inline-error" role="alert"><CircleX aria-hidden="true" size={16} /><ExtensionAcquisitionErrorText error={error} t={t} /></div>}
-      <div className="acquisition-preflight-grid">
-        <FactSection icon={<PackageCheck aria-hidden="true" size={17} />} items={identityFacts(report, t)} title={t("extension.acquisition.identity")} />
-        <FactSection icon={<FileCheck2 aria-hidden="true" size={17} />} items={packageFacts(report, locale, t)} title={t("extension.acquisition.package")} />
-        <FactSection icon={<Download aria-hidden="true" size={17} />} items={transportFacts(report, locale, t)} title={t("extension.acquisition.transport")} />
-        <FactSection icon={<ShieldCheck aria-hidden="true" size={17} />} items={verificationFacts(report, t)} title={t("extension.acquisition.verification")} />
-      </div>
-      <PermissionFacts report={report} t={t} />
-      <DiscrepancyFacts report={report} t={t} />
-      <ConflictFacts report={report} t={t} />
+      {requiresExplicitReview && (
+        <div className="acquisition-review-summary" role="status">
+          <ShieldCheck aria-hidden="true" size={18} />
+          <span>{t("extension.acquisition.confirm.reviewSummary")}</span>
+        </div>
+      )}
+      <details className="acquisition-technical-details">
+        <summary>{t("extension.acquisition.confirm.technicalDetails")}</summary>
+        <div className="acquisition-preflight-grid">
+          <FactSection icon={<PackageCheck aria-hidden="true" size={17} />} items={identityFacts(report, t)} title={t("extension.acquisition.identity")} />
+          <FactSection icon={<FileCheck2 aria-hidden="true" size={17} />} items={packageFacts(report, locale, t)} title={t("extension.acquisition.package")} />
+          <FactSection icon={<Download aria-hidden="true" size={17} />} items={transportFacts(report, locale, t)} title={t("extension.acquisition.transport")} />
+          <FactSection icon={<ShieldCheck aria-hidden="true" size={17} />} items={verificationFacts(report, t)} title={t("extension.acquisition.verification")} />
+        </div>
+        <PermissionFacts report={report} t={t} />
+        <DiscrepancyFacts report={report} t={t} />
+        <ConflictFacts report={report} t={t} />
+      </details>
 
       <section aria-labelledby={confirmationTitleId} className="acquisition-confirmation">
         <h4 id={confirmationTitleId}>{t("extension.acquisition.confirm.title")}</h4>
-        <p>{t("extension.acquisition.confirm.description")}</p>
+        {!requiresExplicitReview && <p>{t("extension.acquisition.confirm.description")}</p>}
         {choices.length > 0 ? (
           <fieldset className="acquisition-confirmation-choices" disabled={confirming}>
             <legend>{t("extension.acquisition.confirm.title")}</legend>

@@ -18,7 +18,11 @@ import type {
   ExtensionCatalogItem,
   ExtensionReferenceResolution,
 } from "../../shared/extensionAcquisition";
-import { chromeWebStoreListingUrl, selectedExtensionArtifactProvider } from "../../shared/extensionAcquisition";
+import {
+  chromeWebStoreListingUrl,
+  isCanonicalChromeExtensionId,
+  selectedExtensionArtifactProvider,
+} from "../../shared/extensionAcquisition";
 import {
   sessionViewNeedsPolling,
   type ExtensionAcquisitionSelection,
@@ -444,6 +448,7 @@ export function ExtensionRegistryPanel({
   const [savingCapabilityId, setSavingCapabilityId] = useState<ExtensionArtifactProviderId | undefined>();
   const [catalogViewMode, setCatalogViewMode] = useState<"two" | "four">("two");
   const [catalogDetail, setCatalogDetail] = useState<ExtensionCatalogItem | undefined>();
+  const catalogDetailRequestRef = useRef(0);
   const acquisitionWorkspaceRef = useRef<HTMLDivElement>(null);
   const catalogScrollContainerRef = useRef<HTMLElement | null>(null);
   const catalogScrollTopRef = useRef(0);
@@ -453,6 +458,16 @@ export function ExtensionRegistryPanel({
   });
   const acquisitionT: ExtensionAcquisitionUiTranslator = (key, params) => t(key as TranslationKey, params);
   const browserRuntimeIdentities = useBrowserRuntimeIdentities(extensions);
+  const installedStoreIds = useMemo(() => new Set(
+    extensions
+      .filter((extension) => (
+        extension.installState === "installed"
+        || extension.installState === "update-available"
+      ))
+      .map((extension) => extension.storeIdentity?.storeId
+        ?? (extension.sourceKind === "chrome-web-store" ? extension.storeId : undefined))
+      .filter(isCanonicalChromeExtensionId),
+  ), [extensions]);
 
   const rows = useMemo<ExtensionRowModel[]>(() => {
     const collator = new Intl.Collator(locale, { numeric: true, sensitivity: "base" });
@@ -610,7 +625,11 @@ export function ExtensionRegistryPanel({
       ? { ...session.error, providerId: session.lastRequest.artifactProviderId }
       : undefined;
     const startingProviderId = sessionMatchesResolution
-      && (session.operation === "starting" || session.operation === "polling")
+      && (
+        session.operation === "starting"
+        || session.operation === "polling"
+        || session.operation === "confirming"
+      )
       ? session.lastRequest?.artifactProviderId
       : undefined;
     const classification = acquisition.state.classification;
@@ -623,7 +642,10 @@ export function ExtensionRegistryPanel({
     const channelChoice = resolution ? (
       <ExtensionArtifactChannelChoice
         embedded={Boolean(catalogDetail)}
-        onCancel={async () => { await acquisition.cancelSession(); }}
+        installed={installedStoreIds.has(resolution.storeId)}
+        onCancel={session.operation === "confirming"
+          ? undefined
+          : async () => { await acquisition.cancelSession(); }}
         onOpenListing={openListing}
         onSelect={(providerId) => acquisition.selectProvider(providerId)}
         onStart={(offer) => startOffer(offer.artifactProviderId)}
@@ -651,13 +673,21 @@ export function ExtensionRegistryPanel({
       catalogScrollTopRef.current = scroller?.scrollTop ?? 0;
       if (acquisition.selectCatalogItem(item)) {
         // The result can be several viewports down. Reusing that scroll offset
-        // for the child page can hide both Back and the primary preflight CTA.
+        // for the child page can hide both Back and the primary install CTA.
         restoreExtensionAcquisitionScrollPosition(scroller, 0);
         setCatalogDetail(item);
+        const requestId = ++catalogDetailRequestRef.current;
+        void acquisition.loadCatalogDetail(item.storeId).then((detail) => {
+          if (!detail || catalogDetailRequestRef.current !== requestId) return;
+          setCatalogDetail((current) => (
+            current && current.storeId === item.storeId ? { ...current, ...detail } : current
+          ));
+        });
       }
     }
 
     function closeCatalogDetail() {
+      catalogDetailRequestRef.current += 1;
       acquisition.clearSelection();
       setCatalogDetail(undefined);
       const scroller = catalogScrollContainerRef.current;
@@ -788,7 +818,7 @@ export function ExtensionRegistryPanel({
 
             {/* Installed-row updates are launched from the library rather
                 than from the retained catalog selection. Keep their progress
-                and preflight above an old result snapshot so the active
+                and required review above an old result snapshot so the active
                 operation is visible in the first viewport. */}
             {session.lastRequest?.purpose === "update" && sessionPanel}
             {session.lastRequest?.purpose === "update" && sessionStartError && (
@@ -802,10 +832,10 @@ export function ExtensionRegistryPanel({
                 detailItem={catalogDetail}
                 detailProviderId={selectedExtensionArtifactProvider(acquisition.state.settings)}
                 detailFooter={catalogDetail ? channelChoice : undefined}
+                installedStoreIds={installedStoreIds}
                 discoveryKind={acquisition.state.discovery.kind}
                 error={acquisition.state.discovery.error}
                 locale={locale as "zh-CN" | "en-US"}
-                onCancel={acquisition.cancelDiscovery}
                 onChoose={(item) => acquisition.selectCatalogItem(item)}
                 onOpenDetail={(item) => {
                   openCatalogDetail(item);

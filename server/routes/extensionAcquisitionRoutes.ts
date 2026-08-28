@@ -3,6 +3,7 @@ import express from "express";
 import { isCanonicalChromeExtensionId } from "../../src/shared/extensionAcquisition";
 import type {
   ExtensionCapabilityView,
+  ExtensionCatalogItem,
   ExtensionCatalogSearchPage,
   ExtensionCatalogSearchRequest,
   ExtensionAcquisitionSessionConfirmRequest,
@@ -25,6 +26,7 @@ export interface ExtensionAcquisitionRouteService {
   capabilities(): Promise<ExtensionCapabilityView[]>;
   search(request: ExtensionCatalogSearchRequest, signal?: AbortSignal): Promise<ExtensionCatalogSearchPage>;
   resolve(request: ExtensionReferenceResolveRequest): Promise<ExtensionReferenceResolution>;
+  detail(storeId: string, signal?: AbortSignal): Promise<ExtensionCatalogItem | undefined>;
   createSession(request: ExtensionAcquisitionSessionCreateRequest): Promise<ExtensionAcquisitionSessionView>;
   listSessions(): ExtensionAcquisitionSessionView[];
   getSession(sessionId: string): ExtensionAcquisitionSessionView;
@@ -72,6 +74,26 @@ export function createExtensionAcquisitionRouter(service: ExtensionAcquisitionRo
       response.json(await service.resolve(decodeExtensionReferenceResolveRequest(request.body)));
     } catch (error) {
       sendRouteError(response, error);
+    }
+  });
+
+  router.get("/detail/:storeId", async (request, response) => {
+    const requestAbort = requestAbortSignal(request, response);
+    try {
+      assertNoQuery(request);
+      if (!isCanonicalChromeExtensionId(request.params.storeId)) {
+        throw new ExtensionAcquisitionError("ACQUISITION_INPUT_UNSUPPORTED", "A canonical Chrome Web Store id is required.");
+      }
+      const detail = await service.detail(request.params.storeId, requestAbort.signal);
+      if (!detail) {
+        response.status(404).json({ error: "Extension catalog detail is unavailable." });
+        return;
+      }
+      response.json(detail);
+    } catch (error) {
+      sendRouteError(response, error);
+    } finally {
+      requestAbort.dispose();
     }
   });
 

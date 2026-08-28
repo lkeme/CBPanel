@@ -66,6 +66,7 @@ export interface ExtensionAcquisitionController {
   dismissDisclosure(): void;
   setArtifactProvider(providerId: ExtensionArtifactProviderId): Promise<boolean>;
   selectCatalogItem(item: ExtensionCatalogItem): boolean;
+  loadCatalogDetail(storeId: string): Promise<ExtensionCatalogItem | undefined>;
   clearSelection(): void;
   selectProvider(providerId: ExtensionArtifactProviderId): boolean;
   startSession(request: ExtensionAcquisitionSessionCreateRequest): Promise<ExtensionAcquisitionSessionView | undefined>;
@@ -100,6 +101,7 @@ export type UseExtensionAcquisitionResult = {
   | "dismissDisclosure"
   | "setArtifactProvider"
   | "selectCatalogItem"
+  | "loadCatalogDetail"
   | "clearSelection"
   | "selectProvider"
   | "startSession"
@@ -159,6 +161,7 @@ export function useExtensionAcquisition(options: UseExtensionAcquisitionOptions)
     dismissDisclosure: controller.dismissDisclosure,
     setArtifactProvider: controller.setArtifactProvider,
     selectCatalogItem: controller.selectCatalogItem,
+    loadCatalogDetail: controller.loadCatalogDetail,
     clearSelection: controller.clearSelection,
     selectProvider: controller.selectProvider,
     startSession: controller.startSession,
@@ -189,6 +192,8 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
   private capabilitiesController?: AbortController;
 
   private discoveryController?: AbortController;
+
+  private catalogDetailController?: AbortController;
 
   private sessionController?: AbortController;
 
@@ -224,11 +229,13 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     this.suspended = true;
     abortRequest(this.capabilitiesController);
     abortRequest(this.discoveryController);
+    abortRequest(this.catalogDetailController);
     abortRequest(this.sessionController);
     abortRequest(this.updateProviderController);
     abortRequest(this.settingsController);
     this.capabilitiesController = undefined;
     this.discoveryController = undefined;
+    this.catalogDetailController = undefined;
     this.sessionController = undefined;
     this.updateProviderController = undefined;
     this.settingsController = undefined;
@@ -376,6 +383,22 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
     this.dispatch({ type: "catalog-selection-cleared" });
   };
 
+  readonly loadCatalogDetail = async (storeId: string): Promise<ExtensionCatalogItem | undefined> => {
+    if (this.suspended || !isCanonicalChromeExtensionId(storeId) || !this.options.client.detail) return undefined;
+    abortRequest(this.catalogDetailController);
+    const controller = new AbortController();
+    this.catalogDetailController = controller;
+    try {
+      const item = await this.options.client.detail(storeId, controller.signal);
+      if (controller.signal.aborted || this.suspended || this.catalogDetailController !== controller) return undefined;
+      return item;
+    } catch {
+      return undefined;
+    } finally {
+      if (this.catalogDetailController === controller) this.catalogDetailController = undefined;
+    }
+  };
+
   readonly selectProvider = (providerId: ExtensionArtifactProviderId): boolean => {
     if (!artifactProviderEnabled(this.state.settings, providerId)) return false;
     // Exact resolution usually exposes the selected channel only. An
@@ -438,6 +461,13 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
       this.dispatch({ type: "session-view-received", sequence, view });
       this.observeArtifactHealth(view);
       if (sessionViewNeedsPolling(view)) void this.pollSession(sequence, view.sessionId, controller, false);
+      // Keep the server-side preflight and confirmation/CAS gate, but avoid
+      // making users click through a verbose review for the ordinary case.
+      // A clean install (no existing candidates) and an update with exactly
+      // one eligible requested target are unambiguous; permission increases,
+      // install conflicts, and ambiguous update candidates remain explicit.
+      const automaticConfirmation = automaticSessionConfirmation(view, request);
+      if (automaticConfirmation) void this.confirm(automaticConfirmation).catch(() => undefined);
       return view;
     } catch (error) {
       if (controller.signal.aborted || !this.isCurrentSession(sequence, controller)) return undefined;
@@ -684,6 +714,11 @@ class ExtensionAcquisitionControllerImpl implements ExtensionAcquisitionControll
         if (!this.isCurrentSession(sequence, controller)) return;
         this.dispatch({ type: "session-view-received", sequence, view });
         this.observeArtifactHealth(view);
+        const request = this.state.session.lastRequest;
+        const automaticConfirmation = request
+          ? automaticSessionConfirmation(view, request)
+          : undefined;
+        if (automaticConfirmation) void this.confirm(automaticConfirmation).catch(() => undefined);
         if (!sessionViewNeedsPolling(view)) return;
       }
     } catch (error) {
@@ -936,6 +971,32 @@ function persistedAcquisitionSettings(
 
 function localAcquisitionFailure(code: string): ExtensionAcquisitionFailure {
   return { code, message: code };
+}
+
+/**
+ * Return the only confirmation that can be safely implicit in the UI.
+ *
+ * The server still performs the authoritative preflight and validates this
+ * request (including the final provider CAS) before committing anything. We
+ * deliberately do not auto-confirm permission increases or install conflicts:
+ * those cases require an explicit user decision in the panel.
+ */
+function automaticSessionConfirmation(
+  view: ExtensionAcquisitionSessionView,
+  request: ExtensionAcquisitionSessionCreateRequest,
+): ExtensionAcquisitionSessionConfirmRequest | undefined {
+  if (view.status !== "ready" || !view.report || view.report.permissionApproval) return undefined;
+  const conflicts = view.report.conflicts ?? [];
+  if (request.purpose === "install") {
+    return conflicts.length === 0 ? { disposition: "create" } : undefined;
+  }
+  if (!request.targetExtensionId || conflicts.length !== 1) return undefined;
+  const candidate = conflicts.find((item) => (
+    item.extensionId === request.targetExtensionId && item.eligible
+  ));
+  return candidate
+    ? { disposition: "upgrade", targetExtensionId: candidate.extensionId }
+    : undefined;
 }
 
 function acquisitionFailure(error: unknown): ExtensionAcquisitionFailure {

@@ -72,7 +72,8 @@ export function normalizeExtensionCatalogQuery(value: unknown): string {
 
 export interface ExtensionAcquisitionServiceOptions {
   readSettings: () => Promise<AppSettings>;
-  providerRegistry: Pick<ExtensionProviderRegistry, "catalog" | "artifactOffers">;
+  providerRegistry: Pick<ExtensionProviderRegistry, "catalog" | "artifactOffers">
+    & { catalogDetail?: (storeId: string, signal: AbortSignal) => Promise<ExtensionCatalogItem | undefined> };
   now?: () => number;
   cursorTtlMs?: number;
   maxCursorEntries?: number;
@@ -298,6 +299,35 @@ export class ExtensionAcquisitionService {
       storeUrl: reference.storeUrl,
       offers,
     };
+  }
+
+  async detail(storeId: string, signal?: AbortSignal): Promise<ExtensionCatalogItem | undefined> {
+    if (!isCanonicalChromeExtensionId(storeId)) {
+      throw new ExtensionAcquisitionError("ACQUISITION_INPUT_UNSUPPORTED", "A canonical Chrome extension id is required.");
+    }
+    const requestSignal = signal ?? new AbortController().signal;
+    if (requestSignal.aborted) throw abortReason(requestSignal);
+    const settings = await this.readSettings();
+    this.observeSearchGates(settings);
+    assertSearchAllowed(settings);
+    if (requestSignal.aborted) throw abortReason(requestSignal);
+    let item: ExtensionCatalogItem | undefined;
+    try {
+      item = await this.options.providerRegistry.catalogDetail?.(storeId, requestSignal);
+    } catch (error) {
+      throw normalizeCatalogFailure(error);
+    }
+    if (!item) return undefined;
+    if (requestSignal.aborted) throw abortReason(requestSignal);
+    const latestSettings = await this.readSettings();
+    this.observeSearchGates(latestSettings);
+    assertSearchAllowed(latestSettings);
+    if (requestSignal.aborted) throw abortReason(requestSignal);
+    try {
+      return normalizeCatalogItem(item as unknown as Record<string, unknown>, storeId);
+    } catch {
+      throw new ExtensionAcquisitionError("EXTENSION_CATALOG_SCHEMA_CHANGED");
+    }
   }
 
   private async readSettings(): Promise<AppSettings> {
@@ -560,15 +590,21 @@ function normalizeProviderPage(value: CatalogSearchPage): NormalizedProviderPage
 }
 
 function normalizeCatalogItem(raw: Record<string, unknown>, storeId: string): ExtensionCatalogItem {
-  if (raw.namespace !== "chrome-web-store" || raw.catalogProviderId !== "crxsoso") {
+  if (raw.storeId !== storeId || raw.namespace !== "chrome-web-store" || raw.catalogProviderId !== "crxsoso") {
     throw new Error("Invalid normalized catalog identity.");
   }
   const storeUrl = chromeWebStoreListingUrl(storeId);
   if (raw.storeUrl !== storeUrl) throw new Error("Invalid normalized catalog listing URL.");
   const observedAt = isoTimestamp(raw.observedAt);
   const name = requiredBoundedString(raw.name, 512);
-  const description = optionalBoundedString(raw.description, MAX_PROVIDER_DESCRIPTION_LENGTH);
+  const description = optionalBoundedDescription(raw.description, MAX_PROVIDER_DESCRIPTION_LENGTH);
+  const overview = optionalBoundedDescription(raw.overview, MAX_PROVIDER_DESCRIPTION_LENGTH);
   const category = optionalBoundedString(raw.category, 256);
+  const version = optionalBoundedString(raw.version, 128);
+  const updatedAt = raw.updatedAt === undefined || raw.updatedAt === null ? undefined : isoTimestamp(raw.updatedAt);
+  const size = optionalBoundedString(raw.size, 128);
+  const manifestVersion = optionalSafeInteger(raw.manifestVersion, 0);
+  const developer = optionalBoundedString(raw.developer, 512);
   const rating = optionalFiniteNumber(raw.rating, 0, 5);
   const userCount = optionalSafeInteger(raw.userCount, 0);
   const iconUrl = normalizeCrxsosoCatalogIconUrl(raw.iconUrl);
@@ -580,7 +616,13 @@ function normalizeCatalogItem(raw: Record<string, unknown>, storeId: string): Ex
     observedAt,
     name,
     ...(description ? { description } : {}),
+    ...(overview ? { overview } : {}),
     ...(category ? { category } : {}),
+    ...(version ? { version } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
+    ...(size ? { size } : {}),
+    ...(manifestVersion !== undefined ? { manifestVersion } : {}),
+    ...(developer ? { developer } : {}),
     ...(rating !== undefined ? { rating } : {}),
     ...(userCount !== undefined ? { userCount } : {}),
     ...(iconUrl !== undefined ? { iconUrl } : {}),
@@ -624,6 +666,16 @@ function requiredBoundedString(value: unknown, maxLength: number): string {
 function optionalBoundedString(value: unknown, maxLength: number): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   return requiredBoundedString(value, maxLength);
+}
+
+function optionalBoundedDescription(value: unknown, maxLength: number): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string" || value.length > maxLength) throw new Error("Invalid catalog description.");
+  const normalized = value
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .trim();
+  return normalized && normalized.length <= maxLength ? normalized : undefined;
 }
 
 function optionalFiniteNumber(value: unknown, minimum: number, maximum: number): number | undefined {

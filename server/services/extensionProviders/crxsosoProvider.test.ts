@@ -111,6 +111,53 @@ test("CRX搜搜 empty pages remain successful zero-result pages", () => {
   });
 });
 
+test("CrxsosoProvider detail projects useful metadata without exposing the raw manifest", async () => {
+  let request: ProviderHttpRequest | undefined;
+  let encodedPayload: Readonly<Record<string, unknown>> | undefined;
+  const provider = new CrxsosoProvider({
+    httpClient: jsonTransport({
+      code: 200,
+      data: {
+        detail: {
+          crxId: TAMPERMONKEY_ID,
+          name: "Tampermonkey",
+          shortDescription: "Userscript manager",
+          description: "Long overview\nSecond line",
+          categoryName: "Productivity",
+          version: "5.5.0",
+          lastUpdateDate: 1_778_331_156,
+          size: "1.64MiB",
+          manifestVersion: 3,
+          developerName: "Jan Biniok",
+          averageRating: "4.7",
+          activeInstallCount: 12_000_000,
+          thumbnail: "https://lhimg.crxsoso.com/detail-icon",
+          manifest: "{\"permissions\":[\"tabs\"]}",
+        },
+      },
+    }, (value) => { request = value; }),
+    encodeRequest: (payload) => {
+      encodedPayload = payload;
+      return "00";
+    },
+  });
+
+  const item = await provider.detail(TAMPERMONKEY_ID, new AbortController().signal);
+  assert.deepEqual(encodedPayload, { id: TAMPERMONKEY_ID });
+  assert.equal(request?.url, "https://api.crxsoso.com/chrome/detail");
+  assert.equal(request?.init?.method, "POST");
+  assert.equal(item.storeId, TAMPERMONKEY_ID);
+  assert.equal(item.version, "5.5.0");
+  assert.equal(item.updatedAt, "2026-05-09T12:52:36.000Z");
+  assert.equal(item.size, "1.64MiB");
+  assert.equal(item.manifestVersion, 3);
+  assert.equal(item.developer, "Jan Biniok");
+  assert.equal(item.description, "Userscript manager");
+  assert.equal(item.overview, "Long overview\nSecond line");
+  assert.equal(item.iconUrl, "https://lhimg.crxsoso.com/detail-icon");
+  assert.equal(JSON.stringify(item).includes("permissions"), false);
+});
+
 test("CRX搜搜 schema drift is distinct from a zero-result response", () => {
   assert.throws(
     () => normalizeCrxsosoSearchResponse(crxsosoSchemaDriftFixture, FIXED_NOW),

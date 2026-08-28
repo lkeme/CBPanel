@@ -456,7 +456,7 @@ export const zhCN = {
   "module.proxiesBody": "这里只展示已配置代理的环境聚合，不提供代理轮换服务。",
   "module.extensionsTitle": "插件管理",
   "module.extensionsMeta": "查看扩展路径引用",
-  "module.extensionsBody": "扩展会先落地为本地 unpacked 目录，再在启动前传给 CloakBrowser；远程获取统一经过“获取扩展”的验证预检。",
+  "module.extensionsBody": "扩展会先落地为本地 unpacked 目录，再在启动前传给 CloakBrowser；远程扩展由“获取扩展”完成下载与安全验证。",
   "module.extensionNoPath": "尚无本地路径",
   "module.extensionRisk": "{count} 个高风险权限",
   "module.extensionRiskMedium": "{count} 个中风险权限",

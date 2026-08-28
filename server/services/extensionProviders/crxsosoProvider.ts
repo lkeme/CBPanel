@@ -104,6 +104,34 @@ export class CrxsosoProvider implements CatalogSearchProvider, ArtifactProvider 
     return normalizeCrxsosoSearchResponse(response.value, observedAt(this.now));
   }
 
+  async detail(storeId: string, signal: AbortSignal): Promise<ExtensionCatalogItem> {
+    assertCanonicalStoreId(storeId);
+    const response = await this.httpClient.readJson({
+      url: "https://api.crxsoso.com/chrome/detail",
+      init: encodedPost(this.encodeRequest, { id: storeId }),
+      kind: "catalog",
+      hostPolicy: crxsosoApiHostPolicy,
+      signal,
+      maxBytes: PROVIDER_HTTP_LIMITS.catalogBytes,
+      headerTimeoutMs: PROVIDER_HTTP_LIMITS.catalogHeaderTimeoutMs,
+      idleTimeoutMs: PROVIDER_HTTP_LIMITS.catalogHeaderTimeoutMs,
+      totalTimeoutMs: CRXSOSO_RESPONSE_TIMEOUT_MS,
+      maxRedirects: PROVIDER_HTTP_LIMITS.redirectHops,
+    });
+    const root = providerRecord(response.value, "CRX搜搜 detail response");
+    assertBusinessSuccess(root.code, "catalog");
+    const data = providerRecord(root.data, "CRX搜搜 detail data");
+    const detail = providerRecord(data.detail, "CRX搜搜 detail item");
+    if (detail.crxId !== storeId) throw catalogSchemaChanged("CRX搜搜 detail id does not match the requested id.");
+    const page = normalizeCrxsosoSearchResponse({
+      code: root.code,
+      data: { extensionList: [detail], hasMorePages: false },
+    }, observedAt(this.now));
+    const item = page.items[0];
+    if (!item) throw new ExtensionProviderError("EXTENSION_CATALOG_HTTP_ERROR", "CRX搜搜 detail was not found.", 404);
+    return item;
+  }
+
   async resolveCurrent(input: ArtifactResolveInput, signal: AbortSignal): Promise<ResolvedArtifact> {
     assertCanonicalStoreId(input.storeId);
     const detailPayload = {
@@ -202,16 +230,26 @@ export function normalizeCrxsosoSearchResponse(value: unknown, observedAtValue: 
       observedAt: normalizeObservedAt(observedAtValue),
       name: boundedRequiredString(item.name, CRXSOSO_FIELD_LIMITS.name, "CRX搜搜 extension name"),
     };
-    const description = boundedOptionalString(
+    const description = boundedOptionalDescription(
       item.shortDescription,
       CRXSOSO_FIELD_LIMITS.description,
       "CRX搜搜 extension description",
+    );
+    const overview = boundedOptionalDescription(
+      item.description,
+      CRXSOSO_FIELD_LIMITS.description,
+      "CRX搜搜 extension overview",
     );
     const category = boundedOptionalString(
       item.categoryName,
       CRXSOSO_FIELD_LIMITS.category,
       "CRX搜搜 extension category",
     );
+    const version = boundedOptionalString(item.version, 128, "CRX搜搜 extension version");
+    const size = boundedOptionalString(item.size, 128, "CRX搜搜 extension size");
+    const developer = boundedOptionalString(item.developerName ?? item.developer, 512, "CRX搜搜 extension developer");
+    const manifestVersion = optionalNonNegativeInteger(item.manifestVersion, "CRX搜搜 Manifest version");
+    const updatedAt = normalizeCrxsosoCatalogUpdatedAt(item.lastUpdateDate);
     const userCount = optionalNonNegativeInteger(item.activeInstallCount, "CRX搜搜 active install count");
     const rating = optionalRating(item.averageRating);
     // `thumbnail` is the field emitted by the public CRX搜搜 catalog.  Keep
@@ -220,7 +258,13 @@ export function normalizeCrxsosoSearchResponse(value: unknown, observedAtValue: 
     const iconUrl = normalizeCrxsosoCatalogIconUrl(item.thumbnail)
       ?? normalizeCrxsosoCatalogIconUrl(item.iconUrl);
     if (description !== undefined) normalized.description = description;
+    if (overview !== undefined) normalized.overview = overview;
     if (category !== undefined) normalized.category = category;
+    if (version !== undefined) normalized.version = version;
+    if (updatedAt !== undefined) normalized.updatedAt = updatedAt;
+    if (size !== undefined) normalized.size = size;
+    if (manifestVersion !== undefined) normalized.manifestVersion = manifestVersion;
+    if (developer !== undefined) normalized.developer = developer;
     if (userCount !== undefined) normalized.userCount = userCount;
     if (rating !== undefined) normalized.rating = rating;
     if (iconUrl !== undefined) normalized.iconUrl = iconUrl;
@@ -237,6 +281,19 @@ export function normalizeCrxsosoSearchResponse(value: unknown, observedAtValue: 
     continuation,
     hasMore: continuation !== undefined,
   };
+}
+
+function normalizeCrxsosoCatalogUpdatedAt(value: unknown): string | undefined {
+  const numericValue = typeof value === "number"
+    ? value
+    : typeof value === "string" && value.trim() && /^\d+(?:\.\d+)?$/.test(value.trim())
+      ? Number(value.trim())
+      : Number.NaN;
+  const timestampMs = Number.isFinite(numericValue)
+    ? numericValue > 100_000_000_000 ? numericValue : numericValue * 1_000
+    : typeof value === "string" && value.trim() ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(timestampMs) || timestampMs < 0 || timestampMs > Date.UTC(2100, 0, 1)) return undefined;
+  return new Date(timestampMs).toISOString();
 }
 
 function normalizeCrxsosoArtifactResponse(value: unknown, expectedUpstreamHint: string): string {
@@ -443,6 +500,19 @@ function boundedRequiredString(value: unknown, maxLength: number, label: string)
 function boundedOptionalString(value: unknown, maxLength: number, label: string): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   return boundedRequiredString(value, maxLength, label);
+}
+
+function boundedOptionalDescription(value: unknown, maxLength: number, label: string): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string" || value.length > maxLength) {
+    throw catalogSchemaChanged(`${label} is missing or exceeds the field limit.`);
+  }
+  const normalized = value
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .trim();
+  if (!normalized || normalized.length > maxLength) return undefined;
+  return normalized;
 }
 
 function boundedArtifactString(value: unknown, maxLength: number, label: string): string {

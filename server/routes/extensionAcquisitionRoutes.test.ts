@@ -94,7 +94,7 @@ test("route request decoders accept only bounded explicit fields", () => {
   );
 });
 
-test("feature router exposes only capabilities/search/resolve and leaves api state independent", async () => {
+test("feature router exposes capabilities/search/resolve/detail and leaves api state independent", async () => {
   const calls: {
     capabilities: number;
     searches: ExtensionCatalogSearchRequest[];
@@ -253,6 +253,92 @@ test("disconnecting a search request propagates cancellation to the service", as
   }
 });
 
+test("detail route validates canonical ids, forwards cancellation, and returns normalized metadata", async () => {
+  let receivedSignal: AbortSignal | undefined;
+  const service: ExtensionAcquisitionRouteService = {
+    ...unusedSessionRoutes(),
+    capabilities: async () => [],
+    search: async () => ({ query: "", items: [], excludedNonCanonicalCount: 0, hasMore: false }),
+    resolve: async () => ({
+      namespace: "chrome-web-store",
+      storeId: STORE_ID,
+      storeUrl: chromeWebStoreListingUrl(STORE_ID),
+      offers: [],
+    }),
+    detail: async (storeId, signal) => {
+      assert.equal(storeId, STORE_ID);
+      receivedSignal = signal;
+      return {
+        namespace: "chrome-web-store",
+        storeId,
+        storeUrl: chromeWebStoreListingUrl(storeId),
+        catalogProviderId: "crxsoso",
+        observedAt: "2026-08-27T00:00:00.000Z",
+        name: "Enriched",
+        version: "1.0.0",
+      };
+    },
+  };
+  const app = express();
+  app.use(express.json());
+  app.use("/api/extension-acquisition", createExtensionAcquisitionRouter(service));
+  const server = await startServer(app);
+  try {
+    const detail = await request(server.baseUrl, "GET", `/api/extension-acquisition/detail/${STORE_ID}`);
+    assert.equal(detail.status, 200);
+    assert.equal((detail.body as { version?: string }).version, "1.0.0");
+    assert.ok(receivedSignal);
+
+    const invalid = await request(server.baseUrl, "GET", "/api/extension-acquisition/detail/not-canonical");
+    assert.equal(invalid.status, 400);
+    assert.equal((invalid.body as { code?: string }).code, "ACQUISITION_INPUT_UNSUPPORTED");
+  } finally {
+    await server.dispose();
+  }
+});
+
+test("disconnecting a detail request aborts the service signal", async () => {
+  let receivedSignal: AbortSignal | undefined;
+  let signalAborted: (() => void) | undefined;
+  const aborted = new Promise<void>((resolve) => { signalAborted = resolve; });
+  const service: ExtensionAcquisitionRouteService = {
+    ...unusedSessionRoutes(),
+    capabilities: async () => [],
+    search: async () => ({ query: "", items: [], excludedNonCanonicalCount: 0, hasMore: false }),
+    resolve: async () => ({
+      namespace: "chrome-web-store",
+      storeId: STORE_ID,
+      storeUrl: chromeWebStoreListingUrl(STORE_ID),
+      offers: [],
+    }),
+    detail: async (_storeId, signal) => {
+      assert.ok(signal);
+      receivedSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          signalAborted?.();
+          reject(new ExtensionAcquisitionError("ACQUISITION_CANCELLED"));
+        }, { once: true });
+      });
+    },
+  };
+  const app = express();
+  app.use(express.json());
+  app.use("/api/extension-acquisition", createExtensionAcquisitionRouter(service));
+  const server = await startServer(app);
+  try {
+    const controller = new AbortController();
+    const pending = fetch(`${server.baseUrl}/api/extension-acquisition/detail/${STORE_ID}`, { signal: controller.signal });
+    await until(() => receivedSignal !== undefined);
+    controller.abort();
+    await assert.rejects(pending);
+    await within(aborted, 2_000);
+    assert.equal(receivedSignal?.aborted, true);
+  } finally {
+    await server.dispose();
+  }
+});
+
 test("disconnecting an update-provider request propagates cancellation to the probe", async () => {
   let receivedSignal: AbortSignal | undefined;
   let signalAborted: (() => void) | undefined;
@@ -313,6 +399,7 @@ function assertDecoderCode(run: () => unknown, code: string): void {
 function unusedSessionRoutes(): Pick<
   ExtensionAcquisitionRouteService,
   | "createSession"
+  | "detail"
   | "listSessions"
   | "getSession"
   | "cancelSession"
@@ -324,6 +411,7 @@ function unusedSessionRoutes(): Pick<
   };
   return {
     createSession: async () => unused(),
+    detail: async () => undefined,
     listSessions: () => [],
     getSession: unused,
     cancelSession: async () => unused(),

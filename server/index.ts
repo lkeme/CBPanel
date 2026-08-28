@@ -634,6 +634,7 @@ async function createApp(): Promise<express.Express> {
       capabilities: () => extensionAcquisitionService.capabilities(),
       search: (request, signal) => extensionAcquisitionService.search(request, signal),
       resolve: (request) => extensionAcquisitionService.resolve(request),
+      detail: (storeId, signal) => extensionAcquisitionService.detail(storeId, signal),
       createSession: (request) => extensionAcquisitionSessionService.create(request),
       listSessions: () => extensionAcquisitionSessionService.list(),
       getSession: (sessionId) => extensionAcquisitionSessionService.get(sessionId),

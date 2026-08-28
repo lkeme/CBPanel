@@ -33,6 +33,10 @@ export interface CatalogSearchProvider {
   search(input: CatalogSearchInput, signal: AbortSignal): Promise<CatalogSearchPage>;
 }
 
+export interface CatalogDetailProvider {
+  detail(storeId: string, signal: AbortSignal): Promise<ExtensionCatalogItem>;
+}
+
 export interface ArtifactResolveInput {
   storeId: string;
   destinationPath: string;

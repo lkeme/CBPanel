@@ -6,6 +6,7 @@ import type {
   ExtensionAcquisitionSessionView,
   ExtensionArtifactProviderId,
   ExtensionCapabilityView,
+  ExtensionCatalogItem,
   ExtensionCatalogSearchPage,
   ExtensionCatalogSearchRequest,
   ExtensionReferenceResolution,
@@ -23,6 +24,7 @@ export type ExtensionAcquisitionRequest = <Response>(url: string, init?: Request
 export interface ExtensionAcquisitionClient {
   capabilities(signal?: AbortSignal): Promise<ExtensionCapabilityView[]>;
   search(request: ExtensionCatalogSearchRequest, signal?: AbortSignal): Promise<ExtensionCatalogSearchPage>;
+  detail?(storeId: string, signal?: AbortSignal): Promise<ExtensionCatalogItem | undefined>;
   resolve(request: ExtensionReferenceResolveRequest, signal?: AbortSignal): Promise<ExtensionReferenceResolution>;
   createSession(
     request: ExtensionAcquisitionSessionCreateRequest,
@@ -61,6 +63,10 @@ export function createExtensionAcquisitionClient(
       body,
       signal,
     )),
+    detail: (storeId, signal) => request<ExtensionCatalogItem | undefined>(
+      `${ACQUISITION_API_ROOT}/detail/${encodeURIComponent(storeId)}`,
+      { method: "GET", signal },
+    ),
     resolve: (body, signal) => request<ExtensionReferenceResolution>(`${ACQUISITION_API_ROOT}/resolve`, jsonRequest(
       "POST",
       body,

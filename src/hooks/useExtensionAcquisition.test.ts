@@ -6,6 +6,7 @@ import type { ExtensionEntity } from "../shared/entities";
 import {
   chromeWebStoreListingUrl,
   extensionCapabilityDescriptors,
+  type ExtensionPreflightReport,
   type ExtensionAcquisitionSessionView,
   type ExtensionCatalogItem,
   type ExtensionCatalogSearchPage,
@@ -60,6 +61,39 @@ test("typing and disclosure dismissal make no catalog request, and acceptance pe
   await controller.submit();
   assert.deepEqual(events, ["persist:1", "search:privacy tools", "search:privacy tools"]);
   assert.equal(controller.getState().disclosure.open, false, "accepted disclosure is not shown again");
+});
+
+test("catalog detail requests are abortable and return optional metadata without changing search state", async () => {
+  const item = catalogItem(STORE_ID, "Base");
+  let detailCalls = 0;
+  let detailSignal: AbortSignal | undefined;
+  const detailResponse = deferred<ExtensionCatalogItem>();
+  const controller = createExtensionAcquisitionController({
+    settings: settings(),
+    client: stubClient({
+      search: async () => page("privacy", [item]),
+      detail: async (_storeId, signal) => {
+        detailCalls += 1;
+        detailSignal = signal;
+        return detailResponse.promise;
+      },
+    }),
+    reloadState: async () => undefined,
+  });
+
+  controller.setInput("privacy");
+  await controller.submit();
+  assert.equal(controller.selectCatalogItem(item), true);
+  const detailPending = controller.loadCatalogDetail(STORE_ID);
+  await flush();
+  detailResponse.resolve({ ...item, name: "Enriched", version: "2.0.0" });
+  const detail = await detailPending;
+  assert.equal(detail?.name, "Enriched");
+  assert.equal(detail?.version, "2.0.0");
+  assert.equal(detailCalls, 1);
+  assert.equal(detailSignal?.aborted, false);
+  assert.equal(controller.getState().discovery.page?.items[0]?.name, "Base");
+  controller.dispose();
 });
 
 test("persisted acquisition settings fail safe when the disclosure version is outside the known range", async () => {
@@ -445,6 +479,122 @@ test("session polling reaches preflight and duplicate confirmation refreshes glo
   assert.equal(controller.getState().session.view?.status, "consumed");
 });
 
+test("clean ready install is confirmed automatically while permission increases remain explicit", async () => {
+  let confirmCalls = 0;
+  const controller = createExtensionAcquisitionController({
+    settings: settings({ artifactProviderId: "chrome-web-store" }),
+    client: stubClient({
+      createSession: async () => ({ ...session("ready", "chrome-web-store"), report: preflightReport() }),
+      confirmSession: async () => {
+        confirmCalls += 1;
+        return { session: session("consumed", "chrome-web-store"), extension: extension() };
+      },
+    }),
+    reloadState: async () => undefined,
+  });
+
+  await controller.startSession({
+    namespace: "chrome-web-store",
+    storeId: STORE_ID,
+    artifactProviderId: "chrome-web-store",
+    purpose: "install",
+  });
+  await until(() => controller.getState().session.view?.status === "consumed");
+  assert.equal(confirmCalls, 1);
+
+  const approvalController = createExtensionAcquisitionController({
+    settings: settings({ artifactProviderId: "chrome-web-store" }),
+    client: stubClient({
+      createSession: async () => ({
+        ...session("ready", "chrome-web-store"),
+        report: preflightReport({
+          permissionApproval: { token: "approval-token", added: ["cookies"] },
+        }),
+      }),
+      confirmSession: async () => {
+        confirmCalls += 1;
+        return { session: session("consumed", "chrome-web-store"), extension: extension() };
+      },
+    }),
+    reloadState: async () => undefined,
+  });
+  await approvalController.startSession({
+    namespace: "chrome-web-store",
+    storeId: STORE_ID,
+    artifactProviderId: "chrome-web-store",
+    purpose: "install",
+  });
+  await flush();
+  assert.equal(approvalController.getState().session.view?.status, "ready");
+  assert.equal(confirmCalls, 1, "permission increases still require explicit approval");
+
+  const conflictController = createExtensionAcquisitionController({
+    settings: settings({ artifactProviderId: "chrome-web-store" }),
+    client: stubClient({
+      createSession: async () => ({
+        ...session("ready", "chrome-web-store"),
+        report: preflightReport({
+          conflicts: [{
+            extensionId: "existing-extension",
+            name: "Existing extension",
+            version: "0.9.0",
+            installState: "installed",
+            matchBy: "store-identity",
+            eligible: true,
+          }],
+        }),
+      }),
+      confirmSession: async () => {
+        confirmCalls += 1;
+        return { session: session("consumed", "chrome-web-store"), extension: extension() };
+      },
+    }),
+    reloadState: async () => undefined,
+  });
+  await conflictController.startSession({
+    namespace: "chrome-web-store",
+    storeId: STORE_ID,
+    artifactProviderId: "chrome-web-store",
+    purpose: "install",
+  });
+  await flush();
+  assert.equal(conflictController.getState().session.view?.status, "ready");
+  assert.equal(confirmCalls, 1, "an existing target still requires an explicit disposition");
+});
+
+test("a polled ready session is auto-confirmed exactly once", async () => {
+  let polls = 0;
+  let confirms = 0;
+  const controller = createExtensionAcquisitionController({
+    settings: settings({ artifactProviderId: "crxsoso" }),
+    client: stubClient({
+      createSession: async () => session("created", "crxsoso"),
+      getSession: async (sessionId) => {
+        polls += 1;
+        return { ...session("ready", "crxsoso", sessionId), report: preflightReport({
+          sessionId,
+          transport: { ...preflightReport().transport, selectedProviderId: "crxsoso" },
+        }) };
+      },
+      confirmSession: async () => {
+        confirms += 1;
+        return { session: session("consumed", "crxsoso"), extension: extension() };
+      },
+    }),
+    reloadState: async () => undefined,
+    pollDelay: async () => undefined,
+  });
+  await controller.startSession({
+    namespace: "chrome-web-store",
+    storeId: STORE_ID,
+    artifactProviderId: "crxsoso",
+    purpose: "install",
+  });
+  await until(() => controller.getState().session.view?.status === "consumed");
+  assert.equal(polls, 1);
+  assert.equal(confirms, 1);
+});
+
 test("a post-confirm state refresh failure preserves acquisition success as a separate outcome", async () => {
   const result = { session: session("consumed", "chrome-web-store"), extension: extension() };
   let refreshAvailable = false;
@@ -729,6 +879,56 @@ function session(
     createdAt: "2026-08-27T00:00:00.000Z",
     updatedAt: "2026-08-27T00:00:01.000Z",
     error,
+  };
+}
+
+function preflightReport(overrides: Partial<ExtensionPreflightReport> = {}): ExtensionPreflightReport {
+  return {
+    sessionId: "abcdefghijklmnopqrstuvwxyzABCDEJ",
+    expiresAt: "2026-08-27T01:00:00.000Z",
+    identity: {
+      namespace: "chrome-web-store",
+      requestedStoreId: STORE_ID,
+      proofDerivedStoreId: STORE_ID,
+      matches: true,
+    },
+    package: {
+      name: "Extension",
+      description: "",
+      version: "1.0.0",
+      manifestVersion: 3,
+      format: "crx3",
+      size: 1,
+      sha256: "a".repeat(64),
+      manifestSha256: "b".repeat(64),
+      treeSha256: "c".repeat(64),
+      entryCount: 1,
+      filesystemNodeCount: 1,
+      fileCount: 1,
+      expandedBytes: 1,
+    },
+    transport: {
+      selectedProviderId: "chrome-web-store",
+      finalByteHost: "example.test",
+      fetchedAt: "2026-08-27T00:00:00.000Z",
+      durationMs: 1,
+    },
+    verification: {
+      level: "cws-publisher-verified",
+      developerKeySha256: "d".repeat(64),
+      publisherTrustRootId: "root",
+      publisherTrustRootVersion: 1,
+      developerProofAlgorithm: "rsa-sha256",
+      publisherProofAlgorithm: "rsa-sha256",
+    },
+    permissions: [],
+    hostPermissions: [],
+    optionalPermissions: [],
+    optionalHostPermissions: [],
+    permissionRisks: [],
+    discrepancies: [],
+    conflicts: [],
+    ...overrides,
   };
 }
 

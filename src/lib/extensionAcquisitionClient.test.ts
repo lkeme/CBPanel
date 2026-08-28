@@ -5,6 +5,7 @@ import type { ExtensionEntity } from "../shared/entities";
 import type {
   ExtensionAcquisitionSessionView,
   ExtensionCapabilityView,
+  ExtensionCatalogItem,
   ExtensionCatalogSearchPage,
   ExtensionReferenceResolution,
 } from "../shared/extensionAcquisition";
@@ -22,6 +23,7 @@ test("the acquisition client sends only normalized feature payloads to fixed rou
   const responses: unknown[] = [
     [] satisfies ExtensionCapabilityView[],
     searchPage(),
+    detailItem() satisfies ExtensionCatalogItem,
     resolution(),
     session("created"),
     session("ready"),
@@ -39,6 +41,7 @@ test("the acquisition client sends only normalized feature payloads to fixed rou
 
   await client.capabilities(signal);
   await client.search({ query: "privacy", cursor: "opaque_cursor" }, signal);
+  await client.detail!(STORE_ID, signal);
   await client.resolve({ input: STORE_ID }, signal);
   await client.createSession({
     namespace: "chrome-web-store",
@@ -59,6 +62,7 @@ test("the acquisition client sends only normalized feature payloads to fixed rou
   assert.deepEqual(calls.map((call) => [call.url, call.init?.method]), [
     ["/api/extension-acquisition/capabilities", "GET"],
     ["/api/extension-acquisition/search", "POST"],
+    [`/api/extension-acquisition/detail/${STORE_ID}`, "GET"],
     ["/api/extension-acquisition/resolve", "POST"],
     ["/api/extension-acquisition/sessions", "POST"],
     ["/api/extension-acquisition/sessions/session%2Funsafe", "GET"],
@@ -68,27 +72,39 @@ test("the acquisition client sends only normalized feature payloads to fixed rou
     ["/api/extension-acquisition/extensions/extension%2Funsafe/update-provider", "PUT"],
   ]);
   assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), { query: "privacy", cursor: "opaque_cursor" });
-  assert.deepEqual(JSON.parse(String(calls[2]?.init?.body)), { input: STORE_ID });
-  assert.deepEqual(JSON.parse(String(calls[3]?.init?.body)), {
+  assert.deepEqual(calls[2]?.url, `/api/extension-acquisition/detail/${STORE_ID}`);
+  assert.deepEqual(JSON.parse(String(calls[3]?.init?.body)), { input: STORE_ID });
+  assert.deepEqual(JSON.parse(String(calls[4]?.init?.body)), {
     namespace: "chrome-web-store",
     storeId: STORE_ID,
     artifactProviderId: "chrome-web-store",
     purpose: "install",
     catalogObservationId: "abcdefghijklmnopqrstuvwxyzABCDEJ",
   });
-  assert.deepEqual(JSON.parse(String(calls[6]?.init?.body)), {
+  assert.deepEqual(JSON.parse(String(calls[7]?.init?.body)), {
     disposition: "create",
     environmentIds: ["environment-1"],
   });
-  assert.deepEqual(JSON.parse(String(calls[7]?.init?.body)), {
+  assert.deepEqual(JSON.parse(String(calls[8]?.init?.body)), {
     extensionAcquisition: { artifactProviderId: "crxsoso" },
   });
-  assert.deepEqual(JSON.parse(String(calls[8]?.init?.body)), { providerId: "crxsoso" });
+  assert.deepEqual(JSON.parse(String(calls[9]?.init?.body)), { providerId: "crxsoso" });
   assert.equal(calls.every((call) => call.init?.signal === signal), true);
 });
 
 function searchPage(): ExtensionCatalogSearchPage {
   return { query: "privacy", items: [], excludedNonCanonicalCount: 0, hasMore: false };
+}
+
+function detailItem(): ExtensionCatalogItem {
+  return {
+    namespace: "chrome-web-store",
+    storeId: STORE_ID,
+    storeUrl: `https://chromewebstore.google.com/detail/${STORE_ID}`,
+    catalogProviderId: "crxsoso",
+    observedAt: "2026-08-27T00:00:00.000Z",
+    name: "Extension",
+  };
 }
 
 function resolution(): ExtensionReferenceResolution {

@@ -457,7 +457,7 @@ export const enUS: Dictionary = {
   "module.proxiesBody": "This view aggregates profiles with configured proxies. It does not provide proxy rotation.",
   "module.extensionsTitle": "Extension Management",
   "module.extensionsMeta": "Review extension path usage",
-  "module.extensionsBody": "Extensions are resolved to local unpacked directories before launch; remote acquisition always uses the verified Get extensions preflight.",
+  "module.extensionsBody": "Extensions are resolved to local unpacked directories before launch; Get extensions downloads and verifies remote packages.",
   "module.extensionNoPath": "No local path yet",
   "module.extensionRisk": "{count} high-risk permission||{count} high-risk permissions",
   "module.extensionRiskMedium": "{count} medium-risk permission||{count} medium-risk permissions",

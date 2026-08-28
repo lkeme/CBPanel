@@ -10,7 +10,11 @@ import type {
   ExtensionAcquisitionSessionView,
   ExtensionPreflightReport,
 } from "../../shared/extensionAcquisition";
-import { ExtensionArtifactChannelChoice, ExtensionCatalogResults } from "./ExtensionAcquisitionResults";
+import {
+  ExtensionArtifactChannelChoice,
+  ExtensionCatalogResults,
+  formatAcquisitionCount,
+} from "./ExtensionAcquisitionResults";
 import {
   buildExtensionAcquisitionConfirmationRequest,
   ExtensionAcquisitionSessionPanel,
@@ -222,7 +226,6 @@ test("acquisition dialogs trap Tab, honor Escape locking, and restore only conne
 test("catalog rendering announces omitted aliases and exposes whole-card detail activation", () => {
   const html = renderToStaticMarkup(React.createElement(ExtensionCatalogResults, {
     locale: "en-US",
-    onCancel: () => undefined,
     onChoose: () => undefined,
     onLoadMore: () => undefined,
     onOpenDetail: () => undefined,
@@ -258,6 +261,21 @@ test("catalog rendering announces omitted aliases and exposes whole-card detail 
   assert.match(html, /role="status"/);
 });
 
+test("catalog search loading is a spinner-only status without a cancellation action", () => {
+  const html = renderToStaticMarkup(React.createElement(ExtensionCatalogResults, {
+    locale: "en-US",
+    onChoose: () => undefined,
+    onLoadMore: () => undefined,
+    onOpenListing: () => undefined,
+    onRetry: () => undefined,
+    status: "loading",
+    t,
+  }));
+  assert.ok(html.includes("acquisition-loading-spinner"));
+  assert.ok(html.includes("acquisition-visually-hidden"));
+  assert.ok(!html.includes("actions.cancelOperation"));
+});
+
 test("catalog supports four-column cards with Chrome marks and a detail child view without observation timestamps", () => {
   const item = {
     namespace: "chrome-web-store" as const,
@@ -271,10 +289,15 @@ test("catalog supports four-column cards with Chrome marks and a detail child vi
     rating: 4.8,
     userCount: 1_200_000,
     iconUrl: "https://lhimg.crxsoso.com/icon/example.png",
+    version: "5.5.0",
+    updatedAt: "2026-08-26T00:00:00.000Z",
+    size: "1.64MiB",
+    manifestVersion: 3,
+    developer: "Example Developer",
+    overview: "Full extension overview",
   };
   const grid = renderToStaticMarkup(React.createElement(ExtensionCatalogResults, {
     locale: "en-US",
-    onCancel: () => undefined,
     onChoose: () => undefined,
     onLoadMore: () => undefined,
     onOpenDetail: () => undefined,
@@ -285,15 +308,18 @@ test("catalog supports four-column cards with Chrome marks and a detail child vi
     status: "ready",
     t,
     viewMode: "four",
+    installedStoreIds: new Set([item.storeId]),
   }));
 
   assert.ok(grid.includes("acquisition-result-list view-four"));
   assert.ok(grid.includes("acquisition-result-glyph"));
-  assert.ok(grid.includes("loading=\"lazy\""));
+  assert.ok(grid.includes("decoding=\"async\""));
+  assert.ok(!grid.includes("loading=\"lazy\""));
   assert.ok(grid.includes("lhimg.crxsoso.com/icon/example.png"));
   assert.ok(!grid.includes("extension.acquisition.results.details"));
   assert.ok(!grid.includes("extension.acquisition.openWebStore"));
   assert.ok(grid.includes("extension.acquisition.results.end"));
+  assert.ok(grid.includes("extension.acquisition.results.installed"));
   assert.match(grid, /aria-label="extension\.acquisition\.results\.viewFour"[^>]*aria-pressed="true"/);
   assert.ok(!grid.includes(item.observedAt));
 
@@ -301,9 +327,9 @@ test("catalog supports four-column cards with Chrome marks and a detail child vi
     detailItem: item,
     detailFooter: React.createElement("button", { type: "button" }, "channel-action"),
     detailProviderId: "crxsoso",
+    installedStoreIds: new Set([item.storeId]),
     locale: "en-US",
     onBackDetail: () => undefined,
-    onCancel: () => undefined,
     onChoose: () => undefined,
     onLoadMore: () => undefined,
     onOpenListing: () => undefined,
@@ -317,13 +343,29 @@ test("catalog supports four-column cards with Chrome marks and a detail child vi
   assert.ok(!detail.includes("extension.acquisition.openWebStore"), "an embedded channel owns the selected-channel listing action");
   assert.ok(!detail.includes("extension.acquisition.results.choose"));
   assert.ok(detail.includes(item.storeId));
+  assert.ok(detail.includes(`href="https://chromewebstore.google.com/detail/${item.storeId}"`));
+  assert.ok(detail.includes("extension.acquisition.results.version"));
+  assert.ok(detail.includes("extension.acquisition.results.updatedAt"));
+  assert.ok(detail.includes("extension.acquisition.results.size"));
+  assert.ok(detail.includes("extension.acquisition.results.manifestVersion"));
+  assert.ok(detail.includes("extension.acquisition.results.developer"));
+  assert.ok(detail.includes("extension.acquisition.results.overview"));
+  assert.ok(detail.includes("Full extension overview"));
+  assert.ok(detail.includes("extension.acquisition.results.installed"));
   assert.ok(!detail.includes(item.observedAt));
+});
+
+test("catalog download counts use stable K/M/B units regardless of locale", () => {
+  assert.equal(formatAcquisitionCount(999), "999");
+  assert.equal(formatAcquisitionCount(1_200), "1.2K");
+  assert.equal(formatAcquisitionCount(12_345), "12.3K");
+  assert.equal(formatAcquisitionCount(1_200_000), "1.2M");
+  assert.equal(formatAcquisitionCount(2_000_000_000), "2B");
 });
 
 test("cancelling pagination retains results but exposes one explicit retry instead of an active load-more path", () => {
   const html = renderToStaticMarkup(React.createElement(ExtensionCatalogResults, {
     locale: "en-US",
-    onCancel: () => undefined,
     onChoose: () => undefined,
     onLoadMore: () => undefined,
     onOpenListing: () => undefined,
@@ -356,7 +398,6 @@ test("exact ID resolution failures are announced as acquisition failures rather 
     discoveryKind: "resolve",
     error: { message: "provider unavailable" },
     locale: "en-US",
-    onCancel: () => undefined,
     onChoose: () => undefined,
     onLoadMore: () => undefined,
     onOpenListing: () => undefined,
@@ -470,6 +511,34 @@ test("session creation exposes a safe cancellation action while the chosen chann
   assert.match(html, /<button[^>]*disabled=""[^>]*>extension\.acquisition\.loading<\/button>/);
 });
 
+test("an installed result exposes status without another Get-page install action", () => {
+  const html = renderToStaticMarkup(React.createElement(ExtensionArtifactChannelChoice, {
+    installed: true,
+    onOpenListing: () => undefined,
+    onSelect: () => undefined,
+    onStart: () => undefined,
+    providerFailure: { providerId: "crxsoso", message: "stale failure" },
+    resolution: {
+      namespace: "chrome-web-store",
+      storeId: "b".repeat(32),
+      storeUrl: `https://chromewebstore.google.com/detail/${"b".repeat(32)}`,
+      offers: [{
+        namespace: "chrome-web-store",
+        storeId: "b".repeat(32),
+        artifactProviderId: "crxsoso",
+        format: "crx3",
+        providerLabel: "CRX搜搜",
+      }],
+    },
+    selectedProviderId: "crxsoso",
+    t,
+  }));
+
+  assert.ok(html.includes("extension.acquisition.results.installed"));
+  assert.ok(!html.includes("extension.acquisition.channel.start"));
+  assert.ok(!html.includes("extension.acquisition.channel.tryGoogle"));
+});
+
 test("confirmation requests can only name server-issued eligible candidates and gate permission tokens", () => {
   const report = preflight({
     conflicts: [{
@@ -497,7 +566,35 @@ test("confirmation requests can only name server-issued eligible candidates and 
   });
 });
 
-test("ready preflight renders package, channel, proof, risk and discrepancy facts before disabled confirmation", () => {
+test("a confirming ready update replaces review details with compact installation progress", () => {
+  const report = preflight({
+    conflicts: [{
+      extensionId: "extension_existing",
+      name: "Example",
+      version: "1.0.0",
+      installState: "installed",
+      matchBy: "store-identity",
+      eligible: true,
+    }],
+  });
+  const html = renderToStaticMarkup(React.createElement(ExtensionAcquisitionSessionPanel, {
+    locale: "en-US",
+    onCancel: () => undefined,
+    onConfirm: () => undefined,
+    onDone: () => undefined,
+    onRetry: () => undefined,
+    operation: "confirming",
+    session: { ...readySession(report), purpose: "update" },
+    t,
+    targetExtensionId: "extension_existing",
+  }));
+
+  assert.ok(html.includes("extension.acquisition.progress.committing"));
+  assert.ok(!html.includes("extension.acquisition.confirm.technicalDetails"));
+  assert.ok(!html.includes("actions.cancel"));
+});
+
+test("ready review keeps package, channel, proof, risk and discrepancy facts behind technical details", () => {
   const report = preflight({
     conflicts: [{
       extensionId: "extension_blocked",

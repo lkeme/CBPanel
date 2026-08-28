@@ -208,7 +208,13 @@ export interface ExtensionCatalogItem {
   observedAt: string;
   name: string;
   description?: string;
+  overview?: string;
   category?: string;
+  version?: string;
+  updatedAt?: string;
+  size?: string;
+  manifestVersion?: number;
+  developer?: string;
   /** Optional CRX搜搜 thumbnail after strict host/scheme normalization. */
   iconUrl?: string;
   rating?: number;

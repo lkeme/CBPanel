@@ -5,22 +5,21 @@ import {
   Download,
   ExternalLink,
   Grid2X2,
-  RefreshCw,
   SearchX,
   Settings2,
   Store,
   Star,
-  Users,
 } from "lucide-react";
 import { useId, useState, type ReactNode } from "react";
 
 import type { Locale } from "../../i18n";
-import type {
-  ExtensionArtifactOffer,
-  ExtensionArtifactProviderId,
-  ExtensionCatalogItem,
-  ExtensionCatalogSearchPage,
-  ExtensionReferenceResolution,
+import {
+  chromeWebStoreListingUrl,
+  type ExtensionArtifactOffer,
+  type ExtensionArtifactProviderId,
+  type ExtensionCatalogItem,
+  type ExtensionCatalogSearchPage,
+  type ExtensionReferenceResolution,
 } from "../../shared/extensionAcquisition";
 import { StatusPill } from "../ui/StatusPill";
 import {
@@ -72,7 +71,6 @@ export function ExtensionCatalogResults({
   discoveryKind,
   error,
   locale,
-  onCancel,
   onChoose,
   onLoadMore,
   onOpenListing,
@@ -81,6 +79,7 @@ export function ExtensionCatalogResults({
   onBackDetail,
   detailProviderId,
   detailFooter,
+  installedStoreIds,
   onRetry,
   viewMode = "two",
   onViewModeChange,
@@ -92,7 +91,6 @@ export function ExtensionCatalogResults({
   discoveryKind?: "search" | "resolve";
   error?: ExtensionAcquisitionUiError;
   locale: Locale;
-  onCancel: () => void;
   onChoose: (item: ExtensionCatalogItem) => void;
   onLoadMore: () => void;
   onOpenListing: (item: ExtensionCatalogItem, providerId?: ExtensionArtifactProviderId) => void;
@@ -101,6 +99,7 @@ export function ExtensionCatalogResults({
   onBackDetail?: () => void;
   detailProviderId?: ExtensionArtifactProviderId;
   detailFooter?: ReactNode;
+  installedStoreIds?: ReadonlySet<string>;
   onRetry: () => void;
   viewMode?: "two" | "four";
   onViewModeChange?: (mode: "two" | "four") => void;
@@ -122,6 +121,7 @@ export function ExtensionCatalogResults({
         onBack={onBackDetail ?? (() => undefined)}
         onOpenListing={onOpenListing}
         providerId={detailProviderId}
+        installed={installedStoreIds?.has(detailItem.storeId) ?? false}
         t={t}
         footer={detailFooter}
       />
@@ -129,12 +129,9 @@ export function ExtensionCatalogResults({
   }
   if (status === "loading" && !page) {
     return (
-      <div aria-live="polite" className="preflight-empty acquisition-results-state" role="status">
-        <RefreshCw aria-hidden="true" className="spin" size={18} />
-        <strong>{t("extension.acquisition.results.loading")}</strong>
-        <button className="command subtle" onClick={onCancel} type="button">
-          {t("actions.cancelOperation")}
-        </button>
+      <div aria-live="polite" className="acquisition-search-loading acquisition-results-state" role="status">
+        <span aria-hidden="true" className="acquisition-loading-spinner" />
+        <span className="acquisition-visually-hidden">{t("extension.acquisition.results.loading")}</span>
       </div>
     );
   }
@@ -243,10 +240,10 @@ export function ExtensionCatalogResults({
             <CatalogResultCard
               item={item}
               key={item.storeId}
-              locale={locale}
               onChoose={onChoose}
               onOpenDetail={onOpenDetail}
               viewMode={viewMode}
+              installed={installedStoreIds?.has(item.storeId) ?? false}
               selected={item.storeId === selectedStoreId}
               t={t}
             />
@@ -255,12 +252,9 @@ export function ExtensionCatalogResults({
       )}
 
       {status === "loading-more" && (
-        <div aria-live="polite" className="acquisition-pagination-status" role="status">
-          <RefreshCw aria-hidden="true" className="spin" size={15} />
-          <span>{t("extension.acquisition.results.loadingMore")}</span>
-          <button className="command subtle" onClick={onCancel} type="button">
-            {t("actions.cancelOperation")}
-          </button>
+        <div aria-live="polite" className="acquisition-search-loading acquisition-pagination-status" role="status">
+          <span aria-hidden="true" className="acquisition-loading-spinner" />
+          <span className="acquisition-visually-hidden">{t("extension.acquisition.results.loadingMore")}</span>
         </div>
       )}
       {status === "ready" && page.hasMore && (
@@ -281,26 +275,24 @@ export function ExtensionCatalogResults({
 
 function CatalogResultCard({
   item,
-  locale,
   onChoose,
   onOpenDetail,
   viewMode,
+  installed,
   selected,
   t,
 }: {
   item: ExtensionCatalogItem;
-  locale: Locale;
   onChoose: (item: ExtensionCatalogItem) => void;
   onOpenDetail?: (item: ExtensionCatalogItem) => void;
   viewMode: "two" | "four";
+  installed: boolean;
   selected: boolean;
   t: ExtensionAcquisitionUiTranslator;
 }) {
   const titleId = useId();
-  const [iconFailed, setIconFailed] = useState(false);
-  const details = [item.category, t("extension.acquisition.results.crxsosoProvider")].filter(Boolean);
+  const details = [item.category].filter(Boolean);
   const activate = () => (onOpenDetail ? onOpenDetail(item) : onChoose(item));
-  const glyph = extensionGlyph(item);
 
   return (
     <article
@@ -314,28 +306,28 @@ function CatalogResultCard({
         onClick={activate}
         type="button"
       >
-        <span className={`acquisition-result-icon acquisition-result-glyph glyph-${glyph.tone}`} aria-hidden="true">
-          {item.iconUrl && !iconFailed ? (
-            <img alt="" loading="lazy" onError={() => setIconFailed(true)} referrerPolicy="no-referrer" src={item.iconUrl} />
-          ) : <span>{glyph.label}</span>}
-        </span>
+        <CatalogIcon item={item} />
         <div className="acquisition-result-copy">
           <div className="acquisition-result-heading">
             <span className="acquisition-result-title" id={titleId}>{item.name}</span>
             {selected && <StatusPill tone="running">{t("extension.acquisition.channel.selected")}</StatusPill>}
+            {installed && <StatusPill tone="neutral">{t("extension.acquisition.results.installed")}</StatusPill>}
             {viewMode === "two" && <span className="acquisition-result-arrow" aria-hidden="true">›</span>}
           </div>
           {details.length > 0 && (
             <div className="acquisition-result-badges">
               {item.category && <span className="acquisition-result-badge category">{item.category}</span>}
-              <span className="acquisition-result-badge provider">{t("extension.acquisition.results.crxsosoProvider")}</span>
             </div>
           )}
           {item.description && <p>{item.description}</p>}
           {(item.rating !== undefined || item.userCount !== undefined) && (
             <div className="acquisition-result-metrics">
               {item.rating !== undefined && <span className="acquisition-result-metric rating"><Star aria-hidden="true" size={13} /> {item.rating.toFixed(1)}</span>}
-              {item.userCount !== undefined && <span className="acquisition-result-metric users"><Users aria-hidden="true" size={13} /> {formatUserCount(item.userCount, locale)}</span>}
+              {item.userCount !== undefined && <span
+                aria-label={`${t("extension.acquisition.results.downloads")}: ${formatAcquisitionCount(item.userCount)}`}
+                className="acquisition-result-metric downloads"
+                title={t("extension.acquisition.results.downloads")}
+              ><Download aria-hidden="true" size={13} /> {formatAcquisitionCount(item.userCount)}</span>}
             </div>
           )}
         </div>
@@ -353,6 +345,30 @@ function extensionGlyph(item: ExtensionCatalogItem): { label: string; tone: numb
   return { label, tone: Math.abs(hash) % 6 };
 }
 
+function CatalogIcon({ item }: { item: ExtensionCatalogItem }) {
+  const [iconFailed, setIconFailed] = useState(false);
+  const [iconLoaded, setIconLoaded] = useState(false);
+  const glyph = extensionGlyph(item);
+  return (
+    <span className={`acquisition-result-icon acquisition-result-glyph glyph-${glyph.tone}`} aria-hidden="true">
+      <span className={iconLoaded && !iconFailed ? "acquisition-result-icon-placeholder hidden" : "acquisition-result-icon-placeholder"}>
+        {glyph.label}
+      </span>
+      {item.iconUrl && !iconFailed && (
+        <img
+          alt=""
+          className={iconLoaded ? "loaded" : ""}
+          decoding="async"
+          onError={() => setIconFailed(true)}
+          onLoad={() => setIconLoaded(true)}
+          referrerPolicy="no-referrer"
+          src={item.iconUrl}
+        />
+      )}
+    </span>
+  );
+}
+
 /**
  * Catalog details deliberately stay in the acquisition workspace instead of
  * opening a second browser tab. This preserves the search page/cursor and
@@ -365,6 +381,7 @@ export function ExtensionCatalogDetail({
   onBack,
   onOpenListing,
   providerId,
+  installed = false,
   t,
 }: {
   footer?: ReactNode;
@@ -373,11 +390,10 @@ export function ExtensionCatalogDetail({
   onBack: () => void;
   onOpenListing: (item: ExtensionCatalogItem, providerId?: ExtensionArtifactProviderId) => void;
   providerId?: ExtensionArtifactProviderId;
+  installed?: boolean;
   t: ExtensionAcquisitionUiTranslator;
 }) {
   const headingId = useId();
-  const [iconFailed, setIconFailed] = useState(false);
-  const glyph = extensionGlyph(item);
   return (
     <section aria-labelledby={headingId} className="acquisition-result-detail">
       <header className="acquisition-detail-header">
@@ -387,27 +403,42 @@ export function ExtensionCatalogDetail({
         <span className="acquisition-detail-breadcrumb">{t("extension.acquisition.results.title")}</span>
       </header>
       <div className="acquisition-detail-hero">
-        <span className={`acquisition-result-icon acquisition-result-glyph glyph-${glyph.tone}`} aria-hidden="true">
-          {item.iconUrl && !iconFailed ? (
-            <img alt="" loading="lazy" onError={() => setIconFailed(true)} referrerPolicy="no-referrer" src={item.iconUrl} />
-          ) : <span>{glyph.label}</span>}
-        </span>
+        <CatalogIcon item={item} />
         <div>
           <h3 id={headingId}>{item.name}</h3>
-          <p>{item.description || t("extension.acquisition.results.noDescription")}</p>
+          <p className="acquisition-detail-description">{item.description || t("extension.acquisition.results.noDescription")}</p>
           <div className="acquisition-detail-badges">
-            <StatusPill tone="warning">{t("extension.acquisition.results.crxsosoProvider")}</StatusPill>
             {item.category && <StatusPill tone="neutral">{item.category}</StatusPill>}
+            {installed && <StatusPill tone="running">{t("extension.acquisition.results.installed")}</StatusPill>}
           </div>
         </div>
       </div>
       {footer}
       <dl className="acquisition-detail-facts">
-        <div><dt>{t("extension.acquisition.storeId")}</dt><dd className="mono-cell">{item.storeId}</dd></div>
+        <div><dt>{t("extension.acquisition.storeId")}</dt><dd className="mono-cell"><a
+          className="acquisition-detail-store-link"
+          href={chromeWebStoreListingUrl(item.storeId)}
+          onClick={(event) => {
+            event.preventDefault();
+            onOpenListing(item, "chrome-web-store");
+          }}
+          rel="noopener noreferrer"
+          target="_blank"
+        >{item.storeId}</a></dd></div>
         {item.rating !== undefined && <div><dt>{t("extension.acquisition.results.rating")}</dt><dd><Star aria-hidden="true" size={14} /> {item.rating.toFixed(1)}</dd></div>}
-        {item.userCount !== undefined && <div><dt>{t("extension.acquisition.results.users")}</dt><dd><Users aria-hidden="true" size={14} /> {formatUserCount(item.userCount, locale)}</dd></div>}
-        <div><dt>{t("extension.acquisition.results.provider")}</dt><dd>{t("extension.acquisition.results.crxsosoProvider")}</dd></div>
+        {item.userCount !== undefined && <div><dt>{t("extension.acquisition.results.downloads")}</dt><dd><Download aria-hidden="true" size={14} /> {formatAcquisitionCount(item.userCount)}</dd></div>}
+        {item.version && <div><dt>{t("extension.acquisition.results.version")}</dt><dd>{item.version}</dd></div>}
+        {item.updatedAt && <div><dt>{t("extension.acquisition.results.updatedAt")}</dt><dd>{formatDetailDate(item.updatedAt, locale)}</dd></div>}
+        {item.size && <div><dt>{t("extension.acquisition.results.size")}</dt><dd>{item.size}</dd></div>}
+        {item.manifestVersion !== undefined && <div><dt>{t("extension.acquisition.results.manifestVersion")}</dt><dd>{item.manifestVersion}</dd></div>}
+        {item.developer && <div><dt>{t("extension.acquisition.results.developer")}</dt><dd>{item.developer}</dd></div>}
       </dl>
+      {item.overview && (
+        <section className="acquisition-detail-overview">
+          <h4>{t("extension.acquisition.results.overview")}</h4>
+          <p>{item.overview}</p>
+        </section>
+      )}
       {!footer && providerId && (
         <div className="acquisition-detail-actions">
           <button className="command subtle" onClick={() => onOpenListing(item, providerId)} type="button">
@@ -422,12 +453,31 @@ export function ExtensionCatalogDetail({
   );
 }
 
-function formatUserCount(value: number, locale: Locale): string {
+function formatDetailDate(value: string, locale: Locale): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return value;
+  return new Intl.DateTimeFormat(locale === "zh-CN" ? "zh-CN" : "en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(timestamp);
+}
+
+export function formatAcquisitionCount(value: number): string {
   if (!Number.isFinite(value)) return "-";
-  return new Intl.NumberFormat(locale === "zh-CN" ? "zh-CN" : "en-US", {
-    notation: "compact",
-    maximumFractionDigits: 1,
-  }).format(value);
+  if (value < 1_000) return Math.round(value).toString();
+  const units: Array<[number, string]> = [
+    [1_000_000_000, "B"],
+    [1_000_000, "M"],
+    [1_000, "K"],
+  ];
+  for (const [threshold, suffix] of units) {
+    if (value < threshold) continue;
+    const amount = value / threshold;
+    const digits = amount >= 100 ? 0 : 1;
+    return `${amount.toFixed(digits).replace(/\.0$/, "")}${suffix}`;
+  }
+  return Math.round(value).toString();
 }
 
 export type ExtensionArtifactProviderFailure = ExtensionAcquisitionUiError & {
@@ -436,6 +486,7 @@ export type ExtensionArtifactProviderFailure = ExtensionAcquisitionUiError & {
 
 export function ExtensionArtifactChannelChoice({
   embedded = false,
+  installed = false,
   onCancel,
   onOpenListing,
   onSelect,
@@ -447,6 +498,7 @@ export function ExtensionArtifactChannelChoice({
   t,
 }: {
   embedded?: boolean;
+  installed?: boolean;
   onCancel?: () => void | Promise<void>;
   onOpenListing: (resolution: ExtensionReferenceResolution) => void;
   onSelect: (providerId: ExtensionArtifactProviderId) => void;
@@ -485,14 +537,13 @@ export function ExtensionArtifactChannelChoice({
       <header className="acquisition-section-header">
         <div>
           <h3 id={headingId}>{t("extension.acquisition.channel.title")}</h3>
-          <p>{t("extension.acquisition.channel.description")}</p>
         </div>
         <div className="acquisition-section-actions">
           <button className="command subtle" disabled={busy} onClick={() => onOpenListing(resolution)} type="button">
             <ExternalLink aria-hidden="true" size={15} />
             {t("extension.acquisition.openWebStore")}
           </button>
-          {selectedOffer && (
+          {selectedOffer && !installed && (
             <button
               className="command primary acquisition-channel-start"
               disabled={busy}
@@ -502,7 +553,10 @@ export function ExtensionArtifactChannelChoice({
               {startingProviderId === selectedOffer.artifactProviderId
                 ? t("extension.acquisition.loading")
                 : t("extension.acquisition.channel.start", { provider: selectedOffer.providerLabel })}
-            </button>
+              </button>
+          )}
+          {selectedOffer && installed && (
+            <StatusPill tone="running">{t("extension.acquisition.results.installed")}</StatusPill>
           )}
           {busy && onCancel && (
             <button className="command subtle" onClick={() => void onCancel()} type="button">
@@ -578,7 +632,7 @@ export function ExtensionArtifactChannelChoice({
         </fieldset>
       )}
 
-      {providerFailure && alternateOffer && (
+      {!installed && providerFailure && alternateOffer && (
         <div className="diagnostic-note warning acquisition-mirror-fallback">
           <CircleAlert aria-hidden="true" size={16} />
           <span>{alternateOffer.artifactProviderId === "crxsoso"
