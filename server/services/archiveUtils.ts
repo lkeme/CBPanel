@@ -97,7 +97,7 @@ export async function extractZipArchive(
   options: { limits?: ArchiveExtractionLimits } = {},
 ): Promise<void> {
   const limits = { ...DEFAULT_EXTRACTION_LIMITS, ...(options.limits ?? {}) };
-  await assertOrdinaryExtractionRoot(outputDir);
+  const extractionRoot = await assertOrdinaryExtractionRoot(outputDir);
   const writes: Promise<void>[] = [];
   const budget = { compressedBytes: 0, entries: 0, expandedBytes: 0, nodes: 0, totalPathBytes: 0 };
   let firstFailure: Error | undefined;
@@ -122,7 +122,7 @@ export async function extractZipArchive(
     if (!normalizedName || normalizedName.endsWith("/")) return;
     const write = writeUnzipFile(
       file,
-      safeJoin(outputDir, normalizedName, unsafeMessage),
+      safeJoin(extractionRoot, normalizedName, unsafeMessage),
       (bytes, fileBytes) => {
         budget.expandedBytes += bytes;
         if (
@@ -176,16 +176,17 @@ function archiveLimitError(message: string): Error {
   return Object.assign(new Error(message), { status: 400, code: "ARCHIVE_RESOURCE_LIMIT" });
 }
 
-async function assertOrdinaryExtractionRoot(root: string): Promise<void> {
+async function assertOrdinaryExtractionRoot(root: string): Promise<string> {
   const absolute = path.resolve(root);
   await fs.mkdir(absolute, { recursive: true });
   const stats = await fs.lstat(absolute);
   if (!stats.isDirectory() || stats.isSymbolicLink()) {
     throw Object.assign(new Error("Archive extraction root must be an ordinary directory."), { status: 400 });
   }
-  if (await fs.realpath(absolute) !== absolute) {
-    throw Object.assign(new Error("Archive extraction root must not traverse a linked directory."), { status: 400 });
-  }
+  // The runner may expose its workspace through a junction, mount point, or subst drive. The root itself
+  // is still rejected when it is a link; returning its canonical path lets extraction write through the
+  // system mapping without preserving an alias in later path checks.
+  return fs.realpath(absolute);
 }
 
 function registerArchivePath(

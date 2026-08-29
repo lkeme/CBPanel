@@ -142,14 +142,12 @@ async function applyVerifiedManifestKey(directory: string, key: string): Promise
 type TreeSnapshot = Map<string, { kind: "file" | "directory"; digest?: string; size?: number }>;
 
 async function snapshotExtensionTree(root: string, normalizeManifest: boolean): Promise<TreeSnapshot> {
-  const resolvedRoot = path.resolve(root);
-  const rootStats = await fs.lstat(resolvedRoot).catch(() => undefined);
+  const lexicalRoot = path.resolve(root);
+  const rootStats = await fs.lstat(lexicalRoot).catch(() => undefined);
   if (!rootStats?.isDirectory() || rootStats.isSymbolicLink()) {
     throw transferInvalid("Transferred extension tree root is not an ordinary directory.");
   }
-  if (await fs.realpath(resolvedRoot) !== resolvedRoot) {
-    throw transferInvalid("Transferred extension tree root traverses a linked directory.");
-  }
+  const resolvedRoot = await fs.realpath(lexicalRoot);
   const snapshot: TreeSnapshot = new Map();
   const canonicalRoot = await fs.realpath(resolvedRoot);
   let nodes = 0;

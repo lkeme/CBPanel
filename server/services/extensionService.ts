@@ -2729,15 +2729,15 @@ async function assertPreparedAcquisitionPaths(
   ) {
     throw acquisitionError("ACQUISITION_COMMIT_FAILED", "Acquisition files are missing or linked outside the managed session root.");
   }
-  const [canonicalSession, canonicalArtifact, canonicalStaged] = await Promise.all([
+  const [canonicalAcquisitionRoot, canonicalSession, canonicalArtifact, canonicalStaged] = await Promise.all([
+    fs.realpath(path.resolve(acquisitionRoot)),
     fs.realpath(sessionRoot),
     fs.realpath(artifactPath),
     fs.realpath(stagedRoot),
   ]);
   if (
-    canonicalSession !== sessionRoot
-    || canonicalArtifact !== artifactPath
-    || canonicalStaged !== stagedRoot
+    !isPathInsideDir(canonicalSession, canonicalAcquisitionRoot)
+    || path.basename(canonicalSession) !== acquisition.sessionId
     || !isPathInsideDir(canonicalArtifact, canonicalSession)
     || !isPathInsideDir(canonicalStaged, canonicalSession)
   ) {

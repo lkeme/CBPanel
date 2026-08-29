@@ -132,7 +132,7 @@ type AcquisitionSession = {
  * startup removes every prior derived directory before accepting a new request.
  */
 export class ExtensionAcquisitionSessionService {
-  private readonly acquisitionRoot: string;
+  private acquisitionRoot: string;
 
   private readonly now: () => number;
 
@@ -183,10 +183,10 @@ export class ExtensionAcquisitionSessionService {
     if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
       throw new Error("Extension acquisition root must be an ordinary directory.");
     }
-    const canonicalRoot = await fs.realpath(this.acquisitionRoot);
-    if (canonicalRoot !== this.acquisitionRoot) {
-      throw new Error("Extension acquisition root must not traverse a linked directory.");
-    }
+    // The runner may expose its workspace through a junction, mount point, or subst drive. The root itself
+    // is rejected when it is a link above; canonicalize it here so every child operation is anchored to the
+    // actual directory without preserving a legitimate system-level path alias.
+    this.acquisitionRoot = await fs.realpath(this.acquisitionRoot);
     for (const entry of await fs.readdir(this.acquisitionRoot, { withFileTypes: true })) {
       const candidate = path.join(this.acquisitionRoot, entry.name);
       const stats = await fs.lstat(candidate);
