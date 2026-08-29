@@ -8,7 +8,7 @@ CBPanel is a local Web + Desktop management shell for [CloakBrowser](https://git
 
 ## Compatibility Note
 
-Only the Windows portable build has been tested. Other artifacts are provided as-is and are not guaranteed to work.
+The development and CI toolchain requires Node.js 26 or newer (with npm 11 or newer) and Rust 1.88.0 or newer for the Tauri desktop shell. Only the Windows portable build has been tested. Other artifacts are provided as-is and are not guaranteed to work.
 
 ## Quick Start
 
@@ -16,6 +16,8 @@ Only the Windows portable build has been tested. Other artifacts are provided as
 npm install
 npm run dev
 ```
+
+For a clean, lockfile-respecting install, use `npm ci`.
 
 The development server runs at:
 

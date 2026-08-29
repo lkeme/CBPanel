@@ -8,7 +8,7 @@ CBPanel 是 [CloakBrowser](https://github.com/CloakHQ/CloakBrowser/) 的本地 W
 
 ## 兼容性说明
 
-目前只测试过 Windows 便携版；其他产物按当前状态提供，不保证可用。
+开发和 CI 工具链要求 Node.js 26 或更高版本（npm 11 或更高版本），Tauri 桌面壳要求 Rust 1.88.0 或更高版本。目前只测试过 Windows 便携版；其他产物按当前状态提供，不保证可用。
 
 ## 快速开始
 
@@ -16,6 +16,8 @@ CBPanel 是 [CloakBrowser](https://github.com/CloakHQ/CloakBrowser/) 的本地 W
 npm install
 npm run dev
 ```
+
+如需严格按锁文件安装依赖，请使用 `npm ci`。
 
 开发服务默认运行在：
 

@@ -57,7 +57,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: 25
+          node-version: 26
           cache: npm
 
       - name: Setup Rust
@@ -89,7 +89,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: 25
+          node-version: 26
           cache: npm
 
       - name: Setup Rust
@@ -115,7 +115,7 @@ jobs:
   linux:
     if: github.event_name == 'workflow_dispatch' && inputs.include_linux
     name: Linux dev AppImage
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -123,7 +123,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: 25
+          node-version: 26
           cache: npm
 
       - name: Setup Rust
@@ -172,7 +172,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: 25
+          node-version: 26
           cache: npm
 
       - name: Setup Rust
