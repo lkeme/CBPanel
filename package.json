@@ -36,7 +36,7 @@
     "release:mac": "node scripts/release-mac.mjs",
     "release:smoke": "node scripts/smoke-release.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/**/*.test.ts server/**/*.test.ts",
+    "test": "tsx --test --test-concurrency=1 src/**/*.test.ts server/**/*.test.ts",
     "preview": "cross-env NODE_ENV=production tsx server/index.ts"
   },
   "dependencies": {
