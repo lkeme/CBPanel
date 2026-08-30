@@ -73,6 +73,7 @@ import {
 } from "./shared/settings";
 import { api, errorMessage, initializeDesktopBridge, type RuntimeError } from "./lib/apiClient";
 import { omitKeys, withoutIds } from "./lib/collectionState";
+import { workbenchViewFromHash, workbenchViewHash } from "./lib/workbenchNavigation";
 import { useBrowserCoreActions } from "./hooks/useBrowserCoreActions";
 import { useDiagnosticsActions } from "./hooks/useDiagnosticsActions";
 import { useExtensionActions } from "./hooks/useExtensionActions";
@@ -307,7 +308,7 @@ function App() {
   const [proxyEntityFilter, setProxyEntityFilter] = useState("");
   const [profilePage, setProfilePage] = useState(1);
   const [filterPanelOpen, setFilterPanelOpen] = useState(false);
-  const [workbenchView, setWorkbenchView] = useState<WorkbenchView>("profiles");
+  const [workbenchView, setWorkbenchViewState] = useState<WorkbenchView>(() => workbenchViewFromHash(window.location.hash));
   const [busy, setBusy] = useState("");
   const [pendingLaunchIds, setPendingLaunchIds] = useState<Set<string>>(() => new Set());
   const [pendingStopIds, setPendingStopIds] = useState<Set<string>>(() => new Set());
@@ -371,6 +372,12 @@ function App() {
   const settingsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const settingsSaveSeqRef = useRef(0);
   const startupBrowserCoreCheckDone = useRef(false);
+  const workbenchNavigationSourceRef = useRef<"initial" | "hash" | "state">("initial");
+
+  const setWorkbenchView: Dispatch<SetStateAction<WorkbenchView>> = (next) => {
+    workbenchNavigationSourceRef.current = "state";
+    setWorkbenchViewState(next);
+  };
 
   const settings = state?.settings ?? DEFAULT_APP_SETTINGS;
   const locale = useReadyLocale(localeFromMode(settings.appearance.language, navigator.language));
@@ -379,6 +386,34 @@ function App() {
   useEffect(() => {
     void bootstrap();
   }, []);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      workbenchNavigationSourceRef.current = "hash";
+      const nextView = workbenchViewFromHash(window.location.hash);
+      const nextHash = workbenchViewHash(nextView);
+      if (window.location.hash !== nextHash) window.history.replaceState(null, "", nextHash);
+      setWorkbenchViewState(nextView);
+    };
+    window.addEventListener("hashchange", onHashChange);
+    window.addEventListener("popstate", onHashChange);
+    return () => {
+      window.removeEventListener("hashchange", onHashChange);
+      window.removeEventListener("popstate", onHashChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    const nextHash = workbenchViewHash(workbenchView);
+    const source = workbenchNavigationSourceRef.current;
+    workbenchNavigationSourceRef.current = "state";
+    if (window.location.hash === nextHash) return;
+    if (source === "initial" || source === "hash") {
+      window.history.replaceState(null, "", nextHash);
+      return;
+    }
+    window.history.pushState(null, "", nextHash);
+  }, [workbenchView]);
 
   useEffect(() => () => {
     for (const request of launchRequestsRef.current.values()) request.controller.abort();
@@ -1269,6 +1304,18 @@ function App() {
     if (openEditor) setDrawerMode("edit");
   }
 
+  function toggleInspector() {
+    if (inspectorOpen) {
+      setDrawerMode(null);
+      return;
+    }
+    if (!selectedId) {
+      const firstVisibleProfile = pagedProfiles[0];
+      if (firstVisibleProfile) setSelectedId(firstVisibleProfile.id);
+    }
+    setDrawerMode("details");
+  }
+
   function openSettings(tab: SettingsTab = "general") {
     setSettingsInitialTab(tab);
     setDrawerMode("settings");
@@ -1464,7 +1511,7 @@ function App() {
                 setQuery={setQuery}
                 setStatusFilter={setStatusFilter}
                 showBrowserCoreMissing={showBrowserCoreMissing}
-                toggleInspector={() => (inspectorOpen ? setDrawerMode(null) : setDrawerMode("details"))}
+                toggleInspector={toggleInspector}
                 toggleTagFilter={toggleTagFilter}
                 t={t}
               />

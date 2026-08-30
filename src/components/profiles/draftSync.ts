@@ -42,6 +42,10 @@ export function planDraftSync({
   // An unsaved new profile has no stored counterpart at all, so nothing here applies to it.
   if (draftIsNew) return { action: "skip" };
   if (!profiles?.length) return { action: "clear" };
+  // An empty id is the initial state, not a deleted selection. Keep the table unselected until the user
+  // picks an environment; an existing id that disappeared still falls back below so deletion recovery
+  // keeps the editor pointed at a real record.
+  if (!selectedId && !draft) return { action: "skip" };
   // A selection pointing at a record that is gone (deleted environment) falls back to the first one,
   // which is what the table shows in that situation.
   const selected = profiles.find((profile) => profile.id === selectedId) ?? profiles[0];

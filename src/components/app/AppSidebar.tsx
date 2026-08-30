@@ -145,7 +145,7 @@ export function AppSidebar({
           }
           label={sidebarCollapsed ? t("actions.expandSidebar") : t("actions.collapseSidebar")}
           onClick={toggleSidebarMode}
-          pressed={!sidebarCollapsed}
+          pressed={sidebarCollapsed}
         />
         <SidebarUtilityButton
           icon={normalizedSettings.appearance.theme === "dark" ? <Moon size={19} aria-hidden="true" /> : <Sun size={19} aria-hidden="true" />}

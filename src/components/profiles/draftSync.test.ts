@@ -89,6 +89,14 @@ test("the editor opening with no draft yet takes the selected record", () => {
   });
 });
 
+test("an initial empty selection stays empty until the user picks a row", () => {
+  const stored = profileFixture();
+
+  assert.deepEqual(planDraftSync({ draft: null, draftIsNew: false, profiles: [stored], selectedId: "" }), {
+    action: "skip",
+  });
+});
+
 test("a selection pointing at a deleted environment falls back to the first record", () => {
   const survivor = profileFixture({ id: "profile-b", name: "环境 B" });
   const draft = profileFixture({ id: "profile-gone", name: "已删除" });
