@@ -373,6 +373,7 @@ function App() {
   const settingsSaveSeqRef = useRef(0);
   const startupBrowserCoreCheckDone = useRef(false);
   const workbenchNavigationSourceRef = useRef<"initial" | "hash" | "state">("initial");
+  const previousWorkbenchViewRef = useRef(workbenchView);
 
   const setWorkbenchView: Dispatch<SetStateAction<WorkbenchView>> = (next) => {
     workbenchNavigationSourceRef.current = "state";
@@ -393,6 +394,7 @@ function App() {
       const nextView = workbenchViewFromHash(window.location.hash);
       const nextHash = workbenchViewHash(nextView);
       if (window.location.hash !== nextHash) window.history.replaceState(null, "", nextHash);
+      setDrawerMode(null);
       setWorkbenchViewState(nextView);
     };
     window.addEventListener("hashchange", onHashChange);
@@ -414,6 +416,12 @@ function App() {
     }
     window.history.pushState(null, "", nextHash);
   }, [workbenchView]);
+
+  useEffect(() => {
+    if (previousWorkbenchViewRef.current === workbenchView) return;
+    previousWorkbenchViewRef.current = workbenchView;
+    setDrawerMode(null);
+  }, [setDrawerMode, workbenchView]);
 
   useEffect(() => () => {
     for (const request of launchRequestsRef.current.values()) request.controller.abort();
@@ -629,6 +637,13 @@ function App() {
   useEffect(() => {
     setProfilePage(1);
   }, [groupFilter, modeFilter, proxyEntityFilter, proxyFilter, query, statusFilter, tagFilters.join("\u0000")]);
+
+  useEffect(() => {
+    // The inspector can be opened before the initial state request settles. Once rows arrive, honor that
+    // explicit request by selecting the first currently visible row instead of leaving an empty drawer.
+    if (workbenchView !== "profiles" || drawerMode !== "details" || selectedId || pagedProfiles.length === 0) return;
+    setSelectedId(pagedProfiles[0].id);
+  }, [drawerMode, pagedProfiles, selectedId, workbenchView]);
 
   useEffect(() => {
     if (profilePage > totalPages) setProfilePage(totalPages);
@@ -875,7 +890,9 @@ function App() {
     setDrawerMode(null);
     if (!draftIsNew) return;
     setDraftIsNew(false);
-    const selected = state?.profiles.find((profile) => profile.id === selectedId) ?? state?.profiles[0] ?? null;
+    const selected = state?.profiles.find((profile) => profile.id === selectedId)
+      ?? (selectedId ? state?.profiles[0] : undefined)
+      ?? null;
     setDraft(selected ? structuredClone(selected) : null);
   }
 

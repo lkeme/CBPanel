@@ -42,6 +42,12 @@ test("an idle stopped profile exposes Launch", () => {
   assert.equal(html.includes(t("actions.stop")), false);
 });
 
+test("an empty row selection does not highlight the first profile", () => {
+  const html = renderTable({});
+
+  assert.equal(html.includes("profile-table-row active"), false);
+});
+
 function renderTable(options: {
   pendingLaunch?: boolean;
   pendingStop?: boolean;
