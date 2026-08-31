@@ -47,7 +47,7 @@ const controlledBrowserCoreEnvDefaults: Record<ControlledBrowserCoreEnvKey, {
 }> = {
   CLOAKBROWSER_BINARY_PATH: { value: "", valueKind: "path" },
   CLOAKBROWSER_DOWNLOAD_URL: { value: "", valueKind: "url" },
-  CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS: { value: "12", valueKind: "number" },
+  CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS: { value: "20", valueKind: "number" },
   CLOAKBROWSER_VERSION: { value: "", valueKind: "text" },
   CLOAKBROWSER_LICENSE_KEY: { value: "", valueKind: "secret" },
   CLOAKBROWSER_RELEASE_CHANNEL: { value: "preview", valueKind: "text" },

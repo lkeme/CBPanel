@@ -240,7 +240,6 @@ test("ProxyService resolves the timezone and locale a geoip launch would inject"
   assert.equal(result.geo?.timezone, "Asia/Tokyo");
   assert.equal(result.geo?.locale, "ja-JP");
   assert.equal(result.geo?.countryCode, "JP");
-  assert.equal(result.geoUnresolvedReason, undefined);
   assert.equal(requestedDbPath, "C:/cache/geoip/GeoLite2-City.mmdb");
   assert.equal(geoLookupCalls, 0);
   // The provider that produced the exit IP stays on the result, so the panel can still say where the
@@ -249,24 +248,26 @@ test("ProxyService resolves the timezone and locale a geoip launch would inject"
   assert.equal(result.trace?.loc, "JP");
 });
 
-// Upstream returns the exit IP with a missing database rather than failing, because the IP is a real
-// answer on its own — and behind a proxy it is the one that matters for WebRTC. `ok` therefore stays
-// true and the reason code explains the empty timezone/locale.
-test("ProxyService still reports the exit IP when the GeoIP database is absent", async () => {
+test("ProxyService fails launch GeoIP when the database cannot resolve required values", async () => {
   const service = new ProxyService({
     checkTrace: async () => "ip=198.51.100.7\n",
-    readLaunchGeo: async () => ({ reason: "geoip-db-missing" as const }),
+    readLaunchGeo: async () => {
+      throw Object.assign(new Error("GeoIP resolution failed: GeoIP database is unavailable"), {
+        code: "GEOIP_RESOLUTION_FAILED",
+        status: 502,
+      });
+    },
   });
 
-  const result = await service.resolveLaunchGeo({ enabled: true, raw: "http://proxy.example.test:8080" }, {
-    traceSettings: { ...DEFAULT_APP_SETTINGS.networkTrace, providerId: "cloudflare-www" },
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.ip, "198.51.100.7");
-  assert.equal(result.geo, undefined);
-  assert.equal(result.geoUnresolvedReason, "geoip-db-missing");
-  assert.equal(result.error, undefined);
+  await assert.rejects(
+    service.resolveLaunchGeo({ enabled: true, raw: "http://proxy.example.test:8080" }, {
+      traceSettings: { ...DEFAULT_APP_SETTINGS.networkTrace, providerId: "cloudflare-www" },
+    }),
+    (error) => {
+      assert.equal((error as { code?: string }).code, "GEOIP_RESOLUTION_FAILED");
+      return true;
+    },
+  );
 });
 
 test("ProxyService normalizes an exit probe failure on the launch-geoip path too", async () => {

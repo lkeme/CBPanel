@@ -1,5 +1,4 @@
 import type { NetworkCheckResult } from "./entities";
-import type { LaunchGeoUnresolvedReason } from "./launchGeoip";
 import { flagEmojiFromRegionCode, formatRegionLabel, normalizeRegionCode, type RegionDisplayLocale } from "./regionDisplay";
 
 type NetworkCheckSuccessPartOptions = {
@@ -110,20 +109,18 @@ export type LaunchGeoSummaryOptions = {
     timezone: string;
     locale: string;
   };
-  /** Renders `geoUnresolvedReason`. Returning an empty string drops the note. */
-  reasonText: (reason: LaunchGeoUnresolvedReason) => string;
   separator?: string;
 };
 
 // Its own summary rather than a flag on networkCheckSummaryText: that one answers "is this proxy usable"
 // with a region and a latency, while this one answers "what will the browser inject" — three labelled
-// values, and a reason when two of them are missing. Folding both into one formatter would mean the caller
+// values. Folding both into one formatter would mean the caller
 // deciding which of two unrelated shapes it gets.
 export function launchGeoSummaryText(
   check: NetworkCheckResult | undefined,
   options: LaunchGeoSummaryOptions,
 ): string {
-  const { emptyText = "", failedText = "", labels, reasonText, separator = " · " } = options;
+  const { emptyText = "", failedText = "", labels, separator = " · " } = options;
 
   if (!check) return emptyText;
   if (!check.ok) return check.error?.trim() || failedText || emptyText;
@@ -136,11 +133,5 @@ export function launchGeoSummaryText(
   const localeValue = check.geo?.locale?.trim();
   if (localeValue) parts.push(`${labels.locale}: ${localeValue}`);
 
-  // The reason is why the timezone/locale are absent, so it belongs beside the exit IP that did resolve —
-  // not in place of it, which is the whole point of the resolution still reporting `ok`.
-  const reason = check.geoUnresolvedReason ? reasonText(check.geoUnresolvedReason).trim() : "";
-  if (reason) parts.push(reason);
-
   return parts.length ? parts.join(separator) : emptyText;
 }
-

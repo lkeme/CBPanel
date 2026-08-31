@@ -448,9 +448,7 @@ export function useProfileLifecycleActions({
       });
       const summary = launchGeoSummary(result, t);
       setProxyCheck(summary);
-      // A resolution that reached the exit but got no timezone/locale is not a failure — the reason is
-      // already in the summary, so the toast follows the reason rather than the ok flag alone.
-      toast(result.geoUnresolvedReason ? "info" : "success", summary);
+      toast("success", summary);
     } catch (error) {
       const message = profileErrorMessage(error, t);
       setProxyCheck(message);

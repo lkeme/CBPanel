@@ -764,12 +764,12 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     releaseChannel: "stable",
     internalAutoUpdate: false,
     checksumPolicy: "strict",
-    geoipTimeoutSeconds: 12,
+    geoipTimeoutSeconds: 20,
     customEnvVars: [
       {
         id: "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS",
         key: "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS",
-        value: "12",
+        value: "20",
         enabled: true,
         sensitive: false,
         description: "",
@@ -1245,7 +1245,7 @@ function normalizeBrowserCoreEnvVars(
 }
 
 function defaultGeoipTimeoutEnvVar(legacyGeoipTimeoutSeconds: unknown): BrowserCoreEnvVarSetting {
-  const timeoutSeconds = normalizeNullableNumber(legacyGeoipTimeoutSeconds, 1, 60, 12) ?? 12;
+  const timeoutSeconds = normalizeNullableNumber(legacyGeoipTimeoutSeconds, 1, 60, 20) ?? 20;
   return {
     id: "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS",
     key: "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS",

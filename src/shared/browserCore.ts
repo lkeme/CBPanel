@@ -1,4 +1,3 @@
-import type { LaunchGeoUnresolvedReason } from "./launchGeoip";
 import type { BrowserCoreEnvValueKind, BuiltinCloakBrowserEnvKey } from "./settings";
 
 export type BrowserCoreInstallStatus =
@@ -176,7 +175,7 @@ export interface CloakBrowserDiagnosticsLicense {
   };
 }
 
-// Mirrors upstream `diag.geoip.resolved` from `cloakbrowser info --proxy <url>` (0.5.5): the exit IP
+// Mirrors upstream `diag.geoip.resolved` from `cloakbrowser info --proxy <url>` (0.5.10): the exit IP
 // a launch would egress from, plus the timezone and locale `geoip: true` would derive from it. Upstream
 // reports `exit_ip`; the field is camelCased here like every other diagnostics key. `error` is set when
 // the resolution itself failed, exactly as upstream's `{ error }` branch does.
@@ -185,15 +184,6 @@ export interface CloakBrowserDiagnosticsGeoIpResolved {
   timezone?: string;
   locale?: string;
   error?: string;
-  // Beyond upstream's shape, and on purpose. Upstream downloads the GeoIP database during the
-  // resolution, so an empty timezone/locale there is rare; CBPanel deliberately does not, which makes
-  // "the database is not on disk yet" the common outcome. Without this the operator would see an exit
-  // IP and two blanks with nothing saying why. Never set alongside `error` — that branch means the exit
-  // IP itself did not resolve.
-  //
-  // Same value as `NetworkCheckResult.geoUnresolvedReason`, which carries it on the proxy-scoped
-  // result; the name drops the `geo` prefix here because the enclosing key already supplies it.
-  unresolvedReason?: LaunchGeoUnresolvedReason;
 }
 
 export interface CloakBrowserDiagnosticsGeoIp {

@@ -6,7 +6,6 @@ import type { ProxyEntity, SystemDiagnostics } from "../../shared/entities";
 import type { BinaryInfo, CloakBrowserEnvInfo } from "../../shared/browserCore";
 import type { PanelState } from "../../shared/profile";
 import type { DesktopRuntimeInfo, StorageInfo } from "../../shared/settings";
-import { LAUNCH_GEO_REASON_KEYS } from "../../lib/launchGeoDisplay";
 import { KeyValueList } from "../ui/KeyValueList";
 import { SelectMenu } from "../ui/SelectMenu";
 
@@ -261,11 +260,6 @@ export function SystemStatusContent({
                 { label: t("system.locale"), value: resolvedGeoip.locale ?? "-" },
               ]}
             />
-          )}
-          {/* Why the two dashes above are dashes. CBPanel does not download the GeoIP database on the
-              operator's behalf, so "not downloaded yet" is the common outcome and has to say so. */}
-          {resolvedGeoip?.unresolvedReason && (
-            <div className="result-line">{t(LAUNCH_GEO_REASON_KEYS[resolvedGeoip.unresolvedReason])}</div>
           )}
           {resolvedGeoip?.error && <div className="inline-error">{resolvedGeoip.error}</div>}
           {diagnostics?.browserCoreDiagnostics?.error && <div className="inline-error">{diagnostics.browserCoreDiagnostics.error}</div>}

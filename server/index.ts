@@ -96,7 +96,6 @@ const binaryService = new BinaryService({
       exitIp: result.ip,
       timezone: result.geo?.timezone,
       locale: result.geo?.locale,
-      unresolvedReason: result.geoUnresolvedReason,
     };
   },
 });

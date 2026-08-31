@@ -26,7 +26,6 @@ import {
   type BrowserCoreVersionMode,
   maskEnvValue,
 } from "../../src/shared/browserCore";
-import { launchGeoUnresolvedReasonFrom, type LaunchGeoUnresolvedReason } from "../../src/shared/launchGeoip";
 import {
   type AppSettings,
   type AppSettingsPatch,
@@ -70,8 +69,6 @@ export type LaunchGeoResolver = (proxyUrl: string) => Promise<{
   exitIp?: string;
   timezone?: string;
   locale?: string;
-  /** Why the timezone/locale are empty although the exit IP resolved. Carried through so the panel can explain the common "database not downloaded yet" case. */
-  unresolvedReason?: LaunchGeoUnresolvedReason;
   error?: string;
 }>;
 
@@ -1002,10 +999,10 @@ export class BinaryService {
   // reported Free beside a `-pro` executable, and a free key's imports were filed under the tier
   // launches never resolve.
   //
-  // A key the server *rejects* is free, and that is not the same as an unconfirmed one: the wrapper
-  // logs "License validation failed, using free tier" and takes the free path. An unconfirmed plan
-  // keeps the last derivation instead — offline must not silently downgrade a Pro install to free, and
-  // it must not claim a plan either, so the pin stands the way the wrapper's fallback path honours it.
+  // A key the server *rejects* is not entitled to the Pro feed, so diagnostics and update checks use
+  // the free tier just like upstream's resolveLicense()/cmdUpdate. Since 0.5.10 ensureBinary is stricter:
+  // install and launch abort instead of silently using that free build. An unconfirmed plan keeps the
+  // last derivation instead and ensureBinary likewise aborts when no cached validation is available.
   //
   // A validation record only speaks for the key it was produced from. Reading it without that check
   // means a key swap keeps deriving the previous key's plan — and persistDerivedTierMode would then
@@ -1044,8 +1041,9 @@ export class BinaryService {
 
   // Validation is cached by the wrapper for 24h on disk and by this record in memory, and it is
   // resolved through the same module the launches use so a single key/plan answer serves both.
-  // It resolves rather than throws: a license server CBPanel cannot reach must not fail a read, an
-  // install, or an update — the tier simply keeps its last known value.
+  // It resolves rather than throws because reads and update checks still report the validation state.
+  // Install and launch pass the configured key to ensureBinary, whose 0.5.10 contract performs the hard
+  // failure for an invalid or unvalidatable key.
   //
   // A background refresh never loads the module and never re-applies the managed env. It runs after
   // the read that scheduled it has already returned, so writing process.env there would land outside
@@ -1407,7 +1405,6 @@ export class BinaryService {
         exit_ip: resolved.exitIp ?? null,
         timezone: resolved.timezone ?? null,
         locale: resolved.locale ?? null,
-        unresolved_reason: resolved.unresolvedReason ?? null,
       };
     } catch (error) {
       return { error: diagnosticsErrorMessage(error) };
@@ -2056,7 +2053,6 @@ function diagnosticsGeoIpResolved(value: unknown): CloakBrowserDiagnosticsGeoIpR
     timezone: stringValue(resolved.timezone),
     locale: stringValue(resolved.locale),
     error: stringValue(resolved.error),
-    unresolvedReason: launchGeoUnresolvedReasonFrom(resolved.unresolved_reason),
   };
 }
 

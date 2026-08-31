@@ -2,17 +2,16 @@ import fs from "node:fs/promises";
 import { Reader } from "mmdb-lib";
 import type { CityResponse } from "mmdb-lib";
 
-import { localeForCountryCode, type LaunchGeoUnresolvedReason } from "../../src/shared/launchGeoip";
+import { localeForCountryCode } from "../../src/shared/launchGeoip";
 
 // What a `geoip: true` launch would derive for one exit IP. Mirrors the tail of upstream's
-// `resolveProxyGeo` (cloakbrowser 0.5.5 `js/src/geoip.ts`): read the GeoLite2 city record, take
-// `location.time_zone` as the timezone and map `country.iso_code` through COUNTRY_LOCALE_MAP.
+// `maybeResolveGeoip` (cloakbrowser 0.5.10 `js/src/geoip.ts`): read the GeoLite2 city record, take
+// `location.time_zone` as the timezone, map `country.iso_code` through COUNTRY_LOCALE_MAP, and fail
+// the launch if either required value cannot be resolved.
 export type LaunchGeoDbLookup = {
-  timezone?: string;
-  locale?: string;
+  timezone: string;
+  locale: string;
   countryCode?: string;
-  /** Why the timezone/locale are absent. Never set when the record was found — a record that simply carries no `time_zone` leaves the field empty without claiming a failure. */
-  reason?: LaunchGeoUnresolvedReason;
 };
 
 /** Resolves one IP against an already-loaded database. Split out so tests cover every branch without shipping a GeoLite2 fixture. */
@@ -24,46 +23,49 @@ export type LaunchGeoDbReader = (buffer: Buffer, ip: string) => CityResponse | n
 // by the first `geoip: true` launch, whose download already routes through the configured GitHub
 // mirror (see githubMirrorFetch).
 //
-// Never throws, matching upstream: a GeoIP hiccup must not take down the exit-IP answer, which is
-// useful on its own and is resolved before this is ever called.
+// CloakBrowser 0.5.10 deliberately made every failure fatal. A partial exit-IP answer is not a valid
+// preview of a launch any more: the launch aborts when the database, timezone, or locale is missing.
 export async function readLaunchGeoFromDb(
   dbPath: string | undefined,
   ip: string,
   read: LaunchGeoDbReader = readCityRecord,
 ): Promise<LaunchGeoDbLookup> {
-  if (!dbPath) return { reason: "geoip-db-missing" };
+  if (!dbPath) throw geoipResolutionError("GeoIP resolution failed: GeoIP database is unavailable");
 
   let buffer: Buffer;
   try {
     buffer = await fs.readFile(dbPath);
   } catch (error) {
-    // A database that is not there yet and one that is there but unreadable lead to different fixes —
-    // launch once with geoip on, versus clear the cache — so they stay distinguishable.
-    return { reason: isMissingFileError(error) ? "geoip-db-missing" : "geoip-db-unreadable" };
+    if (isMissingFileError(error)) {
+      throw geoipResolutionError("GeoIP resolution failed: GeoIP database is unavailable", error);
+    }
+    throw geoipLookupError(ip, error);
   }
 
   let record: CityResponse | null;
   try {
     record = read(buffer, ip);
-  } catch {
-    // A truncated or corrupt download parses as garbage rather than failing to open.
-    return { reason: "geoip-db-unreadable" };
+  } catch (error) {
+    throw geoipLookupError(ip, error);
   }
 
-  // The database resolved fine, this exit is just not in it. Retrying changes nothing, which is why
-  // this is not folded into "unreadable".
-  if (!record) return { reason: "ip-not-in-db" };
+  if (!record) throw geoipResolutionError(`GeoIP lookup failed for ${ip}: address is not in the database`);
 
   return launchGeoFromCityRecord(record);
 }
 
-// A record with neither field is not an error: upstream returns null timezone and locale and lets the
-// launch proceed without them, so the panel reports the same nothing rather than inventing a fallback.
 export function launchGeoFromCityRecord(record: CityResponse): LaunchGeoDbLookup {
   const countryCode = record.country?.iso_code ?? undefined;
+  const timezone = record.location?.time_zone ?? undefined;
+  const locale = localeForCountryCode(countryCode);
+  if (!timezone || !locale) {
+    const missing = [timezone ? undefined : "timezone", locale ? undefined : "locale"]
+      .filter((value): value is string => Boolean(value));
+    throw geoipResolutionError(`GeoIP resolution failed: could not determine ${missing.join(" and ")}`);
+  }
   return {
-    timezone: record.location?.time_zone ?? undefined,
-    locale: localeForCountryCode(countryCode),
+    timezone,
+    locale,
     countryCode,
   };
 }
@@ -74,4 +76,16 @@ function readCityRecord(buffer: Buffer, ip: string): CityResponse | null {
 
 function isMissingFileError(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as { code?: string }).code === "ENOENT";
+}
+
+function geoipLookupError(ip: string, error: unknown): Error {
+  const detail = error instanceof Error ? error.message : String(error);
+  return geoipResolutionError(`GeoIP lookup failed for ${ip}: ${detail}`, error);
+}
+
+function geoipResolutionError(message: string, cause?: unknown): Error {
+  return Object.assign(new Error(message, cause === undefined ? undefined : { cause }), {
+    status: 502,
+    code: "GEOIP_RESOLUTION_FAILED",
+  });
 }

@@ -2801,10 +2801,9 @@ function pushSessionEvent(session: RunningSession, level: SessionEvent["level"],
   session.events = [...(session.events ?? []), event].slice(-40);
 }
 
-// Upstream already maps a Pro binary's licence exit codes to a readable reason and throws
-// CloakBrowserLicenseError instead of the opaque "target/browser closed" the caller would otherwise see.
-// What it cannot do is tell the operator where to fix it, so the error gains a code the panel turns into
-// a pointer at the core settings. The import is cached — a launch cannot fail before the module loaded.
+// Upstream maps in-browser licence exit codes to CloakBrowserLicenseError. Since 0.5.10 it also aborts
+// before launch with a plain Error when a configured key is invalid or cannot be validated. Both are the
+// same operator action in CBPanel, so they gain one code that points at the core settings.
 async function licenseDenialError(error: unknown): Promise<unknown> {
   if (!(await isLicenseDenial(error))) return error;
   return Object.assign(error as Error, { status: 409, code: "BROWSER_CORE_LICENSE_DENIED" });
@@ -2812,6 +2811,12 @@ async function licenseDenialError(error: unknown): Promise<unknown> {
 
 async function isLicenseDenial(error: unknown): Promise<boolean> {
   if (!(error instanceof Error)) return false;
+  if (
+    error.message.startsWith("CloakBrowser Pro: license key is invalid or expired")
+    || error.message.startsWith("CloakBrowser Pro: license could not be validated")
+  ) {
+    return true;
+  }
   try {
     const { CloakBrowserLicenseError } = await import("cloakbrowser");
     return error instanceof CloakBrowserLicenseError;

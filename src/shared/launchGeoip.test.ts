@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { COUNTRY_LOCALE_MAP, LAUNCH_GEO_UNRESOLVED_REASONS, launchGeoUnresolvedReasonFrom, localeForCountryCode } from "./launchGeoip";
+import { COUNTRY_LOCALE_MAP, localeForCountryCode } from "./launchGeoip";
 
 // The table is a verbatim mirror of upstream's, and its whole value is being identical to what a
 // `geoip: true` launch injects. Locking the size makes an accidental half-merge on the next upstream
@@ -36,21 +36,4 @@ test("an uncovered or absent country code resolves to nothing", () => {
   assert.equal(localeForCountryCode(""), undefined);
   assert.equal(localeForCountryCode("   "), undefined);
   assert.equal(localeForCountryCode(undefined), undefined);
-});
-
-// The reason travels through the diagnostics payload as JSON, so it comes back as an unvalidated string.
-// Deriving the validator from the same list as the type is what stops a newly added reason from being
-// silently dropped on the way in.
-test("every declared reason survives a round trip through the payload validator", () => {
-  for (const reason of LAUNCH_GEO_UNRESOLVED_REASONS) {
-    assert.equal(launchGeoUnresolvedReasonFrom(reason), reason);
-  }
-});
-
-test("an unknown reason is rejected rather than passed through untranslatable", () => {
-  assert.equal(launchGeoUnresolvedReasonFrom("something-new"), undefined);
-  assert.equal(launchGeoUnresolvedReasonFrom(""), undefined);
-  assert.equal(launchGeoUnresolvedReasonFrom(null), undefined);
-  assert.equal(launchGeoUnresolvedReasonFrom(undefined), undefined);
-  assert.equal(launchGeoUnresolvedReasonFrom(42), undefined);
 });

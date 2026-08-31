@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { NetworkCheckResult } from "./entities";
-import type { LaunchGeoUnresolvedReason } from "./launchGeoip";
 import { buildNetworkCheckSuccessParts, launchGeoSummaryText, networkCheckSummaryText } from "./networkCheckDisplay";
 import { formatRegionLabel } from "./regionDisplay";
 
@@ -73,7 +72,6 @@ const LAUNCH_GEO_OPTIONS = {
   emptyText: "未解析",
   failedText: "解析失败",
   labels: { exitIp: "出口 IP", timezone: "时区", locale: "语言" },
-  reasonText: (reason: LaunchGeoUnresolvedReason) => `reason:${reason}`,
 };
 
 // Three labelled values, not a region and a latency: the operator is checking that a launch will inject a
@@ -90,23 +88,6 @@ test("launchGeoSummaryText labels the exit IP, timezone and locale", () => {
   assert.equal(
     launchGeoSummaryText(check, LAUNCH_GEO_OPTIONS),
     "出口 IP: 203.0.113.42 · 时区: Asia/Tokyo · 语言: ja-JP",
-  );
-});
-
-// The exit IP resolved and the database did not answer. Dropping the IP for the reason would throw away
-// the half that did work — and behind a proxy that half is what WebRTC uses.
-test("launchGeoSummaryText keeps the exit IP alongside the unresolved reason", () => {
-  const check = {
-    checkedAt: "2026-08-06T00:00:00.000Z",
-    ok: true,
-    ip: "198.51.100.7",
-    source: "launch-geoip",
-    geoUnresolvedReason: "geoip-db-missing",
-  } satisfies NetworkCheckResult;
-
-  assert.equal(
-    launchGeoSummaryText(check, LAUNCH_GEO_OPTIONS),
-    "出口 IP: 198.51.100.7 · reason:geoip-db-missing",
   );
 });
 

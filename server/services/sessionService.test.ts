@@ -3832,6 +3832,33 @@ test("a launch refused for a licence reason carries the licence code", async () 
   assert.equal(denied?.message, "许可证已过期");
 });
 
+test("pre-launch license validation aborts from CloakBrowser 0.5.10 carry the licence code", async () => {
+  const messages = [
+    "CloakBrowser Pro: license key is invalid or expired (plan=unknown). Check CLOAKBROWSER_LICENSE_KEY, or unset it to use the free binary.",
+    "CloakBrowser Pro: license could not be validated (server unreachable and no cached validation). Retry in a moment, or unset CLOAKBROWSER_LICENSE_KEY to use the free binary.",
+  ];
+
+  for (const [index, message] of messages.entries()) {
+    const service = new FailingRuntimeSessionService({
+      browserDataDir: "data/browser-data-test",
+      readBinaryInfo: async () => ({
+        installed: true,
+        binaryPath: "C:/fake/chrome.exe",
+        version: "test",
+      }),
+    }, new Error(message));
+    const profile = defaultProfile({ id: `license-validation-abort-${index}` });
+
+    const denied = await service.launchProfile(profile).then(
+      () => undefined,
+      (error: Error & { code?: string }) => error,
+    );
+
+    assert.equal(denied?.code, "BROWSER_CORE_LICENSE_DENIED");
+    assert.equal(denied?.message, message);
+  }
+});
+
 test("any other launch failure keeps its own error untouched", async () => {
   const service = new FailingRuntimeSessionService({
     browserDataDir: "data/browser-data-test",

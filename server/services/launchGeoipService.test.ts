@@ -18,32 +18,31 @@ function cityRecord(patch: Partial<CityResponse>): CityResponse {
   return patch as CityResponse;
 }
 
-// A missing database is the state a fresh install is in — nothing has run `geoip: true` yet. It has to
-// be distinguishable from a corrupt one because the fixes differ, and it must never be reported as a
-// hard failure: the caller still has a real exit IP to show.
-test("an unset database path reports geoip-db-missing", async () => {
-  assert.deepEqual(await readLaunchGeoFromDb(undefined, "1.1.1.1"), { reason: "geoip-db-missing" });
+test("an unset database path fails the launch GeoIP resolution", async () => {
+  await assert.rejects(
+    readLaunchGeoFromDb(undefined, "1.1.1.1"),
+    (error) => {
+      assert.equal((error as { code?: string }).code, "GEOIP_RESOLUTION_FAILED");
+      assert.match((error as Error).message, /database is unavailable/);
+      return true;
+    },
+  );
 });
 
-test("a database path that does not exist reports geoip-db-missing", async () => {
+test("a database path that does not exist fails the launch GeoIP resolution", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cbp-launch-geoip-"));
-  const result = await readLaunchGeoFromDb(path.join(dir, "absent.mmdb"), "1.1.1.1");
-  assert.deepEqual(result, { reason: "geoip-db-missing" });
+  await assert.rejects(readLaunchGeoFromDb(path.join(dir, "absent.mmdb"), "1.1.1.1"), /database is unavailable/);
 });
 
 // A truncated download opens fine and fails while parsing, so the guard cannot be a file-exists check.
-test("a database the reader cannot parse reports geoip-db-unreadable", async () => {
+test("a database the reader cannot parse fails the launch GeoIP resolution", async () => {
   const dbPath = await tempDbPath("not an mmdb");
-  const result = await readLaunchGeoFromDb(dbPath, "1.1.1.1");
-  assert.deepEqual(result, { reason: "geoip-db-unreadable" });
+  await assert.rejects(readLaunchGeoFromDb(dbPath, "1.1.1.1"), /GeoIP lookup failed for 1\.1\.1\.1/);
 });
 
-// Distinct from "unreadable" on purpose: the database is fine, this exit is simply not in it, and
-// retrying will not change that.
-test("an IP the database does not cover reports ip-not-in-db", async () => {
+test("an IP the database does not cover fails the launch GeoIP resolution", async () => {
   const dbPath = await tempDbPath("stub");
-  const result = await readLaunchGeoFromDb(dbPath, "10.0.0.1", () => null);
-  assert.deepEqual(result, { reason: "ip-not-in-db" });
+  await assert.rejects(readLaunchGeoFromDb(dbPath, "10.0.0.1", () => null), /address is not in the database/);
 });
 
 test("a resolved record yields the timezone and the locale upstream would inject", async () => {
@@ -54,35 +53,26 @@ test("a resolved record yields the timezone and the locale upstream would inject
   assert.deepEqual(result, { timezone: "Asia/Tokyo", locale: "ja-JP", countryCode: "JP" });
 });
 
-// Upstream returns nulls and lets the launch continue; the panel reports the same nothing rather than
-// claiming a failure the browser will not experience.
-test("a record missing timezone and country is not treated as a failure", () => {
-  assert.deepEqual(launchGeoFromCityRecord(cityRecord({})), {
-    timezone: undefined,
-    locale: undefined,
-    countryCode: undefined,
-  });
+test("a record missing timezone and country fails the launch GeoIP resolution", () => {
+  assert.throws(() => launchGeoFromCityRecord(cityRecord({})), /could not determine timezone and locale/);
 });
 
-// The two fields come from different parts of the record, so one being absent must not blank the other.
-test("timezone and locale resolve independently of each other", () => {
-  assert.deepEqual(
-    launchGeoFromCityRecord(cityRecord({ location: { time_zone: "Europe/Berlin" } } as Partial<CityResponse>)),
-    { timezone: "Europe/Berlin", locale: undefined, countryCode: undefined },
+test("a record missing either timezone or locale fails the launch GeoIP resolution", () => {
+  assert.throws(
+    () => launchGeoFromCityRecord(cityRecord({ location: { time_zone: "Europe/Berlin" } } as Partial<CityResponse>)),
+    /could not determine locale/,
   );
-  assert.deepEqual(
-    launchGeoFromCityRecord(cityRecord({ country: { iso_code: "DE" } } as Partial<CityResponse>)),
-    { timezone: undefined, locale: "de-DE", countryCode: "DE" },
+  assert.throws(
+    () => launchGeoFromCityRecord(cityRecord({ country: { iso_code: "DE" } } as Partial<CityResponse>)),
+    /could not determine timezone/,
   );
 });
 
-// An exit in a country outside upstream's table keeps its timezone — the locale is what is uncovered,
-// and dropping the timezone with it would lose a value the launch does apply.
-test("a country outside the table keeps the timezone and leaves the locale unset", () => {
-  assert.deepEqual(
-    launchGeoFromCityRecord(
+test("a country outside the locale table fails the launch GeoIP resolution", () => {
+  assert.throws(
+    () => launchGeoFromCityRecord(
       cityRecord({ country: { iso_code: "ZZ" }, location: { time_zone: "Etc/UTC" } } as Partial<CityResponse>),
     ),
-    { timezone: "Etc/UTC", locale: undefined, countryCode: "ZZ" },
+    /could not determine locale/,
   );
 });

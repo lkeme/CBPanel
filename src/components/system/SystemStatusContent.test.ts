@@ -13,10 +13,8 @@ import { SystemStatusContent } from "./SystemStatusContent";
 /**
  * The launch-GeoIP block of the system diagnostics — CBPanel's `cloakbrowser info --proxy` surface.
  *
- * What is worth pinning here is the three-way distinction the payload encodes and the panel has to keep:
- * no proxy was given, a proxy was given and answered, a proxy was given and the database could not
- * answer. Collapsing any two of them shows the operator a resolution that did not happen or hides one
- * that did.
+ * What is worth pinning here is the distinction between no requested resolution, a complete result,
+ * and an error. CloakBrowser 0.5.10 no longer returns a partial launch result.
  */
 
 // A proxy was never asked about, so nothing may claim otherwise — this is the state of every routine
@@ -36,23 +34,6 @@ test("a resolved payload shows the exit IP, timezone and locale a launch would i
   assert.ok(html.includes("203.0.113.42"));
   assert.ok(html.includes("Asia/Tokyo"));
   assert.ok(html.includes("ja-JP"));
-});
-
-// The common outcome, because CBPanel does not download the database on the operator's behalf. Without
-// the note this reads as an exit IP beside two unexplained blanks.
-test("an unresolved reason is rendered beside the exit IP that did resolve", () => {
-  const html = renderPanel({ exitIp: "198.51.100.7", unresolvedReason: "geoip-db-missing" });
-
-  assert.ok(html.includes("198.51.100.7"));
-  assert.ok(html.includes(t("launchGeoip.reason.geoipDbMissing")));
-});
-
-test("each unresolved reason renders its own explanation", () => {
-  const unreadable = renderPanel({ exitIp: "198.51.100.7", unresolvedReason: "geoip-db-unreadable" });
-  const notInDb = renderPanel({ exitIp: "198.51.100.7", unresolvedReason: "ip-not-in-db" });
-
-  assert.ok(unreadable.includes(t("launchGeoip.reason.geoipDbUnreadable")));
-  assert.ok(notInDb.includes(t("launchGeoip.reason.ipNotInDb")));
 });
 
 // Upstream keeps the key with null fields and prints `(unknown)` for each; the panel's equivalent is a

@@ -99,8 +99,6 @@ export class ProxyService {
 
     return {
       checkedAt: new Date().toISOString(),
-      // True even when the database supplied nothing: the exit IP is a real answer, and upstream's
-      // resolver returns it with a missing database too. `geoUnresolvedReason` carries the rest.
       ok: true,
       ip: exit.ip,
       // Mirrors check(): the whole round trip. The database read is local, so in practice this is the
@@ -116,7 +114,6 @@ export class ProxyService {
       }),
       trace: traceResultFrom(exit.provider, exit.values),
       source: "launch-geoip",
-      geoUnresolvedReason: lookup.reason,
     };
   }
 

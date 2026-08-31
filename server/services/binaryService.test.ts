@@ -344,7 +344,7 @@ test("BinaryService passes Pro license and pinned version to CloakBrowser instal
   }
 });
 
-test("BinaryService keeps a version pin while a license key's plan is unconfirmed", async () => {
+test("BinaryService passes the version pin to the wrapper while a license key's plan is unconfirmed", async () => {
   const originalEnv = captureEnv();
   const directory = await makeTempDir();
   const calls: Array<{ licenseKey?: string; browserVersion?: string }> = [];
@@ -359,9 +359,9 @@ test("BinaryService keeps a version pin while a license key's plan is unconfirme
       pinnedBrowserVersion: "149.0.0.0",
     }),
     loadCloakBrowser: async () => ({
-      // validateLicense answers null — the wrapper's "could not validate". ensureBinary then falls
-      // through to its free path, which honours requestedVersion, so dropping the pin here was a guess
-      // about a key nobody had confirmed. Only a confirmed free *plan* drops it.
+      // validateLicense answers null — the wrapper's "could not validate". Since 0.5.10 ensureBinary
+      // rejects this launch, but CBPanel still must not guess that the key is a confirmed free plan and
+      // drop the requested version before handing control to the wrapper.
       ...fakeCloakBrowserModule({ tier: "free" }),
       ensureBinary: async (licenseKey?: string, browserVersion?: string) => {
         calls.push({ licenseKey, browserVersion });
@@ -512,7 +512,7 @@ test("BinaryService derives the Pro cache tier from a valid free plan and still 
   }
 });
 
-test("BinaryService derives the free tier from a license key the server rejects", async () => {
+test("BinaryService reports the free diagnostic tier but aborts install for a rejected key", async () => {
   const originalEnv = captureEnv();
   const directory = await makeTempDir();
   let stored = settings({
@@ -528,19 +528,26 @@ test("BinaryService derives the free tier from a license key the server rejects"
       stored = normalizeSettings({ ...stored, ...patch });
       return stored;
     },
-    // The live server answers a bogus key with valid:false and a plan name of its own choosing
-    // ("unknown"), and the wrapper then logs "using free tier" and takes the free path. Deriving Pro
-    // from that plan name would file every build under a tier launches never resolve.
-    loadCloakBrowser: async () => fakeCloakBrowserModule({ license: { valid: false, plan: "unknown", expires: null } }),
+    // Upstream diagnostics/update checks still treat an invalid key as not entitled to Pro, but
+    // ensureBinary 0.5.10 aborts instead of silently downloading the free build.
+    loadCloakBrowser: async () => ({
+      ...fakeCloakBrowserModule({ license: { valid: false, plan: "unknown", expires: null } }),
+      ensureBinary: async () => {
+        throw new Error(
+          "CloakBrowser Pro: license key is invalid or expired (plan=unknown). Check CLOAKBROWSER_LICENSE_KEY, or unset it to use the free binary.",
+        );
+      },
+    } as CloakBrowserModule),
   });
 
   try {
-    const result = await service.install();
+    await assert.rejects(service.install(), /license key is invalid or expired/);
+    const result = await service.readPublicInfo();
 
-    assert.equal(result.info.core.targetTier, "free");
-    assert.equal(result.info.core.planIsFree, false);
-    assert.equal(result.info.core.license.valid, false);
-    assert.equal(result.info.core.license.plan, "unknown");
+    assert.equal(result.core.targetTier, "free");
+    assert.equal(result.core.planIsFree, false);
+    assert.equal(result.core.license.valid, false);
+    assert.equal(result.core.license.plan, "unknown");
     assert.equal(stored.binary.tierMode, "free");
   } finally {
     restoreEnv(originalEnv);
@@ -879,62 +886,8 @@ test("BinaryService resolves launch GeoIP only when a proxy is supplied", async 
     assert.equal(withProxy.geoip?.resolved?.exitIp, "198.51.100.7");
     assert.equal(withProxy.geoip?.resolved?.timezone, "Europe/Berlin");
     assert.equal(withProxy.geoip?.resolved?.locale, "de-DE");
-    assert.equal(withProxy.geoip?.resolved?.unresolvedReason, undefined);
     // The database row is independent of the resolution and keeps reporting the cache as it stands.
     assert.match(withProxy.geoip?.path ?? "", /GeoLite2-City\.mmdb$/);
-  } finally {
-    restoreEnv(originalEnv);
-  }
-});
-
-// The reason is not part of upstream's payload, and it has to survive anyway: CBPanel never downloads the
-// database, so "not downloaded yet" is the outcome an operator will hit most often and the one that would
-// otherwise show as an exit IP beside two unexplained blanks.
-test("BinaryService carries the unresolved reason into the diagnostics payload", async () => {
-  const originalEnv = captureEnv();
-  const directory = await makeTempDir();
-  const service = new BinaryService({
-    dataDir: directory,
-    portable: false,
-    readSettings: async () => settings({}),
-    resolveLaunchGeo: async () => ({ exitIp: "203.0.113.9", unresolvedReason: "geoip-db-missing" }),
-  });
-
-  try {
-    const result = await service.readWrapperDiagnostics({ quick: true, proxy: "http://proxy.example.test:8080" });
-
-    assert.equal(result.geoip?.resolved?.exitIp, "203.0.113.9");
-    assert.equal(result.geoip?.resolved?.timezone, undefined);
-    assert.equal(result.geoip?.resolved?.unresolvedReason, "geoip-db-missing");
-    // Not an error: the exit IP resolved. The two must never be reported together.
-    assert.equal(result.geoip?.resolved?.error, undefined);
-  } finally {
-    restoreEnv(originalEnv);
-  }
-});
-
-// A reason the panel cannot translate would render as a blank note, so an unknown value is dropped rather
-// than passed through to a lookup that has no key for it.
-test("BinaryService ignores an unrecognized unresolved reason", async () => {
-  const originalEnv = captureEnv();
-  const directory = await makeTempDir();
-  const loadCloakBrowserDiagnostics: NonNullable<BinaryServiceOptions["loadCloakBrowserDiagnostics"]> = async () => ({
-    collectDiagnostics: async () => ({
-      geoip: { db_present: true, resolved: { exit_ip: "203.0.113.9", unresolved_reason: "something-new" } },
-    }),
-  });
-  const service = new BinaryService({
-    dataDir: directory,
-    portable: false,
-    readSettings: async () => settings({}),
-    loadCloakBrowserDiagnostics,
-  });
-
-  try {
-    const result = await service.readWrapperDiagnostics({ proxy: "http://proxy.example.test:8080" });
-
-    assert.equal(result.geoip?.resolved?.exitIp, "203.0.113.9");
-    assert.equal(result.geoip?.resolved?.unresolvedReason, undefined);
   } finally {
     restoreEnv(originalEnv);
   }

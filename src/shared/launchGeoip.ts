@@ -1,5 +1,5 @@
-// Mirrored from upstream CloakBrowser `js/src/geoip.ts` (cloakbrowser@0.5.5, commit
-// c1dd58902a26032b24e7ca821b04800831f3d5c8). The wrapper does not export it — `cloakbrowser`'s
+// Mirrored from upstream CloakBrowser `js/src/geoip.ts` (cloakbrowser@0.5.10, commit
+// f04c23da285b3b3d3cf10c8f9d282e7adc1d52ce). The wrapper does not export it — `cloakbrowser`'s
 // `exports` map only publishes `.`, `./human` and `./puppeteer`, so `cloakbrowser/dist/geoip.js`
 // resolves to ERR_PACKAGE_PATH_NOT_EXPORTED — and the table is what decides which locale a
 // `geoip: true` launch actually injects. Reporting a different locale than the launch would apply is
@@ -52,21 +52,3 @@ export function localeForCountryCode(code: string | undefined): string | undefin
   if (!normalized) return undefined;
   return COUNTRY_LOCALE_MAP[normalized];
 }
-
-// Why the GeoIP database could not supply a timezone/locale even though an exit IP did resolve. The
-// distinction matters to the operator: `geoip-db-missing` is fixed by a `geoip: true` launch (which
-// downloads the database), while `ip-not-in-db` means this exit simply is not covered and no amount
-// of retrying changes it. Kept as a code rather than a sentence so the panel translates it, matching
-// how BrowserCoreImportRefusal and BrowserCoreUpdateBaselineCaveat are already handled.
-//
-// The runtime list is the source of the type, not a copy of it: the diagnostics payload is parsed back
-// from JSON and has to validate the value, and a hand-written validator would silently drop any reason
-// added to the type but not to it.
-export const LAUNCH_GEO_UNRESOLVED_REASONS = ["geoip-db-missing", "geoip-db-unreadable", "ip-not-in-db"] as const;
-
-export type LaunchGeoUnresolvedReason = (typeof LAUNCH_GEO_UNRESOLVED_REASONS)[number];
-
-export function launchGeoUnresolvedReasonFrom(value: unknown): LaunchGeoUnresolvedReason | undefined {
-  return LAUNCH_GEO_UNRESOLVED_REASONS.find((reason) => reason === value);
-}
-

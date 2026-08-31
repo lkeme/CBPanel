@@ -35,12 +35,12 @@ test("normalizeSettings returns stable defaults", () => {
   assert.equal(settings.binary.cacheDirMode, "auto");
   assert.equal(settings.binary.downloadSourceMode, "official");
   assert.equal(settings.binary.licenseKeyEnabled, false);
-  assert.equal(settings.binary.geoipTimeoutSeconds, 12);
+  assert.equal(settings.binary.geoipTimeoutSeconds, 20);
   assert.deepEqual(settings.binary.customEnvVars, [
     {
       id: "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS",
       key: "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS",
-      value: "12",
+      value: "20",
       enabled: true,
       sensitive: false,
       description: "",
@@ -475,7 +475,7 @@ test("normalizeSettings keeps GeoIP timeout as an editable default env row", () 
   const settings = normalizeSettings();
   const row = settings.binary.customEnvVars.find((item) => item.key === "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS");
 
-  assert.equal(row?.value, "12");
+  assert.equal(row?.value, "20");
   assert.equal(row?.enabled, true);
   assert.equal(row?.valueKind, "number");
 });
@@ -491,7 +491,7 @@ test("normalizeSettings migrates old empty browser core env list with GeoIP time
     {
       id: "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS",
       key: "CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS",
-      value: "12",
+      value: "20",
       enabled: true,
       sensitive: false,
       description: "",
