@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { ChevronsUpDown, CircleStop, ShieldCheck, Sparkles, Zap } from "lucide-react";
+import { ChevronsUpDown, CircleStop, Download, RefreshCw, ShieldCheck, Sparkles, Zap } from "lucide-react";
 
 import type { TranslationKey } from "../../i18n";
+import type { XrayEngineStatus } from "../../shared/entities";
 import type { GithubMirrorProbeResponse } from "../../shared/githubMirror";
 import {
   BUILTIN_GITHUB_MIRROR_PROVIDERS,
@@ -12,21 +13,33 @@ import {
   type NetworkTraceProvider,
   type NetworkTraceProviderCategory,
   type NetworkTraceSettings,
+  type XrayNativeProxyRouting,
+  type XraySettings,
 } from "../../shared/settings";
+import { XRAY_LOG_LEVELS, XRAY_UTLS_FINGERPRINTS, type XrayLogLevel, type XrayUtlsFingerprint } from "../../shared/xray";
 import { NetworkTraceProviderIcon } from "./networkTraceProviderIcons";
 import { ChoiceList, ChoiceOption, clampChoiceIndex, closeOnFocusLeave, nextChoiceIndex } from "../ui/choice-list";
-import { Field, InfoTip, NumberField } from "../ui/form-controls";
+import { Field, InfoTip, NumberField, Segmented, ToggleField } from "../ui/form-controls";
+import { SelectMenu } from "../ui/SelectMenu";
 
 export function NetworkSettingsPanel({
+  busy = "",
   checkGithubMirrors,
+  checkXrayUpdate,
+  installXray,
   saveSettings,
   settings,
   t,
+  xrayStatus = null,
 }: {
+  busy?: string;
   checkGithubMirrors: (customGithubMirrorPrefix: string) => Promise<GithubMirrorProbeResponse>;
+  checkXrayUpdate?: () => Promise<unknown>;
+  installXray?: () => Promise<unknown>;
   saveSettings: (patch: AppSettingsPatch) => Promise<void>;
   settings: AppSettings;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  xrayStatus?: XrayEngineStatus | null;
 }) {
   const trace = settings.networkTrace;
   const [mirrorProbe, setMirrorProbe] = useState<GithubMirrorProbeResponse | null>(null);
@@ -47,6 +60,10 @@ export function NetworkSettingsPanel({
 
   function saveTrace(patch: Partial<NetworkTraceSettings>) {
     void saveSettings({ networkTrace: { ...trace, ...patch } });
+  }
+
+  function saveXray(patch: Partial<XraySettings>) {
+    void saveSettings({ xray: { ...settings.xray, ...patch } });
   }
 
   return (
@@ -110,7 +127,154 @@ export function NetworkSettingsPanel({
           </Field>
         )}
       </section>
+
+      <XrayEngineSection
+        busy={busy}
+        checkXrayUpdate={checkXrayUpdate}
+        installXray={installXray}
+        saveXray={saveXray}
+        settings={settings.xray}
+        status={xrayStatus}
+        t={t}
+      />
     </div>
+  );
+}
+
+const UTLS_LABEL_KEYS: Partial<Record<XrayUtlsFingerprint, TranslationKey>> = {
+  auto: "xray.utls.auto",
+};
+
+function XrayEngineSection({
+  busy,
+  checkXrayUpdate,
+  installXray,
+  saveXray,
+  settings,
+  status,
+  t,
+}: {
+  busy: string;
+  checkXrayUpdate?: () => Promise<unknown>;
+  installXray?: () => Promise<unknown>;
+  saveXray: (patch: Partial<XraySettings>) => void;
+  settings: XraySettings;
+  status: XrayEngineStatus | null;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  const installed = status?.installed ?? false;
+  const operationRunning = Boolean(status?.operation) || busy === "xray-install" || busy === "xray-check-update";
+  const lastCheck = status?.lastUpdateCheck ?? settings.lastUpdateCheck;
+  const sourceKey: TranslationKey = status?.source === "custom" ? "xray.source.custom" : status?.source === "managed" ? "xray.source.managed" : "xray.source.missing";
+
+  return (
+    <section className="settings-section">
+      <div className="settings-section-head">
+        <div className="settings-section-title-with-tip">
+          <h2>{t("xray.title")}</h2>
+          <InfoTip text={t("xray.description")} />
+        </div>
+        <div className="row-actions">
+          <button
+            className="command subtle"
+            disabled={operationRunning || !checkXrayUpdate || !status?.releaseAsset}
+            onClick={() => void checkXrayUpdate?.()}
+            type="button"
+          >
+            <RefreshCw size={15} aria-hidden="true" />
+            {t("xray.checkUpdate")}
+          </button>
+          <button
+            className="command primary"
+            disabled={operationRunning || !installXray || !status?.releaseAsset || (status?.instances.length ?? 0) > 0}
+            onClick={() => void installXray?.()}
+            title={(status?.instances.length ?? 0) > 0 ? t("xray.instancesBlockInstall") : undefined}
+            type="button"
+          >
+            <Download size={15} aria-hidden="true" />
+            {installed ? t("xray.update") : t("xray.install")}
+          </button>
+        </div>
+      </div>
+      <div className={`settings-status-line ${installed ? "enabled" : "warning"}`}>
+        <span className="settings-status-heading">
+          <strong>{installed ? t("xray.installed") : t("xray.notInstalled")}</strong>
+          {status?.version && <small>v{status.version}</small>}
+          {status && <small>· {t(sourceKey)}</small>}
+          {status?.operation && <small>· {t("xray.operationRunning", { operation: status.operation.type })}</small>}
+        </span>
+        {status?.binaryPath && <small className="mono-cell">{status.binaryPath}</small>}
+        {status && !status.releaseAsset && <small>{t("xray.unsupportedPlatform")}</small>}
+        {lastCheck && (
+          <small>
+            {lastCheck.error
+              ? lastCheck.error
+              : lastCheck.updateAvailable
+                ? t("xray.updateAvailable", { version: lastCheck.latestVersion ?? "" })
+                : t("xray.upToDate")}
+            {" · "}
+            {t("xray.lastCheck")} {new Date(lastCheck.checkedAt).toLocaleString()}
+          </small>
+        )}
+        {status?.lastError && <small className="xray-status-error">{status.lastError}</small>}
+      </div>
+      <Field label={t("xray.customBinaryPath")} wide help={t("xray.customBinaryPathHelp")}>
+        <input
+          value={settings.customBinaryPath}
+          onChange={(event) => saveXray({ customBinaryPath: event.target.value })}
+          placeholder={status?.binaryPath ?? "xray"}
+        />
+      </Field>
+      <Field label={t("xray.nativeProxyRouting")} wide help={t("xray.nativeProxyRoutingHelp")}>
+        <Segmented<XrayNativeProxyRouting>
+          value={settings.nativeProxyRouting}
+          options={[
+            { value: "auto", label: t("xray.nativeProxyRouting.auto") },
+            { value: "always", label: t("xray.nativeProxyRouting.always") },
+            { value: "never", label: t("xray.nativeProxyRouting.never") },
+          ]}
+          onChange={(nativeProxyRouting) => saveXray({ nativeProxyRouting })}
+        />
+      </Field>
+      <Field label={t("xray.utlsFingerprint")} help={t("xray.utlsFingerprintHelp")}>
+        <SelectMenu<XrayUtlsFingerprint>
+          onChange={(utlsFingerprint) => saveXray({ utlsFingerprint })}
+          options={XRAY_UTLS_FINGERPRINTS.map((fingerprint) => ({
+            value: fingerprint,
+            label: UTLS_LABEL_KEYS[fingerprint] ? t(UTLS_LABEL_KEYS[fingerprint]) : fingerprint,
+          }))}
+          placeholder={t("xray.utls.auto")}
+          value={settings.utlsFingerprint}
+        />
+      </Field>
+      <Field label={t("xray.logLevel")}>
+        <Segmented<XrayLogLevel>
+          value={settings.logLevel}
+          options={XRAY_LOG_LEVELS.map((level) => ({ value: level, label: level }))}
+          onChange={(logLevel) => saveXray({ logLevel })}
+        />
+      </Field>
+      <ToggleField
+        checked={settings.autoRestart}
+        help={t("xray.autoRestartHelp")}
+        label={t("xray.autoRestart")}
+        onChange={(autoRestart) => saveXray({ autoRestart })}
+      />
+      <ToggleField
+        checked={settings.checkForUpdatesOnStartup}
+        label={t("xray.checkForUpdatesOnStartup")}
+        onChange={(checkForUpdatesOnStartup) => saveXray({ checkForUpdatesOnStartup })}
+      />
+      <div className="result-line">
+        {status && status.instances.length > 0
+          ? status.instances.map((instance) => (
+              <div key={instance.ownerId}>
+                {t("xray.instanceLine", { owner: instance.ownerId, port: instance.port, restarts: instance.restarts })} · {instance.preProxy ? `${instance.preProxy} → ` : ""}{instance.upstream}
+              </div>
+            ))
+          : t("xray.noInstances")}
+      </div>
+    </section>
   );
 }
 

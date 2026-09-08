@@ -3,8 +3,9 @@ import type { GithubMirrorProviderId } from "./settings";
 const CLOAKBROWSER_OFFICIAL_BASE_URL = "https://cloakbrowser.dev";
 const CLOAKBROWSER_GITHUB_RELEASE_BASE_URL = "https://github.com/CloakHQ/cloakbrowser/releases/download";
 export const CLOAKBROWSER_GEOIP_DB_URL = "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb";
+export const XRAY_CORE_GITHUB_RELEASE_BASE_URL = "https://github.com/XTLS/Xray-core/releases/download";
 
-export type GithubMirrorRewriteKind = "cloakbrowser-core" | "cloakbrowser-geoip";
+export type GithubMirrorRewriteKind = "cloakbrowser-core" | "cloakbrowser-geoip" | "xray-core";
 
 export interface GithubMirrorProbeRequest {
   providerId?: GithubMirrorProviderId | "all";
@@ -99,6 +100,14 @@ export function normalizeSupportedGithubDownloadUrl(inputUrl: string): { url: st
       return {
         url: CLOAKBROWSER_GEOIP_DB_URL,
         kind: "cloakbrowser-geoip",
+      };
+    }
+
+    // The Xray engine's release archives are the one other GitHub download the panel performs.
+    if (url.pathname.match(/^\/XTLS\/Xray-core\/releases\/download\/v[^/]+\/Xray-[A-Za-z0-9._-]+\.zip(?:\.dgst)?$/)) {
+      return {
+        url: url.toString(),
+        kind: "xray-core",
       };
     }
   }

@@ -425,6 +425,10 @@ export class EnvironmentPackageService {
               username: proxy.username,
               password: proxy.password,
               bypass: proxy.bypass,
+              shareLink: proxy.shareLink,
+              // A package travels to another panel, where the front proxy's id means nothing.
+              preProxyId: "",
+              ipStrategy: proxy.ipStrategy,
             },
             runtime: {
               ...environment.runtimeProfile.runtime,

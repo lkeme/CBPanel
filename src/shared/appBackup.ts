@@ -5,6 +5,7 @@ import {
   type ExtensionBindingMetadata,
   type GroupEntity,
   type ProxyEntity,
+  type ProxySubscriptionEntity,
   type TagEntity,
 } from "./entities";
 import {
@@ -101,6 +102,8 @@ export interface AppBackupDataV2 {
   groups: GroupEntity[];
   tags: TagEntity[];
   proxies: ProxyEntity[];
+  /** Remembered proxy subscriptions; absent in backups written before they existed. */
+  proxySubscriptions?: ProxySubscriptionEntity[];
   extensions: ExtensionEntity[];
   retainedExtensionArtifacts: ExtensionArtifactTransferEntry[];
   environmentExtensionBindings?: ExtensionBindingMetadata[];
@@ -195,6 +198,9 @@ function decodeBackupCollections(record: Record<string, unknown>): Omit<
     if (!Array.isArray(record[field])) throw backupError(`Backup data must include ${field}.`);
   }
   if (!backupIsRecord(record.settings)) throw backupError("Backup data must include settings.");
+  if (record.proxySubscriptions !== undefined && !Array.isArray(record.proxySubscriptions)) {
+    throw backupError("Backup proxySubscriptions must be a list.");
+  }
   validateBackupTransferIds(record);
   return {
     settings: record.settings as unknown as AppSettings,
@@ -203,6 +209,7 @@ function decodeBackupCollections(record: Record<string, unknown>): Omit<
     groups: record.groups as GroupEntity[],
     tags: record.tags as TagEntity[],
     proxies: record.proxies as ProxyEntity[],
+    ...(Array.isArray(record.proxySubscriptions) ? { proxySubscriptions: record.proxySubscriptions as ProxySubscriptionEntity[] } : {}),
     extensions: record.extensions as ExtensionEntity[],
   };
 }
@@ -215,6 +222,9 @@ function validateBackupTransferIds(record: Record<string, unknown>): void {
   for (const [index, value] of (record.tags as unknown[]).entries()) collections.push({ value, label: `tag ${index}` });
   for (const [index, value] of (record.proxies as unknown[]).entries()) collections.push({ value, label: `proxy ${index}` });
   for (const [index, value] of (record.extensions as unknown[]).entries()) collections.push({ value, label: `extension ${index}` });
+  if (Array.isArray(record.proxySubscriptions)) {
+    for (const [index, value] of record.proxySubscriptions.entries()) collections.push({ value, label: `proxy subscription ${index}` });
+  }
   for (const item of collections) {
     const value = backupRecord(item.value, `Backup ${item.label}`);
     assertSafeTransferId(value.id, `Backup ${item.label} id`);

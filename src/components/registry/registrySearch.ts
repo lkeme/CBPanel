@@ -11,10 +11,13 @@ export function statHaystack(stat: ModuleStat): string {
  * Proxy rows print a masked address, so the haystack is built from that same string:
  * whatever is on screen is searchable, and the password can never be matched.
  */
-export function proxyHaystack(stat: ModuleStat, proxy?: ProxyEntity): string {
+export function proxyHaystack(stat: ModuleStat, proxy?: ProxyEntity, subscriptionName?: string): string {
   if (!proxy) return statHaystack(stat);
   const address = `${proxy.scheme}://${proxy.host}:${proxy.port}`;
-  return [stat.name, stat.description, maskManagedProxyForDisplay(proxy, address), address, proxy.notes]
+  const node = proxy.xrayNode
+    ? [proxy.xrayNode.protocol, proxy.xrayNode.network, proxy.xrayNode.security, proxy.xrayNode.remark, proxy.xrayNode.transportDetail]
+    : [];
+  return [stat.name, stat.description, maskManagedProxyForDisplay(proxy, address), address, proxy.notes, ...node, subscriptionName]
     .filter(Boolean)
     .join(" ");
 }

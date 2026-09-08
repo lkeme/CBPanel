@@ -7,8 +7,17 @@ import {
   defaultProfile,
   normalizeProfile,
   normalizeProxyScheme,
+  normalizeXrayIpStrategy,
   nowIso,
 } from "../../src/shared/profile";
+import {
+  type ParsedXrayShareLink,
+  type XrayNodeSummary,
+  isMaskedXrayShareLink,
+  parseXrayShareLink,
+  tryParseXrayShareLink,
+  proxyNodeIdentity,
+} from "../../src/shared/xray";
 import type {
   BrowserEnvironment,
   EntityStatus,
@@ -23,10 +32,13 @@ import type {
   ReferenceUsage,
   ProxyCheckResult,
   ProxyEntity,
+  ProxyLatencyResult,
+  ProxySubscriptionEntity,
+  ProxySubscriptionRefreshResult,
   TagEntity,
   TrashEnvironment,
 } from "../../src/shared/entities";
-import { normalizeExtensionBindingMetadata } from "../../src/shared/entities";
+import { DEFAULT_PROXY_SUBSCRIPTION_INTERVAL_HOURS, normalizeExtensionBindingMetadata } from "../../src/shared/entities";
 import {
   type AppSettings,
   type AppSettingsPatch,
@@ -128,6 +140,24 @@ type ProxyRow = {
   notes: string;
   status: EntityStatus;
   last_check_json: string | null;
+  last_latency_json: string | null;
+  share_link: string | null;
+  pre_proxy_id: string | null;
+  ip_strategy: string | null;
+  subscription_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type ProxySubscriptionRow = {
+  id: string;
+  name: string;
+  url: string;
+  status: EntityStatus;
+  auto_refresh: number;
+  refresh_interval_hours: number;
+  last_refresh_json: string | null;
+  notes: string;
   created_at: string;
   updated_at: string;
 };
@@ -178,7 +208,7 @@ type EnvironmentExtensionBindingRow = {
   lifecycle_revision: string | null;
 };
 
-type IdentityTable = "profiles" | "browser_environments" | "groups" | "tags" | "proxies" | "extensions";
+type IdentityTable = "profiles" | "browser_environments" | "groups" | "tags" | "proxies" | "proxy_subscriptions" | "extensions";
 
 type SettingsRow = {
   settings_json: string;
@@ -722,15 +752,27 @@ export class SqlitePanelRepository implements PanelRepository {
   async updateProxy(id: string, patch: Partial<ProxyEntity>): Promise<ProxyEntity> {
     await this.initialize();
     const existing = this.getProxyOrThrow(id, { includeSecrets: true });
-    const updated = normalizeProxyEntity({
+    // A client that only ever saw the masked link (no secrets requested) must not be able to write
+    // the mask back over the real node, the same way a masked password is never persisted.
+    const { shareLink: patchedShareLink, ...rest } = patch;
+    const shareLink = typeof patchedShareLink === "string" && !isMaskedXrayShareLink(patchedShareLink)
+      ? patchedShareLink
+      : existing.shareLink;
+    const candidate = normalizeProxyEntity({
       ...existing,
-      ...patch,
+      ...rest,
+      shareLink,
       id: existing.id,
       createdAt: existing.createdAt,
       updatedAt: nowIso(),
     });
+    // Editing the node itself (not its name, chain or notes) makes it the user's own: it leaves its
+    // subscription, or the next refresh would throw the edit away as a node the address no longer lists.
+    const detached = Boolean(existing.subscriptionId) && proxyIdentityKey(existing) !== proxyIdentityKey(candidate);
+    const updated = detached ? { ...candidate, subscriptionId: "" } : candidate;
     this.insertProxy(updated);
     this.syncProfilesForProxy(id);
+    this.syncProfilesForPreProxy(id);
     return updated;
   }
 
@@ -742,6 +784,7 @@ export class SqlitePanelRepository implements PanelRepository {
       ...existing,
       id: createId("proxy"),
       name: `${existing.name} copy`,
+      subscriptionId: "",
       createdAt: timestamp,
       updatedAt: timestamp,
     });
@@ -754,6 +797,49 @@ export class SqlitePanelRepository implements PanelRepository {
     this.getProxyOrThrow(id, { includeSecrets: false });
     this.throwIfReferenced("proxy", id);
     this.database().prepare("DELETE FROM proxies WHERE id = ?").run(id);
+    this.clearPreProxyReferences(id);
+  }
+
+  /**
+   * A deleted proxy may still be named as the front proxy of a chain — by other library entries and
+   * by environments that keep their own proxy settings. Those chains are unwound rather than left
+   * dangling, so the next launch runs the target proxy directly instead of failing on a missing id.
+   */
+  private clearPreProxyReferences(proxyId: string): void {
+    const timestamp = nowIso();
+    const chainedProxies = this.database()
+      .prepare("SELECT id FROM proxies WHERE pre_proxy_id = ?")
+      .all(proxyId)
+      .map((row) => (row as IdRow).id);
+    if (chainedProxies.length > 0) {
+      this.database().prepare("UPDATE proxies SET pre_proxy_id = '', updated_at = ? WHERE pre_proxy_id = ?").run(timestamp, proxyId);
+      for (const chainedProxyId of chainedProxies) this.syncProfilesForProxy(chainedProxyId);
+    }
+    const environments = this.database()
+      .prepare("SELECT * FROM browser_environments WHERE deleted_at IS NULL")
+      .all()
+      .map((row) => this.environmentFromRow(row as EnvironmentRow))
+      .filter((environment) => environment.runtimeProfile.proxy.preProxyId === proxyId);
+    for (const environment of environments) {
+      const runtimeProfile = normalizeProfile({
+        ...environment.runtimeProfile,
+        proxy: { ...environment.runtimeProfile.proxy, preProxyId: "" },
+        updatedAt: timestamp,
+      });
+      this.database()
+        .prepare("UPDATE browser_environments SET runtime_profile_json = ?, updated_at = ? WHERE id = ?")
+        .run(JSON.stringify(runtimeProfile), timestamp, environment.id);
+      this.upsertProfileRow(this.profileFromEnvironment(this.getEnvironmentOrThrow(environment.id)));
+    }
+  }
+
+  /** Environments whose library proxy chains through `proxyId` see the chain in their runtime profile. */
+  private syncProfilesForPreProxy(proxyId: string): void {
+    const chainedProxies = this.database()
+      .prepare("SELECT id FROM proxies WHERE pre_proxy_id = ?")
+      .all(proxyId)
+      .map((row) => (row as IdRow).id);
+    for (const chainedProxyId of chainedProxies) this.syncProfilesForProxy(chainedProxyId);
   }
 
   async replaceProxyReferences(id: string, targetId?: string): Promise<BrowserEnvironment[]> {
@@ -776,6 +862,149 @@ export class SqlitePanelRepository implements PanelRepository {
       this.database().prepare("SELECT * FROM proxies WHERE id = ?").get(id) as ProxyRow,
       { includeSecrets: false },
     );
+  }
+
+  async saveProxyLatencyResult(id: string, result: ProxyEntity["lastLatency"]): Promise<ProxyEntity> {
+    await this.initialize();
+    const existing = this.getProxyOrThrow(id, { includeSecrets: true });
+    // Deliberately not `updatedAt`: a probe is an observation about the proxy, not an edit of it, and
+    // the list is sorted by updatedAt — a batch probe must not reshuffle it.
+    this.insertProxy({ ...existing, lastLatency: result });
+    return proxyFromRow(
+      this.database().prepare("SELECT * FROM proxies WHERE id = ?").get(id) as ProxyRow,
+      { includeSecrets: false },
+    );
+  }
+
+  /**
+   * Which proxies are in use: named by an environment (live or in the trash, the same rows that
+   * block a delete) or chained as another proxy's front. A subscription refresh must not delete or
+   * replace those, and a subscription delete keeps them.
+   */
+  async listProxyUsage(): Promise<Map<string, { environmentIds: string[]; chainedProxyIds: string[] }>> {
+    await this.initialize();
+    const usage = new Map<string, { environmentIds: string[]; chainedProxyIds: string[] }>();
+    const entry = (proxyId: string) => {
+      let current = usage.get(proxyId);
+      if (!current) {
+        current = { environmentIds: [], chainedProxyIds: [] };
+        usage.set(proxyId, current);
+      }
+      return current;
+    };
+    for (const row of this.database().prepare("SELECT id, proxy_id FROM browser_environments WHERE proxy_id IS NOT NULL AND proxy_id != ''").all()) {
+      const { id, proxy_id: proxyId } = row as { id: string; proxy_id: string };
+      entry(proxyId).environmentIds.push(id);
+    }
+    for (const row of this.database().prepare("SELECT id, pre_proxy_id FROM proxies WHERE pre_proxy_id != ''").all()) {
+      const { id, pre_proxy_id: preProxyId } = row as { id: string; pre_proxy_id: string };
+      entry(preProxyId).chainedProxyIds.push(id);
+    }
+    return usage;
+  }
+
+  async listProxySubscriptions(options: { includeSecrets?: boolean } = {}): Promise<ProxySubscriptionEntity[]> {
+    await this.initialize();
+    return this.database()
+      .prepare("SELECT * FROM proxy_subscriptions ORDER BY created_at ASC")
+      .all()
+      .map((row) => proxySubscriptionFromRow(row as ProxySubscriptionRow, { includeSecrets: options.includeSecrets === true }));
+  }
+
+  async getProxySubscription(id: string, options: { includeSecrets?: boolean } = {}): Promise<ProxySubscriptionEntity | undefined> {
+    await this.initialize();
+    const row = this.database().prepare("SELECT * FROM proxy_subscriptions WHERE id = ?").get(id) as ProxySubscriptionRow | undefined;
+    return row ? proxySubscriptionFromRow(row, { includeSecrets: options.includeSecrets === true }) : undefined;
+  }
+
+  async createProxySubscription(input: Partial<ProxySubscriptionEntity>): Promise<ProxySubscriptionEntity> {
+    await this.initialize();
+    const timestamp = nowIso();
+    const subscription = normalizeProxySubscriptionEntity({
+      ...input,
+      id: createEntityId(input.id, "subscription"),
+      lastRefresh: undefined,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    this.assertUnusedId("proxy_subscriptions", subscription.id);
+    const duplicate = this.database()
+      .prepare("SELECT id FROM proxy_subscriptions WHERE url = ?")
+      .get(subscription.url) as IdRow | undefined;
+    if (duplicate) {
+      throw Object.assign(new Error("这个订阅地址已经存在。"), { status: 409, code: "PROXY_SUBSCRIPTION_EXISTS", subscriptionId: duplicate.id });
+    }
+    this.insertProxySubscription(subscription);
+    return subscription;
+  }
+
+  async updateProxySubscription(id: string, patch: Partial<ProxySubscriptionEntity>): Promise<ProxySubscriptionEntity> {
+    await this.initialize();
+    const existing = this.getProxySubscriptionOrThrow(id, { includeSecrets: true });
+    // A client that only saw the masked list never gets to blank the address; "" means unchanged.
+    const { url: patchedUrl, lastRefresh: _ignoredRefresh, ...rest } = patch;
+    const url = typeof patchedUrl === "string" && patchedUrl.trim() ? patchedUrl.trim() : existing.url;
+    const updated = normalizeProxySubscriptionEntity({
+      ...existing,
+      ...rest,
+      url,
+      id: existing.id,
+      lastRefresh: existing.lastRefresh,
+      createdAt: existing.createdAt,
+      updatedAt: nowIso(),
+    });
+    if (url !== existing.url) {
+      const duplicate = this.database()
+        .prepare("SELECT id FROM proxy_subscriptions WHERE url = ? AND id != ?")
+        .get(url, id) as IdRow | undefined;
+      if (duplicate) {
+        throw Object.assign(new Error("这个订阅地址已经存在。"), { status: 409, code: "PROXY_SUBSCRIPTION_EXISTS", subscriptionId: duplicate.id });
+      }
+    }
+    this.insertProxySubscription(updated);
+    return updated;
+  }
+
+  async saveProxySubscriptionRefresh(id: string, result: ProxySubscriptionRefreshResult): Promise<ProxySubscriptionEntity> {
+    await this.initialize();
+    const existing = this.getProxySubscriptionOrThrow(id, { includeSecrets: true });
+    // Like a proxy probe: an observation, not an edit, so updatedAt stays.
+    this.insertProxySubscription({ ...existing, lastRefresh: result });
+    return this.getProxySubscriptionOrThrow(id, { includeSecrets: false });
+  }
+
+  /**
+   * Deleting a subscription never touches a proxy that is in use. With `proxies: "keep"` every member
+   * simply becomes standalone; with `"delete"` the unused members go and the used ones are kept
+   * as standalone proxies, reported back so the caller can say so.
+   */
+  async deleteProxySubscription(id: string, options: { proxies: "keep" | "delete" }): Promise<{ detached: string[]; deleted: string[] }> {
+    await this.initialize();
+    this.getProxySubscriptionOrThrow(id, { includeSecrets: false });
+    const members = (await this.listProxies()).filter((proxy) => proxy.subscriptionId === id);
+    const usage = await this.listProxyUsage();
+    const outcome = { detached: [] as string[], deleted: [] as string[] };
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const member of members) {
+        const used = usage.has(member.id);
+        if (options.proxies === "delete" && !used) {
+          db.prepare("DELETE FROM proxies WHERE id = ?").run(member.id);
+          outcome.deleted.push(member.id);
+        } else {
+          db.prepare("UPDATE proxies SET subscription_id = '' WHERE id = ?").run(member.id);
+          outcome.detached.push(member.id);
+        }
+      }
+      db.prepare("DELETE FROM proxy_subscriptions WHERE id = ?").run(id);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    for (const deletedId of outcome.deleted) this.clearPreProxyReferences(deletedId);
+    return outcome;
   }
 
   async listExtensions(): Promise<ExtensionEntity[]> {
@@ -1080,6 +1309,7 @@ export class SqlitePanelRepository implements PanelRepository {
       groups: await this.listGroups(),
       tags: await this.listTags(),
       proxies: await this.listProxies({ includeSecrets: true }),
+      proxySubscriptions: await this.listProxySubscriptions({ includeSecrets: true }),
       extensions,
       retainedExtensionArtifacts: extensions
         .filter((extension) => extension.provenance?.artifact.retained && extension.artifactArchivePath)
@@ -1102,6 +1332,10 @@ export class SqlitePanelRepository implements PanelRepository {
       for (const group of normalized.groups) this.insertGroupExact(group);
       for (const tag of normalized.tags) this.insertTagExact(tag);
       for (const proxy of normalized.proxies) this.insertProxyExact(proxy);
+      for (const subscription of normalized.proxySubscriptions ?? []) this.insertProxySubscription(subscription);
+      // A backup from before subscriptions, or one edited by hand, may name a subscription it does
+      // not carry; such members are standalone proxies, not orphans.
+      db.prepare("UPDATE proxies SET subscription_id = '' WHERE subscription_id != '' AND subscription_id NOT IN (SELECT id FROM proxy_subscriptions)").run();
       for (const extension of normalized.extensions) this.insertExtensionExact(extension);
       for (const profile of normalized.profiles) this.upsertProfileRow(profile);
       for (const environment of normalized.environments) this.insertEnvironmentExact(environment);
@@ -1194,6 +1428,24 @@ export class SqlitePanelRepository implements PanelRepository {
         notes TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('enabled', 'disabled')),
         last_check_json TEXT,
+        last_latency_json TEXT,
+        share_link TEXT NOT NULL DEFAULT '',
+        pre_proxy_id TEXT NOT NULL DEFAULT '',
+        ip_strategy TEXT NOT NULL DEFAULT 'auto',
+        subscription_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS proxy_subscriptions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('enabled', 'disabled')),
+        auto_refresh INTEGER NOT NULL CHECK (auto_refresh IN (0, 1)),
+        refresh_interval_hours INTEGER NOT NULL,
+        last_refresh_json TEXT,
+        notes TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -1312,6 +1564,15 @@ export class SqlitePanelRepository implements PanelRepository {
     this.ensureColumn("extensions", "optional_permissions_json", "TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn("extensions", "optional_host_permissions_json", "TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn("environment_extensions", "lifecycle_revision", "TEXT");
+    // The Xray engine's proxy fields. Older files get them with their defaults, which reads every
+    // existing proxy as a plain, unchained node — exactly what it was.
+    this.ensureColumn("proxies", "share_link", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("proxies", "pre_proxy_id", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("proxies", "ip_strategy", "TEXT NOT NULL DEFAULT 'auto'");
+    this.ensureColumn("proxies", "last_latency_json", "TEXT");
+    // Remembered subscriptions: a proxy that names none is standalone, which is what every proxy
+    // written before subscriptions existed was.
+    this.ensureColumn("proxies", "subscription_id", "TEXT NOT NULL DEFAULT ''");
   }
 
   private async migrateLegacyJsonIfNeeded({ explicit }: { explicit: boolean }): Promise<void> {
@@ -1395,6 +1656,7 @@ export class SqlitePanelRepository implements PanelRepository {
       DELETE FROM extensions;
       DELETE FROM extension_sources;
       DELETE FROM proxies;
+      DELETE FROM proxy_subscriptions;
       DELETE FROM tags;
       DELETE FROM groups;
     `);
@@ -1901,8 +2163,8 @@ export class SqlitePanelRepository implements PanelRepository {
       .prepare(`
         INSERT INTO proxies (
           id, name, scheme, host, port, username, password, bypass, notes, status,
-          last_check_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          last_check_json, last_latency_json, share_link, pre_proxy_id, ip_strategy, subscription_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           scheme = excluded.scheme,
@@ -1914,23 +2176,14 @@ export class SqlitePanelRepository implements PanelRepository {
           notes = excluded.notes,
           status = excluded.status,
           last_check_json = excluded.last_check_json,
+          last_latency_json = excluded.last_latency_json,
+          share_link = excluded.share_link,
+          pre_proxy_id = excluded.pre_proxy_id,
+          ip_strategy = excluded.ip_strategy,
+          subscription_id = excluded.subscription_id,
           updated_at = excluded.updated_at
       `)
-      .run(
-        proxy.id,
-        proxy.name,
-        proxy.scheme,
-        proxy.host,
-        proxy.port,
-        proxy.username,
-        proxy.password,
-        proxy.bypass,
-        proxy.notes,
-        proxy.status,
-        proxy.lastCheck ? JSON.stringify(proxy.lastCheck) : null,
-        proxy.createdAt,
-        proxy.updatedAt,
-      );
+      .run(...proxyRowValues(proxy));
   }
 
   private insertProxyExact(proxy: ProxyEntity): void {
@@ -1938,24 +2191,35 @@ export class SqlitePanelRepository implements PanelRepository {
       .prepare(`
         INSERT INTO proxies (
           id, name, scheme, host, port, username, password, bypass, notes, status,
-          last_check_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          last_check_json, last_latency_json, share_link, pre_proxy_id, ip_strategy, subscription_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
-      .run(
-        proxy.id,
-        proxy.name,
-        proxy.scheme,
-        proxy.host,
-        proxy.port,
-        proxy.username,
-        proxy.password,
-        proxy.bypass,
-        proxy.notes,
-        proxy.status,
-        proxy.lastCheck ? JSON.stringify(proxy.lastCheck) : null,
-        proxy.createdAt,
-        proxy.updatedAt,
-      );
+      .run(...proxyRowValues(proxy));
+  }
+
+  private insertProxySubscription(subscription: ProxySubscriptionEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO proxy_subscriptions (
+          id, name, url, status, auto_refresh, refresh_interval_hours, last_refresh_json, notes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          url = excluded.url,
+          status = excluded.status,
+          auto_refresh = excluded.auto_refresh,
+          refresh_interval_hours = excluded.refresh_interval_hours,
+          last_refresh_json = excluded.last_refresh_json,
+          notes = excluded.notes,
+          updated_at = excluded.updated_at
+      `)
+      .run(...proxySubscriptionRowValues(subscription));
+  }
+
+  private getProxySubscriptionOrThrow(id: string, options: { includeSecrets: boolean }): ProxySubscriptionEntity {
+    const row = this.database().prepare("SELECT * FROM proxy_subscriptions WHERE id = ?").get(id) as ProxySubscriptionRow | undefined;
+    if (!row) throw Object.assign(new Error("订阅不存在"), { status: 404 });
+    return proxySubscriptionFromRow(row, options);
   }
 
   private getProxyOrThrow(id: string, options: { includeSecrets: boolean }): ProxyEntity {
@@ -2566,6 +2830,7 @@ function normalizeFullBackupData(data: AppBackupData, receivingDataDir: string):
       updatedAt: typeof tag.updatedAt === "string" && tag.updatedAt ? tag.updatedAt : nowIso(),
     })),
     proxies: decoded.proxies.map(normalizeProxyEntity),
+    proxySubscriptions: (decoded.proxySubscriptions ?? []).map((subscription) => normalizeProxySubscriptionEntity(subscription)),
     extensions: decoded.extensions.map((extension) => {
       const normalized = normalizeExtensionEntity(extension);
       const original = originalExtensions.get(extension.id);
@@ -2591,6 +2856,50 @@ function normalizeProxyEntity(input: Partial<ProxyEntity>): ProxyEntity {
   const id = createEntityId(input.id, "proxy");
   const scheme = typeof input.scheme === "string" ? normalizeProxyScheme(input.scheme) : "http";
   if (!scheme) throw Object.assign(new Error("代理协议不受支持"), { status: 400 });
+  const preProxyId = typeof input.preProxyId === "string" ? input.preProxyId.trim() : "";
+  if (preProxyId && preProxyId === id) throw Object.assign(new Error("前置代理不能是代理自身"), { status: 400 });
+  const ipStrategy = normalizeXrayIpStrategy(input.ipStrategy);
+  const subscriptionId = typeof input.subscriptionId === "string" ? input.subscriptionId.trim() : "";
+  const bypass = typeof input.bypass === "string" ? input.bypass : "localhost,127.0.0.1";
+  const notes = typeof input.notes === "string" ? input.notes.trim() : "";
+  const status = input.status === "disabled" ? "disabled" : "enabled";
+
+  if (scheme === "xray") {
+    // An xray entry is its share link: host/port are projections of it and the URL credentials do not
+    // apply, so a link that does not parse is the one thing that makes the record invalid.
+    const shareLink = typeof input.shareLink === "string" ? input.shareLink.trim() : "";
+    if (!shareLink || isMaskedXrayShareLink(shareLink)) throw Object.assign(new Error("Xray 分享链接不能为空"), { status: 400 });
+    let parsed: ParsedXrayShareLink;
+    try {
+      parsed = parseXrayShareLink(shareLink);
+    } catch (error) {
+      throw Object.assign(new Error(`Xray 分享链接无法解析：${(error as Error).message}`), { status: 400 });
+    }
+    const host = parsed.summary.address;
+    const port = String(parsed.summary.port);
+    return {
+      id,
+      name: typeof input.name === "string" && input.name.trim() ? input.name.trim() : parsed.summary.remark || host,
+      scheme,
+      host,
+      port,
+      username: "",
+      password: "",
+      bypass,
+      notes,
+      status,
+      lastCheck: input.lastCheck,
+    lastLatency: input.lastLatency,
+      shareLink,
+      preProxyId,
+      ipStrategy,
+      xrayNode: parsed.summary,
+      subscriptionId,
+      createdAt: input.createdAt ?? now,
+      updatedAt: input.updatedAt ?? now,
+    };
+  }
+
   const host = typeof input.host === "string" ? input.host.trim() : "";
   const port = typeof input.port === "string" ? input.port.trim() : "";
   if (!host || !port) throw Object.assign(new Error("代理 host 和 port 不能为空"), { status: 400 });
@@ -2602,13 +2911,128 @@ function normalizeProxyEntity(input: Partial<ProxyEntity>): ProxyEntity {
     port,
     username: typeof input.username === "string" ? input.username.trim() : "",
     password: typeof input.password === "string" ? input.password : "",
-    bypass: typeof input.bypass === "string" ? input.bypass : "localhost,127.0.0.1",
-    notes: typeof input.notes === "string" ? input.notes.trim() : "",
-    status: input.status === "disabled" ? "disabled" : "enabled",
+    bypass,
+    notes,
+    status,
     lastCheck: input.lastCheck,
+    lastLatency: input.lastLatency,
+    shareLink: "",
+    preProxyId,
+    ipStrategy,
+    subscriptionId,
     createdAt: input.createdAt ?? now,
     updatedAt: input.updatedAt ?? now,
   };
+}
+
+function proxyRowValues(proxy: ProxyEntity): Array<string | null> {
+  return [
+    proxy.id,
+    proxy.name,
+    proxy.scheme,
+    proxy.host,
+    proxy.port,
+    proxy.username,
+    proxy.password,
+    proxy.bypass,
+    proxy.notes,
+    proxy.status,
+    proxy.lastCheck ? JSON.stringify(proxy.lastCheck) : null,
+    proxy.lastLatency ? JSON.stringify(proxy.lastLatency) : null,
+    // Backups written before the engine existed carry none of these; SQLite cannot bind undefined.
+    proxy.shareLink ?? "",
+    proxy.preProxyId ?? "",
+    normalizeXrayIpStrategy(proxy.ipStrategy),
+    proxy.subscriptionId ?? "",
+    proxy.createdAt,
+    proxy.updatedAt,
+  ];
+}
+
+function proxySubscriptionRowValues(subscription: ProxySubscriptionEntity): Array<string | number | null> {
+  return [
+    subscription.id,
+    subscription.name,
+    subscription.url,
+    subscription.status,
+    subscription.autoRefresh ? 1 : 0,
+    subscription.refreshIntervalHours,
+    subscription.lastRefresh ? JSON.stringify(subscription.lastRefresh) : null,
+    subscription.notes,
+    subscription.createdAt,
+    subscription.updatedAt,
+  ];
+}
+
+function proxySubscriptionFromRow(row: ProxySubscriptionRow, options: { includeSecrets: boolean }): ProxySubscriptionEntity {
+  return {
+    id: row.id,
+    name: row.name,
+    url: options.includeSecrets ? row.url : "",
+    urlHost: subscriptionUrlHost(row.url),
+    status: row.status,
+    autoRefresh: row.auto_refresh === 1,
+    refreshIntervalHours: normalizeRefreshIntervalHours(row.refresh_interval_hours),
+    lastRefresh: row.last_refresh_json ? parseJson<ProxySubscriptionRefreshResult>(row.last_refresh_json) : undefined,
+    notes: row.notes,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * A subscription is its address; everything else has a default. The address must be an http(s)
+ * URL because that is what the refresh fetches, and it is validated here rather than at the route
+ * so a backup cannot smuggle in something the scheduler would later choke on.
+ */
+function normalizeProxySubscriptionEntity(input: Partial<ProxySubscriptionEntity>): ProxySubscriptionEntity {
+  const now = nowIso();
+  const url = typeof input.url === "string" ? input.url.trim() : "";
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw Object.assign(new Error("订阅地址无效。"), { status: 400, code: "PROXY_SUBSCRIPTION_URL_INVALID" });
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw Object.assign(new Error("订阅地址必须是 http:// 或 https://。"), { status: 400, code: "PROXY_SUBSCRIPTION_URL_INVALID" });
+  }
+  return {
+    id: createEntityId(input.id, "subscription"),
+    name: typeof input.name === "string" && input.name.trim() ? input.name.trim() : parsed.host,
+    url,
+    urlHost: parsed.host,
+    status: input.status === "disabled" ? "disabled" : "enabled",
+    autoRefresh: input.autoRefresh === true,
+    refreshIntervalHours: normalizeRefreshIntervalHours(input.refreshIntervalHours),
+    lastRefresh: input.lastRefresh,
+    notes: typeof input.notes === "string" ? input.notes.trim() : "",
+    createdAt: typeof input.createdAt === "string" && input.createdAt ? input.createdAt : now,
+    updatedAt: typeof input.updatedAt === "string" && input.updatedAt ? input.updatedAt : now,
+  };
+}
+
+function normalizeRefreshIntervalHours(value: unknown): number {
+  const hours = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : DEFAULT_PROXY_SUBSCRIPTION_INTERVAL_HOURS;
+  return Math.min(24 * 30, Math.max(1, hours));
+}
+
+function subscriptionUrlHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+}
+
+/** See `proxyNodeIdentity`: a subscription refresh matches members by it, and an edit that changes it detaches a member. */
+function proxyIdentityKey(proxy: Pick<ProxyEntity, "scheme" | "host" | "port" | "username" | "password" | "shareLink">): string {
+  return proxyNodeIdentity(proxy);
+}
+
+function xrayNodeFromRow(row: Pick<ProxyRow, "scheme" | "share_link">): XrayNodeSummary | undefined {
+  if (row.scheme !== "xray" || !row.share_link) return undefined;
+  return tryParseXrayShareLink(row.share_link)?.summary;
 }
 
 function normalizeExtensionEntity(input: Partial<ExtensionEntity>): ExtensionEntity {
@@ -2668,6 +3092,9 @@ function proxyToProfileSettings(proxy: ProxyEntity): BrowserProfile["proxy"] {
     username: proxy.username,
     password: proxy.password,
     bypass: proxy.bypass,
+    shareLink: proxy.shareLink,
+    preProxyId: proxy.preProxyId,
+    ipStrategy: proxy.ipStrategy,
   };
 }
 
@@ -2769,6 +3196,7 @@ function tagFromRow(row: TagRow): TagEntity {
 }
 
 function proxyFromRow(row: ProxyRow, options: { includeSecrets: boolean }): ProxyEntity {
+  const xrayNode = xrayNodeFromRow(row);
   return {
     id: row.id,
     name: row.name,
@@ -2781,6 +3209,12 @@ function proxyFromRow(row: ProxyRow, options: { includeSecrets: boolean }): Prox
     notes: row.notes,
     status: row.status,
     lastCheck: row.last_check_json ? parseJson<ProxyCheckResult>(row.last_check_json) : undefined,
+    lastLatency: row.last_latency_json ? parseJson<ProxyLatencyResult>(row.last_latency_json) : undefined,
+    shareLink: options.includeSecrets ? row.share_link ?? "" : "",
+    preProxyId: row.pre_proxy_id ?? "",
+    ipStrategy: normalizeXrayIpStrategy(row.ip_strategy),
+    ...(xrayNode ? { xrayNode } : {}),
+    subscriptionId: row.subscription_id ?? "",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

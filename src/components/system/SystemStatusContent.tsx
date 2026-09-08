@@ -191,6 +191,32 @@ export function SystemStatusContent({
         </section>
 
         <section className="settings-section">
+          <h2>{t("system.xrayEngine")}</h2>
+          <KeyValueList
+            items={[
+              { label: t("settings.binary"), value: diagnostics?.xrayEngine ? (diagnostics.xrayEngine.installed ? t("xray.installed") : t("xray.notInstalled")) : "-" },
+              { label: t("form.version"), value: diagnostics?.xrayEngine?.version ?? "-" },
+              { label: t("form.path"), value: diagnostics?.xrayEngine?.binaryPath ?? "-" },
+              { label: t("xray.releaseAsset"), value: diagnostics?.xrayEngine?.releaseAsset ?? t("xray.unsupportedPlatform") },
+              { label: t("xray.instances"), value: diagnostics?.xrayEngine?.instances.length ?? 0 },
+              { label: t("system.lastError"), value: diagnostics?.xrayEngine?.lastError ?? "-" },
+            ]}
+          />
+          {diagnostics?.xrayEngine && diagnostics.xrayEngine.instances.length > 0 && (
+            <div className="result-line">
+              {diagnostics.xrayEngine.instances.map((instance) => (
+                <div key={instance.ownerId}>
+                  {t("xray.instanceLine", { owner: instance.ownerId, port: instance.port, restarts: instance.restarts })}
+                  {" · "}
+                  {instance.preProxy ? `${instance.preProxy} → ` : ""}
+                  {instance.upstream}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="settings-section">
           <div className="settings-section-head">
             <h2>{t("system.cloakbrowserDiagnostics")}</h2>
             {/* The panel's `cloakbrowser info --proxy <url>`. Left unset the diagnostics resolve nothing and

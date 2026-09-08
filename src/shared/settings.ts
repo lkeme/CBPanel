@@ -1,8 +1,15 @@
 import type { BrowserCoreUpdateCheck } from "./browserCore";
+import type { XrayUpdateCheck } from "./entities";
 import {
   EXTENSION_ACQUISITION_DISCLOSURE_VERSION,
   type ExtensionArtifactProviderId,
 } from "./extensionAcquisition";
+import {
+  XRAY_LOG_LEVELS,
+  XRAY_UTLS_FINGERPRINTS,
+  type XrayLogLevel,
+  type XrayUtlsFingerprint,
+} from "./xray";
 
 export type ShellMode = "web" | "desktop";
 export type PlatformChrome = "native" | "custom";
@@ -38,6 +45,34 @@ export interface AppSettings {
   binary: BinarySettings;
   networkTrace: NetworkTraceSettings;
   extensionAcquisition: ExtensionAcquisitionSettings;
+  xray: XraySettings;
+}
+
+/**
+ * The Xray engine that turns share-link nodes and chained proxies into a local SOCKS5 proxy for
+ * CloakBrowser. The binary is downloaded on demand into the data directory; an operator can point
+ * the panel at their own build instead.
+ */
+/**
+ * Whether plain http/https/socks5 proxies also go through the engine. "auto" does so whenever the
+ * engine is installed and falls back to CloakBrowser's own proxy support otherwise; "always" makes the
+ * engine a hard requirement for every proxy; "never" reserves it for share-link nodes and chains.
+ */
+export type XrayNativeProxyRouting = "auto" | "always" | "never";
+
+export const XRAY_NATIVE_PROXY_ROUTINGS: readonly XrayNativeProxyRouting[] = ["auto", "always", "never"];
+
+export interface XraySettings {
+  /** An operator-supplied xray binary. Empty means the panel-managed download. */
+  customBinaryPath: string;
+  nativeProxyRouting: XrayNativeProxyRouting;
+  logLevel: XrayLogLevel;
+  /** The uTLS ClientHello TLS/REALITY node connections imitate; "auto" follows the profile's fingerprint brand. */
+  utlsFingerprint: XrayUtlsFingerprint;
+  /** Restart an engine process that dies under a running browser, the way GeekEZ recovers its proxy chain. */
+  autoRestart: boolean;
+  checkForUpdatesOnStartup: boolean;
+  lastUpdateCheck?: XrayUpdateCheck;
 }
 
 export type AppSettingsPatch = {
@@ -788,6 +823,15 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     artifactProviderId: "crxsoso",
     crxsosoDisclosureVersionAccepted: 0,
   },
+  xray: {
+    customBinaryPath: "",
+    nativeProxyRouting: "auto",
+    logLevel: "warning",
+    utlsFingerprint: "auto",
+    autoRestart: true,
+    checkForUpdatesOnStartup: false,
+    lastUpdateCheck: undefined,
+  },
 };
 
 export function normalizeSettings(input: AppSettingsPatch = {}): AppSettings {
@@ -799,6 +843,7 @@ export function normalizeSettings(input: AppSettingsPatch = {}): AppSettings {
   const binary: Partial<BinarySettings> = input.binary ?? {};
   const networkTrace: Partial<NetworkTraceSettings> = input.networkTrace ?? {};
   const extensionAcquisition: ExtensionAcquisitionSettingsInput = input.extensionAcquisition ?? {};
+  const xray: Partial<XraySettings> = input.xray ?? {};
   const closeBehavior = normalizeDesktopCloseBehavior(
     desktop.closeBehavior,
     desktop.closeToTray,
@@ -878,6 +923,31 @@ export function normalizeSettings(input: AppSettingsPatch = {}): AppSettings {
         extensionAcquisition.crxsosoDisclosureVersionAccepted,
       ),
     },
+    xray: {
+      customBinaryPath: stringValueAllowEmpty(xray.customBinaryPath, base.xray.customBinaryPath),
+      nativeProxyRouting: enumValue(xray.nativeProxyRouting, XRAY_NATIVE_PROXY_ROUTINGS, base.xray.nativeProxyRouting),
+      logLevel: enumValue(xray.logLevel, XRAY_LOG_LEVELS, base.xray.logLevel),
+      utlsFingerprint: enumValue(xray.utlsFingerprint, XRAY_UTLS_FINGERPRINTS, base.xray.utlsFingerprint),
+      autoRestart: booleanValue(xray.autoRestart, base.xray.autoRestart),
+      checkForUpdatesOnStartup: booleanValue(xray.checkForUpdatesOnStartup, base.xray.checkForUpdatesOnStartup),
+      lastUpdateCheck: normalizeXrayUpdateCheck(xray.lastUpdateCheck),
+    },
+  };
+}
+
+function normalizeXrayUpdateCheck(value: unknown): XrayUpdateCheck | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.checkedAt !== "string" || !record.checkedAt.trim()) return undefined;
+  const optionalString = (key: string): string | undefined =>
+    typeof record[key] === "string" && (record[key] as string).trim() ? (record[key] as string).trim() : undefined;
+  return {
+    checkedAt: record.checkedAt,
+    currentVersion: optionalString("currentVersion"),
+    latestVersion: optionalString("latestVersion"),
+    updateAvailable: record.updateAvailable === true,
+    downloadUrl: optionalString("downloadUrl"),
+    error: optionalString("error"),
   };
 }
 
@@ -923,6 +993,7 @@ export function mergeSettings(current: AppSettings, patch: AppSettingsPatch): Ap
     binary: { ...current.binary, ...(patch.binary ?? {}) },
     networkTrace: { ...current.networkTrace, ...(patch.networkTrace ?? {}) },
     extensionAcquisition,
+    xray: { ...current.xray, ...(patch.xray ?? {}) },
   });
 }
 

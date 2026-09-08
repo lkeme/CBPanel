@@ -294,7 +294,7 @@ export function PreflightPanel({
               {firstFailure.actions && firstFailure.actions.length > 0 && (
                 <span className="preflight-actions">
                   {firstFailure.actions.map((action) => (
-                    <button className="mini-action" disabled={busy === "binary-install"} key={`focus-${firstFailure.id}-${action.id}`} onClick={() => void onAction(action)} type="button">
+                    <button className="mini-action" disabled={busy === "binary-install" || busy === "xray-install"} key={`focus-${firstFailure.id}-${action.id}`} onClick={() => void onAction(action)} type="button">
                       {action.label}
                     </button>
                   ))}
@@ -312,7 +312,7 @@ export function PreflightPanel({
                   {item.actions && item.actions.length > 0 && (
                     <span className="preflight-actions">
                       {item.actions.map((action) => (
-                        <button className="mini-action" disabled={busy === "binary-install"} key={`${item.id}-${action.id}`} onClick={() => void onAction(action)} type="button">
+                        <button className="mini-action" disabled={busy === "binary-install" || busy === "xray-install"} key={`${item.id}-${action.id}`} onClick={() => void onAction(action)} type="button">
                           {action.label}
                         </button>
                       ))}

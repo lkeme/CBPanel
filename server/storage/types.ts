@@ -6,6 +6,8 @@ import type {
   GroupEntity,
   NetworkCheckResult,
   ProxyEntity,
+  ProxySubscriptionEntity,
+  ProxySubscriptionRefreshResult,
   TagEntity,
   TrashEnvironment,
 } from "../../src/shared/entities";
@@ -110,6 +112,15 @@ export interface RegistryRepository {
   deleteProxy(id: string): Promise<void>;
   replaceProxyReferences(id: string, targetId?: string): Promise<BrowserEnvironment[]>;
   saveProxyCheckResult(id: string, result: ProxyEntity["lastCheck"]): Promise<ProxyEntity>;
+  saveProxyLatencyResult(id: string, result: ProxyEntity["lastLatency"]): Promise<ProxyEntity>;
+  /** Proxies named by an environment or chained by another proxy; absent from the map means unused. */
+  listProxyUsage(): Promise<Map<string, { environmentIds: string[]; chainedProxyIds: string[] }>>;
+  listProxySubscriptions(options?: { includeSecrets?: boolean }): Promise<ProxySubscriptionEntity[]>;
+  getProxySubscription(id: string, options?: { includeSecrets?: boolean }): Promise<ProxySubscriptionEntity | undefined>;
+  createProxySubscription(input: Partial<ProxySubscriptionEntity>): Promise<ProxySubscriptionEntity>;
+  updateProxySubscription(id: string, patch: Partial<ProxySubscriptionEntity>): Promise<ProxySubscriptionEntity>;
+  saveProxySubscriptionRefresh(id: string, result: ProxySubscriptionRefreshResult): Promise<ProxySubscriptionEntity>;
+  deleteProxySubscription(id: string, options: { proxies: "keep" | "delete" }): Promise<{ detached: string[]; deleted: string[] }>;
   listExtensions(): Promise<ExtensionEntity[]>;
   getExtension(id: string): Promise<ExtensionEntity | undefined>;
   createExtension(input: Partial<ExtensionEntity>): Promise<ExtensionEntity>;

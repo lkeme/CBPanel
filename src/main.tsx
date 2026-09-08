@@ -53,6 +53,7 @@ import {
   type ProxyEntity,
   type SystemDiagnostics,
   type TagEntity,
+  type XrayEngineStatus,
 } from "./shared/entities";
 import {
   type BinaryInfo,
@@ -76,6 +77,7 @@ import { omitKeys, withoutIds } from "./lib/collectionState";
 import { workbenchViewFromHash, workbenchViewHash } from "./lib/workbenchNavigation";
 import { useBrowserCoreActions } from "./hooks/useBrowserCoreActions";
 import { useDiagnosticsActions } from "./hooks/useDiagnosticsActions";
+import { shouldRunStartupXrayUpdateCheck, useXrayActions } from "./hooks/useXrayActions";
 import { useExtensionActions } from "./hooks/useExtensionActions";
 import {
   type AbortableSingleFlight,
@@ -93,7 +95,7 @@ import {
 } from "./hooks/profileLaunchState";
 import { useProfileLifecycleActions } from "./hooks/useProfileLifecycleActions";
 import { useProfileUtilityActions } from "./hooks/useProfileUtilityActions";
-import { useProxyActions } from "./hooks/useProxyActions";
+import { type ProxySubscriptionEditorState, useProxyActions } from "./hooks/useProxyActions";
 import { useRegistryActions } from "./hooks/useRegistryActions";
 import { type Locale, type TranslationKey, ensureLocaleReady, isLocaleReady, localeFromMode, translate } from "./i18n";
 import "subsetted-fonts/SarasaUiSC-Regular/SarasaUiSC-Regular.css";
@@ -330,6 +332,14 @@ function App() {
     shouldWait: (nextState) => Boolean(nextState),
     ensureReady: ensureRegistryDialogsReady,
   });
+  const [proxyImport, setProxyImport] = useDeferredOpenState<boolean>(false, {
+    shouldWait: (nextState) => nextState,
+    ensureReady: ensureRegistryDialogsReady,
+  });
+  const [proxySubscriptionEditor, setProxySubscriptionEditor] = useDeferredOpenState<ProxySubscriptionEditorState>(null, {
+    shouldWait: (nextState) => Boolean(nextState),
+    ensureReady: ensureRegistryDialogsReady,
+  });
   const [registryEditor, setRegistryEditor] = useDeferredOpenState<RegistryEditorState>(null, {
     shouldWait: (nextState) => Boolean(nextState),
     ensureReady: ensureRegistryDialogsReady,
@@ -356,6 +366,7 @@ function App() {
   });
   const [proxyCheck, setProxyCheck] = useState("");
   const [binaryInfo, setBinaryInfo] = useState<BinaryInfo | null>(null);
+  const [xrayStatus, setXrayStatus] = useState<XrayEngineStatus | null>(null);
   const [preflight, setPreflight] = useState<ProfilePreflightReport | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [runtime, setRuntime] = useState<DesktopRuntimeInfo | null>(null);
@@ -372,6 +383,7 @@ function App() {
   const settingsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const settingsSaveSeqRef = useRef(0);
   const startupBrowserCoreCheckDone = useRef(false);
+  const startupXrayCheckDone = useRef(false);
   const workbenchNavigationSourceRef = useRef<"initial" | "hash" | "state">("initial");
   const previousWorkbenchViewRef = useRef(workbenchView);
 
@@ -445,6 +457,21 @@ function App() {
     startupBrowserCoreCheckDone.current = true;
     void checkBrowserCoreUpdate({ silent: true });
   }, [binaryInfo, settings, state]);
+
+  useEffect(() => {
+    if (startupXrayCheckDone.current || !state || !xrayStatus?.installed) return;
+    const xraySettings = normalizeSettings(settings).xray;
+    if (!xraySettings.checkForUpdatesOnStartup) return;
+    if (!shouldRunStartupXrayUpdateCheck(xrayStatus.lastUpdateCheck ?? xraySettings.lastUpdateCheck)) return;
+    startupXrayCheckDone.current = true;
+    void checkXrayUpdate({ silent: true });
+  }, [settings, state, xrayStatus]);
+
+  // The editor and the settings drawer both show the engine's state; re-read it when they open so an
+  // install done elsewhere (another window, the desktop shell) is reflected without a reload.
+  useEffect(() => {
+    if (drawerMode === "edit" || drawerMode === "settings") void loadXrayStatus();
+  }, [drawerMode]);
 
   useEffect(() => {
     if (runtime?.shell !== "desktop") return;
@@ -632,6 +659,8 @@ function App() {
   const RegistryMergeDialogRenderer = RegistryDialogsRenderer?.RegistryMergeDialog;
   const ExtensionImportDialogRenderer = RegistryDialogsRenderer?.ExtensionImportDialog;
   const ProxyReferenceDialogRenderer = RegistryDialogsRenderer?.ProxyReferenceDialog;
+  const ProxyImportDialogRenderer = RegistryDialogsRenderer?.ProxyImportDialog;
+  const ProxySubscriptionDialogRenderer = RegistryDialogsRenderer?.ProxySubscriptionDialog;
   const TextInputDialogRenderer = RegistryDialogsRenderer?.TextInputDialog;
 
   useEffect(() => {
@@ -653,7 +682,7 @@ function App() {
     const bridgeError = await initializeDesktopBridge(t, setRuntime);
     setRuntimeError(bridgeError);
     if (bridgeError) return;
-    await Promise.all([loadState(), loadBinaryInfo(false), loadRuntimeInfo(), loadDiagnostics()]);
+    await Promise.all([loadState(), loadBinaryInfo(false), loadRuntimeInfo(), loadDiagnostics(), loadXrayStatus()]);
   }
 
   async function loadState(signal?: AbortSignal): Promise<PanelState> {
@@ -1050,6 +1079,9 @@ function App() {
           username: draft.proxy.username,
           password: draft.proxy.password,
           bypass: draft.proxy.bypass,
+          shareLink: draft.proxy.shareLink,
+          preProxyId: draft.proxy.preProxyId,
+          ipStrategy: draft.proxy.ipStrategy,
           status: "enabled",
         }),
       });
@@ -1103,6 +1135,23 @@ function App() {
     t,
     toast,
   });
+  const { checkXrayUpdate, installXray, loadXrayStatus } = useXrayActions({
+    setBusy,
+    setXrayStatus,
+    t,
+    toast,
+  });
+
+  // An install changes what the last preflight said about the engine. Refresh the report for the open
+  // draft and the diagnostics page, so the panel stops pointing at an install that already happened.
+  async function installXrayEngine(): Promise<boolean> {
+    const installed = await installXray();
+    if (installed) {
+      void loadDiagnostics();
+      if (draft && preflight?.profileId === draft.id) await checkPreflight();
+    }
+    return installed;
+  }
   const {
     copyDiagnostics,
     exportDiagnostics,
@@ -1144,24 +1193,37 @@ function App() {
     toast,
   });
   const {
+    batchCheckProxies,
+    batchMeasureProxyLatency,
     checkManagedProxy,
     deleteProxyNow,
     duplicateProxy,
+    importProxyLinks,
+    importProxySubscription,
+    measureProxyLatency,
     openProxyEditor,
+    openProxySubscriptionEditor,
     proxyReferenceCount,
+    refreshAllProxySubscriptions,
+    refreshProxySubscription,
+    requestBatchProxyDelete,
+    requestProxySubscriptionDelete,
     replaceProxyReferences,
     replaceProxyReferencesAndDelete,
     requestProxyDelete,
     saveProxyDraft,
+    saveProxySubscription,
     unbindProxyReferences,
     unbindProxyReferencesAndDelete,
     updateProxy,
+    updateProxySubscription,
   } = useProxyActions({
     loadState,
     setBusy,
     setConfirmDialog,
     setProxyEditor,
     setProxyReference,
+    setProxySubscriptionEditor,
     state,
     t,
     toast,
@@ -1307,6 +1369,10 @@ function App() {
   async function runPreflightAction(action: ProfilePreflightAction) {
     if (action.kind === "install-binary") {
       await installBinary();
+      return;
+    }
+    if (action.kind === "install-xray") {
+      await installXrayEngine();
       return;
     }
     if (action.kind === "open-tab" && action.target) {
@@ -1542,8 +1608,10 @@ function App() {
                       allPageSelected={allPageSelected}
                       columns={visibleColumns}
                       environments={state?.environments ?? []}
+                      groups={state?.groups ?? []}
                       profiles={pagedProfiles}
                       proxies={state?.proxies ?? []}
+                      tags={state?.tags ?? []}
                       pendingLaunchIds={pendingLaunchIds}
                       pendingStopIds={pendingStopIds}
                       selectedId={selectedId}
@@ -1596,18 +1664,24 @@ function App() {
                       trash={state?.trash ?? []}
                       view={workbenchView}
                       openBrowserCoreSettings={() => openSettings("browserCore")}
+                      batchCheckProxies={batchCheckProxies}
+                      batchMeasureProxyLatency={batchMeasureProxyLatency}
+                      measureProxyLatency={measureProxyLatency}
+                      requestBatchProxyDelete={requestBatchProxyDelete}
                       checkManagedProxy={checkManagedProxy}
                       clearTrashEnvironments={clearTrashEnvironments}
                       deleteExtension={deleteExtension}
                       duplicateProxy={duplicateProxy}
                       editGroup={(group) => setRegistryEditor({ kind: "group", mode: "edit", entity: group })}
                       editProxy={(proxy) => openProxyEditor("edit", proxy)}
+                      editProxySubscription={(subscription) => openProxySubscriptionEditor("edit", subscription)}
                       editTag={(tag) => setRegistryEditor({ kind: "tag", mode: "edit", entity: tag })}
                       checkExtension={checkExtension}
                       checkExtensionUpdate={checkExtensionUpdate}
                       showProfiles={showProfileView}
                       importExtensionArchive={(kind) => setExtensionImport({ kind })}
                       importExtensionDirectory={() => setExtensionImport({ kind: "directory" })}
+                      importProxies={() => setProxyImport(true)}
                       installExtension={installExtension}
                       mergeGroup={(group) => setRegistryMerge({ kind: "group", entity: group })}
                       mergeTag={(tag) => setRegistryMerge({ kind: "tag", entity: tag })}
@@ -1615,6 +1689,10 @@ function App() {
                       newGroup={() => setRegistryEditor({ kind: "group", mode: "create" })}
                       newTag={() => setRegistryEditor({ kind: "tag", mode: "create" })}
                       newProxy={() => openProxyEditor("create")}
+                      newProxySubscription={() => openProxySubscriptionEditor("create")}
+                      refreshAllProxySubscriptions={refreshAllProxySubscriptions}
+                      refreshProxySubscription={refreshProxySubscription}
+                      requestProxySubscriptionDelete={requestProxySubscriptionDelete}
                       reinstallExtension={reinstallExtension}
                       permanentlyDeleteTrashEnvironment={permanentlyDeleteTrashEnvironment}
                       pruneBrowserData={pruneBrowserData}
@@ -1630,6 +1708,7 @@ function App() {
                       updateExtension={updateExtension}
                       updateGroup={updateGroup}
                       updateProxy={updateProxy}
+                      updateProxySubscription={updateProxySubscription}
                       updateTag={updateTag}
                     />
                   </Suspense>
@@ -1700,6 +1779,9 @@ function App() {
           launchProfile={() => launchProfile()}
           importConfigFromClipboard={importDraftConfigFromClipboard}
           shareConfigToClipboard={shareDraftConfigToClipboard}
+          installXray={installXrayEngine}
+          nativeProxyRouting={normalizedSettings.xray.nativeProxyRouting}
+          xrayStatus={xrayStatus}
           t={t}
         />
       )}
@@ -1728,6 +1810,9 @@ function App() {
           t={t}
           updateBinary={updateBinary}
           clearBinaryCache={clearBinaryCache}
+          checkXrayUpdate={checkXrayUpdate}
+          installXray={installXrayEngine}
+          xrayStatus={xrayStatus}
         />
       )}
 
@@ -1763,8 +1848,30 @@ function App() {
           busy={busy}
           close={() => setProxyEditor(null)}
           mode={proxyEditor.mode}
+          proxies={state?.proxies ?? []}
           proxy={proxyEditor.mode === "edit" ? proxyEditor.proxy : undefined}
           saveProxy={saveProxyDraft}
+          t={t}
+        />
+      )}
+
+      {proxyImport && ProxyImportDialogRenderer && (
+        <ProxyImportDialogRenderer
+          busy={busy}
+          close={() => setProxyImport(false)}
+          importLinks={importProxyLinks}
+          importSubscription={importProxySubscription}
+          t={t}
+        />
+      )}
+
+      {proxySubscriptionEditor && ProxySubscriptionDialogRenderer && (
+        <ProxySubscriptionDialogRenderer
+          busy={busy}
+          close={() => setProxySubscriptionEditor(null)}
+          mode={proxySubscriptionEditor.mode}
+          saveSubscription={saveProxySubscription}
+          subscription={proxySubscriptionEditor.mode === "edit" ? proxySubscriptionEditor.subscription : undefined}
           t={t}
         />
       )}
@@ -1905,6 +2012,7 @@ function settingsPatchFromNext(patch: AppSettingsPatch, nextSettings: AppSetting
     ...(patch.extensionAcquisition !== undefined
       ? { extensionAcquisition: nextSettings.extensionAcquisition }
       : {}),
+    ...(patch.xray !== undefined ? { xray: nextSettings.xray } : {}),
   };
 }
 

@@ -8,7 +8,9 @@ import {
   parseProxyUrlInput,
   proxyUrlFromParts,
 } from "../../shared/profile";
-import type { BrowserEnvironment, ProxyEntity } from "../../shared/entities";
+import type { BrowserEnvironment, ProxyEntity, XrayEngineStatus } from "../../shared/entities";
+import type { XrayNativeProxyRouting } from "../../shared/settings";
+import { detectXrayShareLinkProtocol } from "../../shared/xray";
 import { Field, Segmented } from "../ui/form-controls";
 import { Switch } from "../ui/switch";
 import { ManagedProxyPicker, ManualProxyFields, ProxyCheckPanel, type ProxySourceMode } from "./ProfileEditorProxyFields";
@@ -26,13 +28,19 @@ export function ProfileEditorProxyTab({
   proxyLibraryDraftIds,
   proxyCheck,
   checkProxy,
+  installXray,
+  nativeProxyRouting,
   resolveProxyGeoip,
   saveDraftProxyToLibrary,
   t,
+  xrayStatus,
 }: {
   copyManagedProxyToLocal: () => void;
   draft: BrowserProfile;
   environments: BrowserEnvironment[];
+  installXray?: () => Promise<unknown>;
+  nativeProxyRouting?: XrayNativeProxyRouting;
+  xrayStatus?: XrayEngineStatus | null;
   setDraft: (draft: BrowserProfile) => void;
   setDraftProxyLibraryId: (draftId: string, proxyId: string) => void;
   setDraftProxyLocal: (draftId: string) => void;
@@ -76,6 +84,9 @@ export function ProfileEditorProxyTab({
         username: proxy.username,
         password: proxy.password,
         bypass: proxy.bypass,
+        shareLink: proxy.shareLink,
+        preProxyId: proxy.preProxyId,
+        ipStrategy: proxy.ipStrategy,
       },
     });
   };
@@ -98,6 +109,18 @@ export function ProfileEditorProxyTab({
     });
   };
   const updateProxyRaw = (value: string) => {
+    // A node link pasted into the URL field is the most natural way to reach for the engine: switch the
+    // scheme instead of rejecting it as an invalid proxy URL.
+    const shareProtocol = detectXrayShareLinkProtocol(value);
+    if (shareProtocol && shareProtocol !== "socks" && shareProtocol !== "http") {
+      setProxyUrlText("");
+      setProxyUrlError("");
+      setDraft({
+        ...draft,
+        proxy: { ...draft.proxy, scheme: "xray", shareLink: value.trim(), raw: "", host: "", port: "", username: "", password: "" },
+      });
+      return;
+    }
     const parsed = parseProxyUrlInput(value);
     setProxyUrlText(value);
     setProxyUrlError(value.trim() && !parsed ? t("error.proxyUrlInvalid") : "");
@@ -167,6 +190,7 @@ export function ProfileEditorProxyTab({
       )}
       <ManualProxyFields
         draft={draft}
+        proxies={proxies}
         proxyEnabled={proxyEnabled}
         proxyUrlError={proxyUrlError}
         proxyUrlText={proxyUrlText}
@@ -181,7 +205,11 @@ export function ProfileEditorProxyTab({
         checkProxy={checkProxy}
         copyManagedProxyToLocal={copyManagedProxyToLocal}
         currentProxyUrl={currentProxyUrl}
+        draft={draft}
+        installXray={installXray}
+        nativeProxyRouting={nativeProxyRouting}
         proxyEnabled={proxyEnabled}
+        xrayStatus={xrayStatus}
         proxyUrlError={proxyUrlError}
         resolveProxyGeoip={resolveProxyGeoip}
         saveDraftProxyToLibrary={saveDraftProxyToLibrary}

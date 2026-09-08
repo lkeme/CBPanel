@@ -1,5 +1,6 @@
 import type { CloakBrowserDiagnostics } from "./browserCore";
 import type { BrowserProfile, ProfileMode, ProxyScheme } from "./profile";
+import type { XrayIpStrategy, XrayNodeSummary } from "./xray";
 import type {
   ExtensionProvenanceV1,
   ExtensionStoreIdentity,
@@ -111,6 +112,36 @@ export interface NetworkCheckResult {
 
 export type ProxyCheckResult = NetworkCheckResult;
 
+/**
+ * A "real latency" probe: one round trip through the proxy to a small always-on endpoint, the
+ * number v2rayN and GeekEZ show next to a node. Distinct from the exit check, which asks a trace
+ * provider who the proxy is and is dominated by that provider's own response time.
+ */
+export interface ProxyLatencyResult {
+  checkedAt: string;
+  ok: boolean;
+  latencyMs?: number;
+  /** The probe endpoint that answered first. */
+  target?: string;
+  error?: string;
+}
+
+export interface ProxyBatchCheckResult {
+  id: string;
+  result: NetworkCheckResult;
+}
+
+export interface ProxyBatchLatencyResult {
+  id: string;
+  result: ProxyLatencyResult;
+}
+
+export interface ProxyBatchDeleteResult {
+  deleted: string[];
+  /** Proxies still bound to environments; they are kept, with how many environments hold them. */
+  blocked: Array<{ id: string; name: string; count: number }>;
+}
+
 export interface ProxyEntity {
   id: string;
   name: string;
@@ -123,8 +154,122 @@ export interface ProxyEntity {
   notes: string;
   status: EntityStatus;
   lastCheck?: ProxyCheckResult;
+  lastLatency?: ProxyLatencyResult;
+  /** Xray share link; a secret like `password`, so "" unless secrets were requested. */
+  shareLink: string;
+  /** Front proxy (another library entry) for a `[local] -> [front] -> [this] -> [target]` chain, or "". */
+  preProxyId: string;
+  ipStrategy: XrayIpStrategy;
+  /** Server-derived, credential-free view of an xray node so the panel can badge and search it without the link. */
+  xrayNode?: XrayNodeSummary;
+  /**
+   * The remembered subscription this entry came from, or ""/undefined for a standalone proxy. A
+   * refresh of that subscription may rename, replace or remove a member; standalone proxies are never
+   * touched by a refresh.
+   */
+  subscriptionId?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** The outcome of importing pasted share links or a subscription body into the proxy library. */
+export interface ProxyImportResult {
+  imported: ProxyEntity[];
+  /** Masked links, never the pasted ones: a failed line may still carry a credential. Capped; see failedTotal. */
+  failed: Array<{ link: string; error: string }>;
+  failedTotal: number;
+  /** Links already present in the library. */
+  skipped: number;
+  /** Standalone proxies from an earlier import of the same address that a remembered subscription took over. */
+  adopted?: number;
+  total: number;
+  sourceUrl?: string;
+  /** The subscription that was remembered for this import, when the caller asked for one. */
+  subscription?: ProxySubscriptionEntity;
+}
+
+/** What one refresh of a remembered subscription did to the library. */
+export interface ProxySubscriptionRefreshResult {
+  checkedAt: string;
+  ok: boolean;
+  /** Nodes newly created for the subscription. */
+  added: number;
+  /** Members whose node is still listed; a changed remark renames them in place. */
+  kept: number;
+  /** Members no longer listed and not in use, so they were deleted. */
+  removed: number;
+  /** Members bound to an environment or chained by another proxy; they left the subscription as standalone proxies. */
+  detached: number;
+  /** Listed nodes that already exist as standalone (or another subscription's) proxies and were left alone. */
+  skipped: number;
+  /** Lines of the body that were not parsable node links. */
+  failed: number;
+  /** Node links the body contained. */
+  total: number;
+  error?: string;
+}
+
+/**
+ * A remembered subscription address. Its members are the proxies whose `subscriptionId` names it;
+ * refreshing re-reads the address and makes the members match it.
+ */
+export interface ProxySubscriptionEntity {
+  id: string;
+  name: string;
+  /** The address itself; it usually carries a token, so it is a secret: "" unless secrets were requested. */
+  url: string;
+  /** Credential-free `host` of the address for lists and search. */
+  urlHost: string;
+  status: EntityStatus;
+  autoRefresh: boolean;
+  refreshIntervalHours: number;
+  lastRefresh?: ProxySubscriptionRefreshResult;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const PROXY_SUBSCRIPTION_INTERVAL_HOURS = [1, 3, 6, 12, 24, 72, 168] as const;
+export const DEFAULT_PROXY_SUBSCRIPTION_INTERVAL_HOURS = 24;
+
+export type XrayEngineOperationType = "install" | "update" | "check-update";
+
+export interface XrayUpdateCheck {
+  checkedAt: string;
+  currentVersion?: string;
+  latestVersion?: string;
+  updateAvailable: boolean;
+  downloadUrl?: string;
+  error?: string;
+}
+
+/** One running Xray-core process, owned by exactly one browser session or check. */
+export interface XrayEngineInstance {
+  ownerId: string;
+  /** Loopback SOCKS5 port CloakBrowser (or the exit check) was pointed at. */
+  port: number;
+  pid?: number;
+  startedAt: string;
+  /** Masked `protocol://host:port` of the target node. */
+  upstream: string;
+  /** Masked front proxy when the instance is a chain, otherwise undefined. */
+  preProxy?: string;
+  restarts: number;
+}
+
+export interface XrayEngineStatus {
+  installed: boolean;
+  /** Where the binary was found: the panel-managed download, an operator path from settings, or nowhere. */
+  source: "managed" | "custom" | "missing";
+  binaryPath: string;
+  binaryDir: string;
+  version?: string;
+  /** The GitHub release asset this platform downloads, or undefined when Xray ships no build for it. */
+  releaseAsset?: string;
+  lastUpdateCheck?: XrayUpdateCheck;
+  operation?: { type: XrayEngineOperationType; startedAt: string };
+  instances: XrayEngineInstance[];
+  lastError?: string;
 }
 
 export interface ExtensionPermissionRisk {
@@ -327,6 +472,7 @@ export interface SystemDiagnostics {
   };
   extensionCache: ExtensionCacheDiagnostics;
   browserCoreDiagnostics?: CloakBrowserDiagnostics;
+  xrayEngine?: XrayEngineStatus;
   recentErrors: Array<{
     at: string;
     source: string;

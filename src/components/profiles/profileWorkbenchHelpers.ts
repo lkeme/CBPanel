@@ -1,6 +1,7 @@
 import type { TranslationKey } from "../../i18n";
 import type { BrowserProfile, PanelState, ProxySettings } from "../../shared/profile";
 import { buildProxyUrl, parseProxyUrlInput, validateStartUrl } from "../../shared/profile";
+import { tryParseXrayShareLink } from "../../shared/xray";
 import type { ProxyEntity, TrashEnvironment } from "../../shared/entities";
 import type { AppSettings } from "../../shared/settings";
 import { normalizeSettings } from "../../shared/settings";
@@ -18,6 +19,11 @@ export function selectedProxyIdForDraft(
 }
 
 export function proxyNameFromSettings(proxy: ProxySettings): string {
+  // A node's remark is the name its provider gave it, which beats a bare address in a library list.
+  if (proxy.scheme === "xray") {
+    const parsed = tryParseXrayShareLink(proxy.shareLink);
+    if (parsed) return parsed.summary.remark || `${parsed.summary.address}:${parsed.summary.port}`;
+  }
   const host = proxy.host.trim();
   const port = proxy.port.trim();
   if (host && port) return `${host}:${port}`;

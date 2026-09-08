@@ -5,14 +5,27 @@ import type {
   GroupEntity,
   NetworkCheckResult,
   ProxyEntity,
+  ProxySubscriptionEntity,
   TagEntity,
   TrashEnvironment,
 } from "./entities";
 import { networkCheckSummaryText } from "./networkCheckDisplay";
+import {
+  XRAY_IP_STRATEGIES,
+  type XrayIpStrategy,
+  describeXrayNode,
+  maskXrayShareLink,
+  parseXrayShareLink,
+  tryParseXrayShareLink,
+} from "./xray";
 
 export type ProfileMode = "persistent" | "ephemeral";
 export type LauncherKind = "playwright-context" | "playwright-browser" | "puppeteer-browser";
-export type ProxyScheme = "http" | "https" | "socks5";
+/**
+ * `xray` is not a URL scheme CloakBrowser understands: it marks a share-link node (vmess/vless/
+ * trojan/ss/…) that the panel's Xray engine turns into a local SOCKS5 proxy at launch.
+ */
+export type ProxyScheme = "http" | "https" | "socks5" | "xray";
 export type FingerprintPlatform = "auto" | "windows" | "macos" | "linux";
 export type ColorScheme = "light" | "dark" | "no-preference";
 export type HumanPreset = "default" | "careful";
@@ -36,6 +49,16 @@ export interface ProxySettings {
   username: string;
   password: string;
   bypass: string;
+  /** The Xray share link. Only read when `scheme` is `xray`; carries the node's credentials. */
+  shareLink: string;
+  /**
+   * A proxy-library id used as the front proxy of a `[local] -> [front] -> [this proxy] -> [target]`
+   * chain, or "" for no chain. Any scheme can be chained: setting this routes the launch through
+   * the Xray engine even for a plain socks5/http proxy.
+   */
+  preProxyId: string;
+  /** How the Xray engine resolves the node address when it dials it (dual-stack policy). */
+  ipStrategy: XrayIpStrategy;
 }
 
 export type ProxyUrlParts = Pick<ProxySettings, "scheme" | "host" | "port" | "username" | "password">;
@@ -208,7 +231,7 @@ export interface ProfileAuditReport {
 
 export type PreflightSeverity = AuditSeverity;
 export type PreflightCategory = AuditCategory | "environment";
-export type PreflightActionKind = "install-binary" | "open-tab";
+export type PreflightActionKind = "install-binary" | "install-xray" | "open-tab";
 export type PreflightActionTarget = "runtime" | "proxy" | "fingerprint" | "advanced";
 
 export interface ProfilePreflightAction {
@@ -239,6 +262,17 @@ export interface ProfilePreflightEnvironment {
   extensionErrors?: Array<{ name: string; detail: string }>;
   extensionWarnings?: Array<{ name: string; detail: string }>;
   networkCheck?: NetworkCheckResult;
+  /** Present only when the profile's proxy needs the Xray engine; absent means nothing was asked. */
+  xrayEngine?: ProfilePreflightXrayEngine;
+}
+
+export interface ProfilePreflightXrayEngine {
+  installed: boolean;
+  binaryPath?: string;
+  version?: string;
+  detail?: string;
+  /** The front proxy the profile names, resolved: a missing or disabled one is a launch failure. */
+  preProxy?: { id: string; name?: string; ok: boolean; detail?: string };
 }
 
 export interface ProfilePreflightReport {
@@ -304,6 +338,7 @@ export interface PanelState {
   groups?: GroupEntity[];
   tags?: TagEntity[];
   proxies?: ProxyEntity[];
+  proxySubscriptions?: ProxySubscriptionEntity[];
   extensions?: ExtensionEntity[];
   trash?: TrashEnvironment[];
   sessions: SessionSummary[];
@@ -489,6 +524,9 @@ export function defaultProfile(input: Partial<BrowserProfile> = {}): BrowserProf
       username: "",
       password: "",
       bypass: "localhost,127.0.0.1",
+      shareLink: "",
+      preProxyId: "",
+      ipStrategy: "auto",
     },
     fingerprint: {
       seed: "",
@@ -579,10 +617,7 @@ export function normalizeProfile(input: Partial<BrowserProfile>): BrowserProfile
     group: profile.group.trim() || "默认",
     tags: uniqueTags(profile.tags),
     startUrl: profile.startUrl.trim(),
-    proxy: {
-      ...profile.proxy,
-      scheme: normalizeProxyScheme(profile.proxy.scheme) ?? "http",
-    },
+    proxy: normalizeProxySettings(profile.proxy),
     updatedAt: profile.updatedAt || nowIso(),
     verification: {
       detectionChecks: normalizeDetectionChecks(profile.verification.detectionChecks),
@@ -855,8 +890,103 @@ export function parseOptionalJsonObject(label: string, value: string): Record<st
 
 export function normalizeProxyScheme(value: string): ProxyScheme | undefined {
   const scheme = value.toLowerCase();
-  if (scheme === "http" || scheme === "https" || scheme === "socks5") return scheme;
+  if (scheme === "http" || scheme === "https" || scheme === "socks5" || scheme === "xray") return scheme;
   return undefined;
+}
+
+export function normalizeXrayIpStrategy(value: unknown): XrayIpStrategy {
+  return typeof value === "string" && (XRAY_IP_STRATEGIES as readonly string[]).includes(value)
+    ? (value as XrayIpStrategy)
+    : "auto";
+}
+
+/**
+ * The stored shape with the engine fields made total. An `xray` proxy keeps `host`/`port` in step
+ * with its share link so every place that prints `scheme://host:port` — the table, the library
+ * row, the launch plan — shows the node without having to parse the link itself.
+ */
+export function normalizeProxySettings(proxy: ProxySettings): ProxySettings {
+  const scheme = normalizeProxyScheme(proxy.scheme) ?? "http";
+  const shareLink = typeof proxy.shareLink === "string" ? proxy.shareLink.trim() : "";
+  const normalized: ProxySettings = {
+    ...proxy,
+    scheme,
+    shareLink,
+    preProxyId: typeof proxy.preProxyId === "string" ? proxy.preProxyId.trim() : "",
+    ipStrategy: normalizeXrayIpStrategy(proxy.ipStrategy),
+  };
+  if (scheme === "xray") {
+    const parsed = tryParseXrayShareLink(shareLink);
+    if (parsed) {
+      normalized.host = parsed.summary.address;
+      normalized.port = String(parsed.summary.port);
+    }
+    normalized.raw = "";
+    normalized.username = "";
+    normalized.password = "";
+  }
+  return normalized;
+}
+
+/** Whether a launch through this proxy has to go through the Xray engine rather than straight to CloakBrowser. */
+export function proxyRequiresXray(proxy: Pick<ProxySettings, "enabled" | "scheme" | "preProxyId">): boolean {
+  return proxy.enabled && (proxy.scheme === "xray" || Boolean(proxy.preProxyId?.trim()));
+}
+
+export type XrayRoutingDecisionInput = {
+  /** The `xray.nativeProxyRouting` setting. */
+  nativeProxyRouting: "auto" | "always" | "never";
+  engineInstalled: boolean;
+};
+
+/**
+ * Whether a launch (and every check) of this proxy goes through the engine once the routing setting
+ * is applied: nodes and chains always do, plain proxies follow the setting. The one place both the
+ * server and the panel decide it, so the editor's hint and the launch never disagree.
+ */
+export function proxyUsesXray(
+  proxy: Pick<ProxySettings, "enabled" | "scheme" | "preProxyId">,
+  decision: XrayRoutingDecisionInput,
+): boolean {
+  if (!proxy.enabled) return false;
+  if (proxyRequiresXray(proxy)) return true;
+  if (decision.nativeProxyRouting === "always") return true;
+  if (decision.nativeProxyRouting === "auto") return decision.engineInstalled;
+  return false;
+}
+
+/** The same profile pointed at the engine's local SOCKS5 inbound, which is what CloakBrowser is actually launched with. */
+export function withLocalXrayProxy(profile: BrowserProfile, localPort: number): BrowserProfile {
+  return {
+    ...profile,
+    proxy: {
+      enabled: true,
+      raw: "",
+      scheme: "socks5",
+      host: "127.0.0.1",
+      port: String(localPort),
+      username: "",
+      password: "",
+      bypass: profile.proxy.bypass,
+      shareLink: "",
+      preProxyId: "",
+      ipStrategy: "auto",
+    },
+  };
+}
+
+/** `protocol · transport · detail` for an xray proxy, or undefined when the link does not parse. */
+export function describeXrayProxy(proxy: Pick<ProxySettings, "scheme" | "shareLink">): string | undefined {
+  if (proxy.scheme !== "xray") return undefined;
+  const parsed = tryParseXrayShareLink(proxy.shareLink);
+  return parsed ? describeXrayNode(parsed.summary) : undefined;
+}
+
+function xrayProxyUrl(proxy: Pick<ProxySettings, "shareLink">): string | undefined {
+  const parsed = tryParseXrayShareLink(proxy.shareLink);
+  if (!parsed) return undefined;
+  const host = parsed.summary.address.includes(":") ? `[${parsed.summary.address}]` : parsed.summary.address;
+  return `xray://${host}:${parsed.summary.port}`;
 }
 
 export function parseProxyUrlInput(value: string): ProxyUrlParts | undefined {
@@ -889,6 +1019,8 @@ export function proxyUrlFromParts(proxy: ProxyUrlParts): string {
   if (!host || !port) return "";
   const scheme = normalizeProxyScheme(proxy.scheme);
   if (!scheme) return "";
+  // The node's credentials live in the share link, never in the URL.
+  if (scheme === "xray") return `xray://${host}:${port}`;
 
   const auth =
     proxy.username.trim() || proxy.password.trim()
@@ -899,6 +1031,9 @@ export function proxyUrlFromParts(proxy: ProxyUrlParts): string {
 
 export function buildProxyUrl(proxy: ProxySettings): string | undefined {
   if (!proxy.enabled) return undefined;
+  // An xray proxy is complete exactly when its share link parses; `raw` and the parts are display
+  // projections of the link, so they are never the authority here.
+  if (proxy.scheme === "xray") return xrayProxyUrl(proxy);
   const raw = proxy.raw.trim();
   if (raw) {
     const parsed = parseProxyUrlInput(raw);
@@ -987,6 +1122,7 @@ export function maskProfileSecrets(profile: BrowserProfile): BrowserProfile {
       ...profile.proxy,
       raw: maskProxyUrl(profile.proxy.raw),
       password: profile.proxy.password ? "****" : "",
+      shareLink: maskXrayShareLink(profile.proxy.shareLink ?? ""),
     },
     advanced: {
       launchOptionsJson: maskAdvancedJsonString(profile.advanced.launchOptionsJson),
@@ -1112,7 +1248,11 @@ export function buildLaunchPreview(
   const proxy = buildProxyUrl(profile.proxy);
   const proxyOption = buildProxyOption(profile.proxy);
   if (profile.proxy.enabled && !proxy) {
-    throw new Error("代理已启用，但代理 URL 或 host/port 不完整，或协议不受支持。");
+    throw new Error(
+      profile.proxy.scheme === "xray"
+        ? `代理已启用，但 Xray 分享链接无法解析：${xrayShareLinkProblem(profile.proxy.shareLink)}`
+        : "代理已启用，但代理 URL 或 host/port 不完整，或协议不受支持。",
+    );
   }
   const args = buildFingerprintArgs(profile);
   const launchOptions = sanitizeLaunchOptions(parseOptionalJsonObject("launchOptions", advanced.launchOptionsJson));
@@ -1305,14 +1445,24 @@ export function preflightProfile(
   }
 
   if (profile.proxy.enabled) {
+    const xrayNode = describeXrayProxy(profile.proxy);
     pushPreflight(items, {
       id: "proxy-config",
       category: "network",
       severity: proxyUrl ? "pass" : "fail",
       title: "代理配置",
-      detail: proxyUrl ? `已配置 ${maskProxyUrl(proxyUrl)}。` : "代理已启用，但 URL 或 host/port 不完整。",
+      detail: proxyUrl
+        ? xrayNode
+          ? `已配置 Xray 节点 ${maskProxyUrl(proxyUrl)}（${xrayNode}）。`
+          : `已配置 ${maskProxyUrl(proxyUrl)}。`
+        : profile.proxy.scheme === "xray"
+          ? `Xray 分享链接无法解析：${xrayShareLinkProblem(profile.proxy.shareLink)}`
+          : "代理已启用，但 URL 或 host/port 不完整。",
       actions: proxyUrl ? undefined : [openTabAction("proxy", "补全代理")],
     });
+    // A hard requirement (node or chain) is reported even without engine information; a plain proxy
+    // routed through the engine by settings is reported when the environment says it will be.
+    if (proxyRequiresXray(profile.proxy) || environment.xrayEngine) pushXrayEnginePreflight(items, profile, environment.xrayEngine);
   } else {
     pushPreflight(items, {
       id: "proxy-config",
@@ -1922,6 +2072,61 @@ function openTabAction(target: PreflightActionTarget, label: string): ProfilePre
     label,
     target,
   };
+}
+
+function xrayShareLinkProblem(shareLink: string): string {
+  try {
+    parseXrayShareLink(shareLink);
+    return "未知错误";
+  } catch (error) {
+    return (error as Error).message;
+  }
+}
+
+// The engine is a second binary next to the browser core, and a proxy that needs it cannot launch
+// without it — so its absence is a failure with an install action, exactly like the core's.
+function pushXrayEnginePreflight(
+  items: ProfilePreflightItem[],
+  profile: BrowserProfile,
+  engine: ProfilePreflightXrayEngine | undefined,
+): void {
+  const chained = Boolean(profile.proxy.preProxyId.trim());
+  const role = chained ? "链式代理（前置代理 → 目标代理）" : profile.proxy.scheme === "xray" ? "分享链接节点" : "原生代理经引擎中转";
+  if (!engine) {
+    pushPreflight(items, {
+      id: "xray-engine",
+      category: "environment",
+      severity: "info",
+      title: "Xray 引擎",
+      detail: `该代理需要 Xray 引擎中转（${role}）；当前报告未包含引擎状态。`,
+    });
+    return;
+  }
+  pushPreflight(items, {
+    id: "xray-engine",
+    category: "environment",
+    severity: engine.installed ? "pass" : "fail",
+    title: "Xray 引擎",
+    detail: engine.installed
+      ? `已安装${engine.version ? ` ${engine.version}` : ""}${engine.binaryPath ? `：${engine.binaryPath}` : "。"}`
+      : engine.detail ?? `该代理需要 Xray 引擎中转（${role}），但 Xray-core 尚未安装。`,
+    actions: engine.installed ? undefined : [{ id: "install-xray", kind: "install-xray", label: "安装 Xray 引擎" }],
+  });
+  if (chained) {
+    const preProxy = engine.preProxy;
+    pushPreflight(items, {
+      id: "xray-pre-proxy",
+      category: "network",
+      severity: preProxy ? (preProxy.ok ? "pass" : "fail") : "info",
+      title: "前置代理",
+      detail: preProxy
+        ? preProxy.ok
+          ? `链路：本机 → ${preProxy.name ?? preProxy.id} → 目标代理 → 网站。`
+          : preProxy.detail ?? "前置代理不可用。"
+        : "当前报告未解析前置代理。",
+      actions: preProxy && !preProxy.ok ? [openTabAction("proxy", "调整前置代理")] : undefined,
+    });
+  }
 }
 
 function validateStartUrlPreflight(startUrl: string): ProfilePreflightItem {

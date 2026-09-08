@@ -174,6 +174,9 @@ function proxy(): ProxyEntity {
     bypass: "",
     notes: "",
     status: "enabled",
+    shareLink: "",
+    preProxyId: "",
+    ipStrategy: "auto",
     createdAt: "2026-08-06T00:00:00.000Z",
     updatedAt: "2026-08-06T00:00:00.000Z",
   };

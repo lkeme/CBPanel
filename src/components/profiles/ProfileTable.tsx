@@ -10,10 +10,11 @@ import {
   PauseCircle,
   PlayCircle,
   Square,
+  Unplug,
 } from "lucide-react";
 
 import type { Locale, TranslationKey } from "../../i18n";
-import type { NetworkCheckResult, ProxyEntity } from "../../shared/entities";
+import type { GroupEntity, NetworkCheckResult, ProxyEntity, TagEntity } from "../../shared/entities";
 import {
   type BrowserProfile,
   type PanelState,
@@ -36,6 +37,7 @@ export function ProfileTable({
   allPageSelected,
   columns,
   environments,
+  groups = [],
   pendingLaunchIds,
   pendingStopIds,
   profiles,
@@ -46,6 +48,7 @@ export function ProfileTable({
   t,
   locale,
   tagFilters,
+  tags = [],
   toggleCurrentPageSelected,
   toggleSelected,
   toggleTagFilter,
@@ -57,6 +60,9 @@ export function ProfileTable({
   allPageSelected: boolean;
   columns: ProfileColumnConfig[];
   environments: Environment[];
+  /** The registry's groups and tags, for their colours; rows fall back to neutral tiles without them. */
+  groups?: GroupEntity[];
+  tags?: TagEntity[];
   pendingLaunchIds: Set<string>;
   pendingStopIds: Set<string>;
   profiles: BrowserProfile[];
@@ -79,6 +85,8 @@ export function ProfileTable({
   const tableWidth = columns.reduce((sum, column) => sum + safeColumnWidth(column), 0);
   const environmentsById = useMemo(() => new Map(environments.map((environment) => [environment.id, environment])), [environments]);
   const proxiesById = useMemo(() => new Map(proxies.map((proxy) => [proxy.id, proxy])), [proxies]);
+  const groupColors = useMemo(() => new Map(groups.map((group) => [group.name, group.color])), [groups]);
+  const tagColors = useMemo(() => new Map(tags.map((tag) => [tag.name, tag.color])), [tags]);
   return (
     <div className="profile-table">
       <div
@@ -132,11 +140,13 @@ export function ProfileTable({
                       launchPending,
                       stopPending: actionState.stopPending,
                       environment,
+                      groupColor: groupColors.get(profile.group),
                       proxy,
                       selected: selectedIds.has(profile.id),
                       status,
                       t,
                       locale,
+                      tagColors,
                       tagFilters,
                       toggleSelected,
                       toggleTagFilter,
@@ -277,11 +287,13 @@ function renderCell({
   stopPending,
   profile,
   environment,
+  groupColor,
   proxy,
   selected,
   status,
   t,
   locale,
+  tagColors,
   tagFilters,
   toggleSelected,
   toggleTagFilter,
@@ -295,11 +307,13 @@ function renderCell({
   stopPending: boolean;
   profile: BrowserProfile;
   environment?: Environment;
+  groupColor?: string;
   proxy?: ProxyEntity;
   selected: boolean;
   status: SessionSummary["status"] | "stopped";
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
   locale: Locale;
+  tagColors: Map<string, string>;
   tagFilters: string[];
   toggleSelected: (id: string) => void;
   toggleTagFilter: (tag: string) => void;
@@ -325,8 +339,14 @@ function renderCell({
     case "name":
       return (
         <div className="name-cell">
-          <strong>{profile.name}</strong>
-          <small>{profile.notes || profile.id}</small>
+          <span className="profile-avatar" style={entityColorStyle(groupColor)} aria-hidden="true">
+            {avatarText(profile.name)}
+            <span className={`profile-avatar-dot ${status}`} />
+          </span>
+          <div className="name-cell-text">
+            <strong>{profile.name}</strong>
+            <small>{profile.notes || profile.id}</small>
+          </div>
         </div>
       );
     case "status":
@@ -336,18 +356,24 @@ function renderCell({
         </span>
       );
     case "group":
-      return profile.group;
+      return (
+        <span className="group-chip" style={entityColorStyle(groupColor)} title={profile.group}>
+          <span className="color-dot" aria-hidden="true" />
+          {profile.group}
+        </span>
+      );
     case "tags":
       return (
         <span className="tag-list">
           {(profile.tags.length > 2 ? profile.tags.slice(0, 1) : profile.tags.slice(0, 2)).map((tag) => (
             <button
-              className={`tag tag-button ${tagFilters.includes(tag) ? "active" : ""}`}
+              className={`tag tag-button tag-colored ${tagFilters.includes(tag) ? "active" : ""}`}
               key={tag}
               onClick={(event) => {
                 event.stopPropagation();
                 toggleTagFilter(tag);
               }}
+              style={entityColorStyle(tagColors.get(tag))}
               title={t("filter.tagToggle", { tag })}
               type="button"
             >
@@ -362,7 +388,7 @@ function renderCell({
         </span>
       );
     case "proxy":
-      return <span className="mono-cell">{maskProxyUrlForDisplay(buildProxyUrl(profile.proxy))}</span>;
+      return <ProxyCell profile={profile} proxy={proxy} t={t} />;
     case "ip":
       return <ExitCell profile={profile} check={environment?.lastNetworkCheck ?? proxy?.lastCheck} t={t} locale={locale} />;
     case "mode":
@@ -427,6 +453,46 @@ function UpdatedAtCell({ value }: { value: string }) {
       <small>{date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</small>
     </span>
   );
+}
+
+/** The environment's proxy as a protocol badge, the library entry's health and its name (or the masked address). */
+function ProxyCell({ profile, proxy, t }: { profile: BrowserProfile; proxy?: ProxyEntity; t: (key: TranslationKey) => string }) {
+  const url = buildProxyUrl(profile.proxy);
+  if (!url) {
+    return (
+      <span className="proxy-cell direct" title={t("table.directConnection")}>
+        <Unplug size={13} aria-hidden="true" />
+        {t("table.directConnection")}
+      </span>
+    );
+  }
+  const scheme = profile.proxy.scheme;
+  const protocol = scheme === "xray" ? proxy?.xrayNode?.protocol ?? "xray" : scheme === "socks5" ? "socks" : "http";
+  const badge = scheme === "xray" ? (proxy?.xrayNode ? `XRAY · ${proxy.xrayNode.protocol.toUpperCase()}` : "XRAY") : scheme.toUpperCase();
+  const check = proxy?.lastCheck;
+  const masked = maskProxyUrlForDisplay(url);
+  return (
+    <span className="proxy-cell" title={proxy ? `${proxy.name} · ${masked}` : masked}>
+      <span className={`proxy-registry-badge protocol-${protocol}`}>{badge}</span>
+      {proxy && <span className={`proxy-health-dot ${check ? (check.ok ? "is-ok" : "is-error") : ""}`} aria-hidden="true" />}
+      <small className={proxy ? undefined : "mono-cell"}>{proxy ? proxy.name : masked}</small>
+    </span>
+  );
+}
+
+function entityColorStyle(color: string | undefined): CSSProperties | undefined {
+  return color ? ({ "--entity-color": color } as CSSProperties) : undefined;
+}
+
+/** Up to two initials, or a single character for scripts whose one character already reads as a word. */
+function avatarText(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return "?";
+  const words = trimmed.split(/[\s_\-·]+/).filter(Boolean);
+  if (words.length >= 2) return `${[...words[0]][0]}${[...words[1]][0]}`.toUpperCase();
+  const chars = [...trimmed];
+  const wide = (chars[0].codePointAt(0) ?? 0) > 0x2e80;
+  return chars.slice(0, wide ? 1 : 2).join("").toUpperCase();
 }
 
 function statusIcon(status: SessionSummary["status"] | "stopped"): ReactNode {

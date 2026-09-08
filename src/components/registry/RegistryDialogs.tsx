@@ -11,14 +11,20 @@ import type {
   ExtensionDirectoryPreviewResult,
   GroupEntity,
   ProxyEntity,
+  ProxyImportResult,
+  ProxySubscriptionEntity,
   TagEntity,
 } from "../../shared/entities";
+import { DEFAULT_PROXY_SUBSCRIPTION_INTERVAL_HOURS, PROXY_SUBSCRIPTION_INTERVAL_HOURS } from "../../shared/entities";
+import type { ProxySubscriptionImportOptions } from "../../hooks/useProxyActions";
 import { type ProxyScheme, nowIso, parseProxyUrlInput, proxyUrlFromParts } from "../../shared/profile";
+import { detectXrayShareLinkProtocol } from "../../shared/xray";
 import { DialogShell } from "../ui/DialogShell";
 import { Field, Segmented, ToggleField } from "../ui/form-controls";
 import { PasswordInput } from "../ui/PasswordInput";
 import { SelectMenu } from "../ui/SelectMenu";
 import { maskManagedProxyForDisplay } from "../profiles/proxyDisplay";
+import { IpStrategyField, PreProxyField, XrayShareLinkField, analyzeXrayShareLink, xrayShareLinkError } from "../profiles/XrayProxyFields";
 import { useExtensionAcquisitionDialogFocus } from "./extensionAcquisitionDialogFocus";
 import type { ExtensionAcquisitionUiTranslator } from "./extensionAcquisitionUi";
 
@@ -185,6 +191,10 @@ function proxyEditorInitialDraft(proxy?: ProxyEntity): ProxyEntity {
     notes: proxy?.notes ?? "",
     status: proxy?.status ?? "enabled",
     lastCheck: proxy?.lastCheck,
+    shareLink: proxy?.shareLink ?? "",
+    preProxyId: proxy?.preProxyId ?? "",
+    ipStrategy: proxy?.ipStrategy ?? "auto",
+    xrayNode: proxy?.xrayNode,
     createdAt: proxy?.createdAt ?? timestamp,
     updatedAt: proxy?.updatedAt ?? timestamp,
   };
@@ -894,6 +904,7 @@ export function ProxyEditorDialog({
   busy,
   close,
   mode,
+  proxies = [],
   proxy,
   saveProxy,
   t,
@@ -901,6 +912,8 @@ export function ProxyEditorDialog({
   busy: string;
   close: () => void;
   mode: "create" | "edit";
+  /** The library, for the front-proxy picker; the entry being edited is excluded from it. */
+  proxies?: ProxyEntity[];
   proxy?: ProxyEntity;
   saveProxy: (mode: "create" | "edit", input: Partial<ProxyEntity>, proxy?: ProxyEntity) => Promise<void>;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
@@ -908,12 +921,30 @@ export function ProxyEditorDialog({
   const [draft, setDraft] = useState<ProxyEntity>(() => proxyEditorInitialDraft(proxy));
   const [proxyUrlText, setProxyUrlText] = useState(() => proxyUrlFromParts(draft));
   const [proxyUrlError, setProxyUrlError] = useState("");
-  const nameError = draft.name.trim() ? "" : t("proxy.editor.validationName");
-  const hostError = draft.host.trim() ? "" : t("proxy.editor.validationHost");
-  const portError = draft.port.trim() ? "" : t("proxy.editor.validationPort");
-  const canSave = !nameError && !hostError && !portError && !proxyUrlError;
+  const isXray = draft.scheme === "xray";
+  const chained = Boolean(draft.preProxyId);
+  const shareLinkAnalysis = isXray ? analyzeXrayShareLink(draft.shareLink) : undefined;
+  const nameError = draft.name.trim() || shareLinkAnalysis?.parsed ? "" : t("proxy.editor.validationName");
+  const hostError = isXray || draft.host.trim() ? "" : t("proxy.editor.validationHost");
+  const portError = isXray || draft.port.trim() ? "" : t("proxy.editor.validationPort");
+  const shareLinkError = isXray ? xrayShareLinkError(draft.shareLink, t) : "";
+  const canSave = !nameError && !hostError && !portError && !proxyUrlError && !shareLinkError;
   const busyKey = mode === "create" ? "proxy-create" : proxy ? `proxy-update:${proxy.id}` : "proxy-update";
   const isBusy = busy === busyKey;
+  // What the server will store for an xray entry: host/port follow the link, the name falls back to the
+  // link's remark, and the URL credentials never apply.
+  const previewDraft: ProxyEntity = shareLinkAnalysis?.parsed
+    ? {
+        ...draft,
+        host: shareLinkAnalysis.parsed.summary.address,
+        port: String(shareLinkAnalysis.parsed.summary.port),
+        username: "",
+        password: "",
+      }
+    : draft;
+  const saveInput: Partial<ProxyEntity> = isXray
+    ? { ...previewDraft, name: draft.name.trim() || shareLinkAnalysis?.parsed?.summary.remark || previewDraft.host }
+    : draft;
 
   const updateParts = (patch: Partial<ProxyEntity>) => {
     const next = { ...draft, ...patch };
@@ -923,6 +954,13 @@ export function ProxyEditorDialog({
   };
 
   const updateRaw = (value: string) => {
+    const shareProtocol = detectXrayShareLinkProtocol(value);
+    if (shareProtocol && shareProtocol !== "socks" && shareProtocol !== "http") {
+      setProxyUrlText("");
+      setProxyUrlError("");
+      setDraft((current) => ({ ...current, scheme: "xray", shareLink: value.trim(), host: "", port: "", username: "", password: "" }));
+      return;
+    }
     const parsed = parseProxyUrlInput(value);
     setProxyUrlText(value);
     setProxyUrlError(value.trim() && !parsed ? t("error.proxyUrlInvalid") : "");
@@ -941,7 +979,7 @@ export function ProxyEditorDialog({
           <button className="command subtle" disabled={isBusy} onClick={close} type="button">
             {t("actions.cancel")}
           </button>
-          <button className="command primary" disabled={!canSave || isBusy} onClick={() => void saveProxy(mode, draft, proxy)} type="button">
+          <button className="command primary" disabled={!canSave || isBusy} onClick={() => void saveProxy(mode, saveInput, proxy)} type="button">
             {t("actions.save")}
           </button>
         </>
@@ -959,9 +997,6 @@ export function ProxyEditorDialog({
         <Field label={t("proxy.editor.name")} wide error={nameError}>
           <input value={draft.name} onChange={(event) => updateParts({ name: event.target.value })} placeholder={t("proxy.editor.namePlaceholder")} />
         </Field>
-        <Field label={t("form.proxyUrl")} wide error={proxyUrlError}>
-          <input value={proxyUrlText} onChange={(event) => updateRaw(event.target.value)} placeholder={t("placeholder.proxyUrl")} />
-        </Field>
         <Field label={t("form.scheme")} wide help={t("tips.proxyScheme")}>
           <Segmented<ProxyScheme>
             value={draft.scheme}
@@ -969,25 +1004,45 @@ export function ProxyEditorDialog({
               { value: "http", label: "HTTP" },
               { value: "https", label: "HTTPS" },
               { value: "socks5", label: "SOCKS5" },
+              { value: "xray", label: t("form.schemeXray") },
             ]}
             onChange={(scheme) => updateParts({ scheme })}
           />
         </Field>
-        <Field label={t("form.host")} error={hostError}>
-          <input value={draft.host} onChange={(event) => updateParts({ host: event.target.value })} placeholder={t("placeholder.proxyHost")} />
-        </Field>
-        <Field label={t("form.port")} error={portError}>
-          <input value={draft.port} onChange={(event) => updateParts({ port: event.target.value })} placeholder={t("placeholder.proxyPort")} />
-        </Field>
-        <Field label={t("form.username")}>
-          <input autoComplete="off" value={draft.username} onChange={(event) => updateParts({ username: event.target.value })} placeholder={t("placeholder.proxyUsername")} />
-        </Field>
-        <Field label={t("form.password")}>
-          <PasswordInput value={draft.password} onChange={(password) => updateParts({ password })} t={t} />
-        </Field>
+        {isXray ? (
+          <XrayShareLinkField onChange={(shareLink) => updateParts({ shareLink })} t={t} value={draft.shareLink} />
+        ) : (
+          <>
+            <Field label={t("form.proxyUrl")} wide error={proxyUrlError}>
+              <input value={proxyUrlText} onChange={(event) => updateRaw(event.target.value)} placeholder={t("placeholder.proxyUrl")} />
+            </Field>
+            <Field label={t("form.host")} error={hostError}>
+              <input value={draft.host} onChange={(event) => updateParts({ host: event.target.value })} placeholder={t("placeholder.proxyHost")} />
+            </Field>
+            <Field label={t("form.port")} error={portError}>
+              <input value={draft.port} onChange={(event) => updateParts({ port: event.target.value })} placeholder={t("placeholder.proxyPort")} />
+            </Field>
+            <Field label={t("form.username")}>
+              <input autoComplete="off" value={draft.username} onChange={(event) => updateParts({ username: event.target.value })} placeholder={t("placeholder.proxyUsername")} />
+            </Field>
+            <Field label={t("form.password")}>
+              <PasswordInput value={draft.password} onChange={(password) => updateParts({ password })} t={t} />
+            </Field>
+          </>
+        )}
         <Field label={t("form.bypass")} wide>
           <input value={draft.bypass} onChange={(event) => updateParts({ bypass: event.target.value })} placeholder={t("placeholder.proxyBypass")} />
         </Field>
+        <PreProxyField
+          excludeId={proxy?.id}
+          onChange={(preProxyId) => updateParts({ preProxyId })}
+          proxies={proxies}
+          t={t}
+          value={draft.preProxyId}
+        />
+        {(isXray || chained) && (
+          <IpStrategyField onChange={(ipStrategy) => updateParts({ ipStrategy })} t={t} value={draft.ipStrategy} />
+        )}
         <Field label={t("form.notes")} wide>
           <textarea value={draft.notes} onChange={(event) => updateParts({ notes: event.target.value })} placeholder={t("placeholder.notes")} />
         </Field>
@@ -999,7 +1054,293 @@ export function ProxyEditorDialog({
       </div>
       <div className="proxy-editor-preview">
         <span>{t("proxy.editor.preview")}</span>
-        <strong className="mono-cell">{maskManagedProxyForDisplay(draft)}</strong>
+        <strong className="mono-cell">{maskManagedProxyForDisplay(previewDraft)}</strong>
+        {chained && <small>{t("proxy.xray.chained", { name: proxies.find((item) => item.id === draft.preProxyId)?.name ?? draft.preProxyId })}</small>}
+      </div>
+    </DialogShell>
+  );
+}
+
+export function ProxyImportDialog({
+  busy,
+  close,
+  importLinks,
+  importSubscription,
+  t,
+}: {
+  busy: string;
+  close: () => void;
+  importLinks: (text: string) => Promise<ProxyImportResult | undefined>;
+  importSubscription: (url: string, options?: ProxySubscriptionImportOptions) => Promise<ProxyImportResult | undefined>;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  const [mode, setMode] = useState<"links" | "subscription">("links");
+  const [text, setText] = useState("");
+  const [url, setUrl] = useState("");
+  const [remember, setRemember] = useState(true);
+  const [rememberName, setRememberName] = useState("");
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [refreshIntervalHours, setRefreshIntervalHours] = useState<number>(DEFAULT_PROXY_SUBSCRIPTION_INTERVAL_HOURS);
+  const [result, setResult] = useState<ProxyImportResult | null>(null);
+  const isBusy = busy === "proxy-import";
+  const canRun = mode === "links" ? text.trim().length > 0 : /^https?:\/\/\S+$/i.test(url.trim());
+
+  async function run() {
+    const next = mode === "links"
+      ? await importLinks(text)
+      : await importSubscription(url.trim(), remember
+        ? { remember: { name: rememberName.trim() || undefined, autoRefresh, refreshIntervalHours } }
+        : {});
+    if (next) setResult(next);
+  }
+
+  return (
+    <DialogShell
+      actions={
+        <>
+          <button className="command subtle" disabled={isBusy} onClick={close} type="button">
+            {result ? t("actions.close") : t("actions.cancel")}
+          </button>
+          <button className="command primary" disabled={!canRun || isBusy} onClick={() => void run()} type="button">
+            {t("proxy.import.run")}
+          </button>
+        </>
+      }
+      bodyClassName="modal-body proxy-editor-body"
+      close={close}
+      closeDisabled={isBusy}
+      description={t("proxy.import.description")}
+      labelledBy="proxy-import-title"
+      panelClassName="proxy-editor-panel"
+      t={t}
+      title={t("proxy.import.title")}
+    >
+      <div className="form-grid two compact-section">
+        <Field label={t("proxy.import.source")} wide>
+          <Segmented<"links" | "subscription">
+            value={mode}
+            options={[
+              { value: "links", label: t("proxy.import.links") },
+              { value: "subscription", label: t("proxy.import.subscription") },
+            ]}
+            onChange={setMode}
+          />
+        </Field>
+        {mode === "links" ? (
+          <Field label={t("proxy.import.links")} wide>
+            <textarea
+              className="xray-share-link-input"
+              disabled={isBusy}
+              onChange={(event) => setText(event.target.value)}
+              placeholder={t("proxy.import.linksPlaceholder")}
+              rows={8}
+              spellCheck={false}
+              value={text}
+            />
+          </Field>
+        ) : (
+          <>
+            <Field label={t("proxy.import.subscription")} wide help={t("proxy.import.subscriptionHelp")}>
+              <input
+                disabled={isBusy}
+                onChange={(event) => setUrl(event.target.value)}
+                placeholder={t("proxy.import.subscriptionPlaceholder")}
+                value={url}
+              />
+            </Field>
+            <div className="wide">
+              <ToggleField
+                checked={remember}
+                disabled={isBusy}
+                help={t("proxy.import.rememberHelp")}
+                label={t("proxy.import.remember")}
+                onChange={setRemember}
+              />
+            </div>
+            {remember && (
+              <>
+                <Field label={t("proxy.import.rememberName")}>
+                  <input
+                    disabled={isBusy}
+                    onChange={(event) => setRememberName(event.target.value)}
+                    placeholder={t("proxy.import.rememberNamePlaceholder")}
+                    value={rememberName}
+                  />
+                </Field>
+                <Field label={t("subscription.interval")}>
+                  <SubscriptionIntervalSelect disabled={isBusy || !autoRefresh} onChange={setRefreshIntervalHours} t={t} value={refreshIntervalHours} />
+                </Field>
+                <div className="wide">
+                  <ToggleField
+                    checked={autoRefresh}
+                    disabled={isBusy}
+                    help={t("subscription.autoRefreshHelp")}
+                    label={t("subscription.autoRefresh")}
+                    onChange={setAutoRefresh}
+                  />
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+      {result && (
+        <div className="proxy-editor-preview proxy-import-result">
+          <span>{t("proxy.import.resultTitle")}</span>
+          <strong>
+            {t("proxy.import.result", {
+              imported: result.imported.length,
+              skipped: result.skipped,
+              failed: result.failedTotal,
+              total: result.total,
+            })}
+          </strong>
+          {(result.adopted ?? 0) > 0 && <small>{t("proxy.import.adopted", { count: result.adopted ?? 0 })}</small>}
+          {result.subscription && <small>{t("proxy.import.rememberedAs", { name: result.subscription.name })}</small>}
+          {result.failedTotal > result.failed.length && (
+            <small>{t("proxy.import.failedTotal", { failed: result.failedTotal, shown: result.failed.length })}</small>
+          )}
+          {result.failed.length > 0 && (
+            <ul className="proxy-import-failures">
+              {result.failed.slice(0, 20).map((failure, index) => (
+                <li key={`${failure.link}-${index}`}>
+                  <span className="mono-cell">{failure.link}</span>
+                  <small>{failure.error}</small>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </DialogShell>
+  );
+}
+
+function SubscriptionIntervalSelect({
+  disabled,
+  onChange,
+  t,
+  value,
+}: {
+  disabled?: boolean;
+  onChange: (hours: number) => void;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  value: number;
+}) {
+  const options = PROXY_SUBSCRIPTION_INTERVAL_HOURS.includes(value as (typeof PROXY_SUBSCRIPTION_INTERVAL_HOURS)[number])
+    ? [...PROXY_SUBSCRIPTION_INTERVAL_HOURS]
+    : [...PROXY_SUBSCRIPTION_INTERVAL_HOURS, value].sort((a, b) => a - b);
+  return (
+    <SelectMenu<string>
+      disabled={disabled}
+      onChange={(next) => onChange(Number(next))}
+      options={options.map((hours) => ({ value: String(hours), label: t("subscription.intervalHours", { count: hours }) }))}
+      placeholder={t("subscription.interval")}
+      value={String(value)}
+    />
+  );
+}
+
+/** Create or edit a remembered subscription; creating also reads the address once. */
+export function ProxySubscriptionDialog({
+  busy,
+  close,
+  mode,
+  saveSubscription,
+  subscription,
+  t,
+}: {
+  busy: string;
+  close: () => void;
+  mode: "create" | "edit";
+  saveSubscription: (mode: "create" | "edit", input: Partial<ProxySubscriptionEntity>, subscription?: ProxySubscriptionEntity) => Promise<void>;
+  subscription?: ProxySubscriptionEntity;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  const [name, setName] = useState(subscription?.name ?? "");
+  const [url, setUrl] = useState(subscription?.url ?? "");
+  const [autoRefresh, setAutoRefresh] = useState(subscription?.autoRefresh ?? true);
+  const [refreshIntervalHours, setRefreshIntervalHours] = useState(subscription?.refreshIntervalHours ?? DEFAULT_PROXY_SUBSCRIPTION_INTERVAL_HOURS);
+  const [notes, setNotes] = useState(subscription?.notes ?? "");
+  const busyKey = mode === "create" ? "subscription-create" : subscription ? `subscription-update:${subscription.id}` : "subscription-update";
+  const isBusy = busy === busyKey;
+  const urlValid = /^https?:\/\/\S+$/i.test(url.trim());
+  // Only a typed address is judged; editing may leave it blank to keep the one on file (the list
+  // never carried it), and a fresh dialog should not open with a complaint.
+  const urlError = url.trim() && !urlValid ? t("subscription.validationUrl") : "";
+  const canSave = mode === "create" ? urlValid : !urlError;
+
+  async function submit() {
+    if (!canSave) return;
+    const input: Partial<ProxySubscriptionEntity> = {
+      name: name.trim(),
+      autoRefresh,
+      refreshIntervalHours,
+      notes: notes.trim(),
+      ...(url.trim() ? { url: url.trim() } : {}),
+    };
+    await saveSubscription(mode, input, subscription);
+  }
+
+  return (
+    <DialogShell
+      actions={
+        <>
+          <button className="command subtle" disabled={isBusy} onClick={close} type="button">
+            {t("actions.cancel")}
+          </button>
+          <button className="command primary" disabled={!canSave || isBusy} type="submit">
+            {mode === "create" ? t("subscription.saveAndRefresh") : t("actions.save")}
+          </button>
+        </>
+      }
+      asForm
+      bodyClassName="modal-body proxy-editor-body"
+      close={close}
+      closeDisabled={isBusy}
+      description={t("subscription.body")}
+      labelledBy="proxy-subscription-title"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
+      }}
+      panelClassName="proxy-editor-panel"
+      t={t}
+      title={mode === "create" ? t("subscription.new") : t("subscription.edit")}
+    >
+      <div className="form-grid two compact-section">
+        <Field label={t("subscription.url")} wide help={t("subscription.urlHelp")} error={urlError}>
+          <input
+            autoFocus={mode === "create"}
+            disabled={isBusy}
+            onChange={(event) => setUrl(event.target.value)}
+            placeholder={mode === "edit" ? t("subscription.urlUnchanged") : t("proxy.import.subscriptionPlaceholder")}
+            value={url}
+          />
+        </Field>
+        <Field label={t("subscription.name")}>
+          <input
+            disabled={isBusy}
+            onChange={(event) => setName(event.target.value)}
+            placeholder={t("proxy.import.rememberNamePlaceholder")}
+            value={name}
+          />
+        </Field>
+        <Field label={t("subscription.interval")}>
+          <SubscriptionIntervalSelect disabled={isBusy || !autoRefresh} onChange={setRefreshIntervalHours} t={t} value={refreshIntervalHours} />
+        </Field>
+        <div className="wide">
+          <ToggleField
+            checked={autoRefresh}
+            disabled={isBusy}
+            help={t("subscription.autoRefreshHelp")}
+            label={t("subscription.autoRefresh")}
+            onChange={setAutoRefresh}
+          />
+        </div>
+        <Field label={t("subscription.notes")} wide>
+          <input disabled={isBusy} onChange={(event) => setNotes(event.target.value)} value={notes} />
+        </Field>
       </div>
     </DialogShell>
   );

@@ -6,14 +6,27 @@ import { fileURLToPath } from "node:url";
 import {
   type BrowserProfile,
   type PanelState,
+  type ProfilePreflightXrayEngine,
   type ProxySettings,
   buildProxyUrl,
   defaultProfile,
   maskProfileSecrets,
   normalizeProfile,
+  normalizeProxySettings,
+  proxyUsesXray,
 } from "../src/shared/profile";
-import type { BrowserEnvironment, NetworkCheckResult, ProxyEntity, SystemDiagnostics } from "../src/shared/entities";
-import { resolveNetworkTraceProvider } from "../src/shared/settings";
+import type {
+  BrowserEnvironment,
+  NetworkCheckResult,
+  ProxyBatchCheckResult,
+  ProxyBatchDeleteResult,
+  ProxyBatchLatencyResult,
+  ProxyEntity,
+  ProxyLatencyResult,
+  ProxySubscriptionEntity,
+  SystemDiagnostics,
+} from "../src/shared/entities";
+import { type AppSettings, resolveNetworkTraceProvider } from "../src/shared/settings";
 import {
   payloadTooLargeMessage,
   readBindEnvironmentIds,
@@ -39,11 +52,14 @@ import { createExtensionProviderRegistry } from "./services/extensionProviders/p
 import { GithubMirrorProbeService } from "./services/githubMirrorProbeService";
 import { installPackagedInspectorShim } from "./services/packagedRuntime";
 import { ProxyService } from "./services/proxyService";
+import { ProxySubscriptionService } from "./services/proxySubscriptionService";
 import { ProviderHttpClient } from "./services/providerHttpClient";
 import {
   browserEvaluateCallbackSerializationHealth,
   SessionService,
+  type SessionXrayBridge,
 } from "./services/sessionService";
+import { XrayService } from "./services/xrayService";
 import { SqlitePanelRepository } from "./storage/sqliteStore";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -193,8 +209,15 @@ const sessionService = new SessionService({
   // Read at call time, not captured: an operation can start after a launch has begun.
   activeCacheOperation: () => binaryService.activeCacheOperation(),
   activeDataOperation,
+  // Resolved through closures: xrayService is constructed below, and every call comes from a launch.
+  xray: {
+    isRequired: (profile) => proxyGoesThroughEngine(profile.proxy),
+    start: (profile, ownerId, onEvent) => startSessionXray(profile, ownerId, onEvent),
+    preflight: (profile) => preflightSessionXray(profile),
+  } satisfies SessionXrayBridge,
 });
 const proxyService = new ProxyService();
+const proxySubscriptionService = new ProxySubscriptionService({ repository });
 const environmentDataService = new EnvironmentDataService({
   browserDataDir: BROWSER_DATA_DIR,
   extensionRuntimeDir: EXTENSION_RUNTIME_DIR,
@@ -222,6 +245,16 @@ const appBackupService = new AppBackupService({
   mutationCoordinator: dataMutationCoordinator,
 });
 const githubMirrorProbeService = new GithubMirrorProbeService();
+const xrayService = new XrayService({
+  dataDir: DATA_DIR,
+  readSettings: () => repository.getSettings(),
+  saveSettings: (patch) => repository.saveSettings(patch),
+  // The same mirror the browser core downloads through: Xray-core is the panel's other GitHub download.
+  resolveMirrorPrefix: async () => {
+    const [settings, binaryInfo] = await Promise.all([repository.getSettings(), binaryService.readInfo()]);
+    return (await githubMirrorProbeService.resolvePrefix(settings, binaryInfo.version))?.prefix;
+  },
+});
 const desktopRuntimeService = new DesktopRuntimeService({
   shellMode: SHELL_MODE,
   host: HOST,
@@ -249,6 +282,7 @@ async function panelState(): Promise<PanelState> {
     trash,
     settings,
     storage,
+    proxySubscriptions,
   ] = await Promise.all([
     repository.listProfiles(),
     repository.listEnvironments(),
@@ -259,6 +293,7 @@ async function panelState(): Promise<PanelState> {
     repository.listTrashEnvironments(),
     repository.getSettings(),
     repository.getInfo(),
+    repository.listProxySubscriptions(),
   ]);
   return {
     profiles,
@@ -266,6 +301,7 @@ async function panelState(): Promise<PanelState> {
     groups,
     tags,
     proxies,
+    proxySubscriptions,
     extensions,
     trash,
     sessions: sessionService.listSessions(),
@@ -287,7 +323,7 @@ async function findProxyWithSecrets(proxyId: string): Promise<ProxyEntity> {
 
 // A stored proxy as the profile-shaped patch the proxy service takes. `raw` is cleared on purpose: the
 // entity carries discrete parts, and a stale raw URL would win over them in buildProxyUrl.
-function proxySettingsFrom(proxy: ProxyEntity): Partial<ProxySettings> {
+function proxySettingsFrom(proxy: ProxyEntity): ProxySettings {
   return {
     enabled: true,
     raw: "",
@@ -297,25 +333,110 @@ function proxySettingsFrom(proxy: ProxyEntity): Partial<ProxySettings> {
     username: proxy.username,
     password: proxy.password,
     bypass: proxy.bypass,
+    shareLink: proxy.shareLink,
+    preProxyId: proxy.preProxyId,
+    ipStrategy: proxy.ipStrategy,
   };
 }
 
-async function proxyUrlForEntity(proxyId: string): Promise<string> {
-  const proxy = await findProxyWithSecrets(proxyId);
-  const proxyUrl = buildProxyUrl({ ...defaultProfile().proxy, ...proxySettingsFrom(proxy) });
-  if (!proxyUrl) throw Object.assign(new Error("代理配置不完整"), { status: 400 });
-  return proxyUrl;
+/**
+ * The front proxy a chained proxy names, with its credentials. One level only: a front proxy that is
+ * itself chained is used as a plain node, since Xray's proxySettings hop is a single indirection.
+ */
+async function resolveXrayPreProxy(proxy: ProxySettings): Promise<ProxySettings | undefined> {
+  const preProxyId = proxy.preProxyId.trim();
+  if (!preProxyId) return undefined;
+  const entity = (await repository.listProxies({ includeSecrets: true })).find((item) => item.id === preProxyId);
+  if (!entity) {
+    throw Object.assign(new Error("前置代理不存在；请在代理设置中重新选择前置代理。"), {
+      status: 400,
+      code: "XRAY_PRE_PROXY_MISSING",
+    });
+  }
+  if (entity.status === "disabled") {
+    throw Object.assign(new Error(`前置代理“${entity.name}”已停用；请启用它或改用其他前置代理。`), {
+      status: 409,
+      code: "XRAY_PRE_PROXY_DISABLED",
+    });
+  }
+  return { ...proxySettingsFrom(entity), preProxyId: "" };
+}
+
+async function startSessionXray(
+  profile: BrowserProfile,
+  ownerId: string,
+  onEvent: Parameters<SessionXrayBridge["start"]>[2],
+) {
+  const preProxy = await resolveXrayPreProxy(profile.proxy);
+  return xrayService.start({ ownerId, proxy: profile.proxy, preProxy, fingerprint: profile.fingerprint, onEvent });
+}
+
+async function preflightSessionXray(profile: BrowserProfile): Promise<ProfilePreflightXrayEngine> {
+  const status = await xrayService.readStatus();
+  let preProxy: ProfilePreflightXrayEngine["preProxy"];
+  const preProxyId = profile.proxy.preProxyId.trim();
+  if (preProxyId) {
+    try {
+      await resolveXrayPreProxy(profile.proxy);
+      const entity = (await repository.listProxies()).find((item) => item.id === preProxyId);
+      preProxy = { id: preProxyId, name: entity?.name, ok: true };
+    } catch (error) {
+      preProxy = { id: preProxyId, ok: false, detail: (error as Error).message };
+    }
+  }
+  return {
+    installed: status.installed,
+    binaryPath: status.binaryPath,
+    version: status.version,
+    preProxy,
+  };
+}
+
+/**
+ * The routing decision every launch and check shares: nodes and chains need the engine, plain
+ * proxies follow `xray.nativeProxyRouting` — through the engine when it is installed (auto), always,
+ * or never. Read at call time so an install or a settings change applies to the next launch.
+ */
+async function proxyGoesThroughEngine(proxy: ProxySettings): Promise<boolean> {
+  if (!proxy.enabled) return false;
+  const settings = await repository.getSettings();
+  const routing = settings.xray.nativeProxyRouting;
+  const engineInstalled = routing === "auto" ? (await xrayService.resolveBinary()).source !== "missing" : false;
+  return proxyUsesXray(proxy, { nativeProxyRouting: routing, engineInstalled });
+}
+
+/**
+ * Runs a proxy check through whatever the proxy needs: directly for a plain http/socks proxy that the
+ * routing setting leaves alone, and through a short-lived Xray engine otherwise, so the check answers
+ * for the exact path a launch would take.
+ */
+async function withProxyThroughEngine<T>(
+  proxy: ProxySettings,
+  run: (effectiveProxy: Partial<ProxySettings>) => Promise<T>,
+): Promise<T> {
+  if (!await proxyGoesThroughEngine(proxy)) return run(proxy);
+  const preProxy = await resolveXrayPreProxy(proxy);
+  return xrayService.withTemporaryProxy(
+    { proxy, preProxy },
+    (localProxyUrl) => run({ enabled: true, raw: localProxyUrl, bypass: proxy.bypass }),
+  );
+}
+
+function proxySettingsFromRequest(body: unknown): ProxySettings {
+  const patch = body && typeof body === "object" ? (body as Partial<ProxySettings>) : {};
+  return normalizeProxySettings({ ...defaultProfile().proxy, ...patch });
 }
 
 // `proxyUrl` mirrors `cloakbrowser info --proxy <url>`: given one, the diagnostics also report the exit
 // IP, timezone and locale a `geoip: true` launch through that proxy would apply. Without one nothing is
 // resolved and no network call is made, which is how upstream leaves plain `info`.
 async function systemDiagnostics(proxyUrl?: string): Promise<SystemDiagnostics> {
-  const [storage, extensions, settings, browserCoreDiagnostics] = await Promise.all([
+  const [storage, extensions, settings, browserCoreDiagnostics, xrayEngine] = await Promise.all([
     repository.getInfo(),
     repository.listExtensions(),
     repository.getSettings(),
     binaryService.readWrapperDiagnostics({ quick: true, proxy: proxyUrl }),
+    xrayService.readStatus(),
   ]);
   const traceProvider = resolveNetworkTraceProvider(settings.networkTrace);
   const sessions = sessionService.listSessions();
@@ -328,7 +449,7 @@ async function systemDiagnostics(proxyUrl?: string): Promise<SystemDiagnostics> 
     }));
   return {
     checkedAt: new Date().toISOString(),
-    schemaVersion: 3,
+    schemaVersion: 4,
     dataDir: DATA_DIR,
     databasePath: storage.databasePath,
     portable: storage.portable,
@@ -354,6 +475,7 @@ async function systemDiagnostics(proxyUrl?: string): Promise<SystemDiagnostics> 
       installedCount: extensions.filter((extension) => extension.installState === "installed").length,
     },
     browserCoreDiagnostics,
+    xrayEngine,
     recentErrors: extensionErrors
       .sort((left, right) => right.at.localeCompare(left.at))
       .slice(0, 20),
@@ -363,11 +485,10 @@ async function systemDiagnostics(proxyUrl?: string): Promise<SystemDiagnostics> 
 async function checkProfileNetwork(profile: BrowserProfile): Promise<NetworkCheckResult> {
   const environment = await repository.getEnvironment(profile.id);
   const settings = await repository.getSettings();
-  const result = await proxyService
-    .check(profile.proxy, {
-      source: "environment-check",
-      traceSettings: settings.networkTrace,
-    })
+  const result = await withProxyThroughEngine(profile.proxy, (effectiveProxy) => proxyService.check(effectiveProxy, {
+    source: "environment-check",
+    traceSettings: settings.networkTrace,
+  }))
     .catch((error) => networkCheckFailure(error));
   await repository.saveEnvironmentNetworkCheck(profile.id, result);
   if (environment?.proxyId) await repository.saveProxyCheckResult(environment.proxyId, result);
@@ -444,6 +565,75 @@ function networkCheckFailure(error: unknown): NetworkCheckResult {
     source: "environment-check",
     error: (error as Error).message,
   };
+}
+
+const PROXY_BATCH_LIMIT = 500;
+const PROXY_BATCH_CHECK_CONCURRENCY = 3;
+const PROXY_BATCH_LATENCY_CONCURRENCY = 4;
+
+function proxySubscriptionInputFrom(body: unknown): Partial<ProxySubscriptionEntity> {
+  const record = typeof body === "object" && body ? (body as Record<string, unknown>) : {};
+  const input: Partial<ProxySubscriptionEntity> = {};
+  if (typeof record.name === "string") input.name = record.name;
+  if (typeof record.url === "string") input.url = record.url;
+  if (typeof record.notes === "string") input.notes = record.notes;
+  if (typeof record.autoRefresh === "boolean") input.autoRefresh = record.autoRefresh;
+  if (typeof record.refreshIntervalHours === "number") input.refreshIntervalHours = record.refreshIntervalHours;
+  if (record.status === "enabled" || record.status === "disabled") input.status = record.status;
+  return input;
+}
+
+function readProxyIdList(value: unknown): string[] {
+  if (!Array.isArray(value)) throw Object.assign(new Error("ids 必须是代理 id 数组"), { status: 400, code: "PROXY_IDS_INVALID" });
+  const ids = [...new Set(value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()))];
+  if (ids.length === 0) throw Object.assign(new Error("ids 不能为空"), { status: 400, code: "PROXY_IDS_INVALID" });
+  if (ids.length > PROXY_BATCH_LIMIT) throw Object.assign(new Error(`一次最多处理 ${PROXY_BATCH_LIMIT} 个代理`), { status: 400, code: "PROXY_IDS_INVALID" });
+  return ids;
+}
+
+async function checkProxyById(id: string, traceSettings: AppSettings["networkTrace"]): Promise<ProxyBatchCheckResult> {
+  const checkedAt = new Date().toISOString();
+  let proxy: ProxyEntity;
+  try {
+    proxy = await findProxyWithSecrets(id);
+  } catch (error) {
+    return { id, result: { checkedAt, ok: false, source: "proxy-check", error: (error as Error).message } };
+  }
+  const result = await withProxyThroughEngine(proxySettingsFrom(proxy), (effectiveProxy) => proxyService.check(effectiveProxy, {
+    traceSettings,
+    source: "proxy-check",
+  })).catch((error): NetworkCheckResult => ({ checkedAt, ok: false, source: "proxy-check", error: (error as Error).message }));
+  await repository.saveProxyCheckResult(id, result);
+  return { id, result };
+}
+
+async function measureProxyLatencyById(id: string, timeoutSeconds: number): Promise<ProxyBatchLatencyResult> {
+  const checkedAt = new Date().toISOString();
+  let proxy: ProxyEntity;
+  try {
+    proxy = await findProxyWithSecrets(id);
+  } catch (error) {
+    return { id, result: { checkedAt, ok: false, error: (error as Error).message } };
+  }
+  const result = await withProxyThroughEngine(proxySettingsFrom(proxy), (effectiveProxy) => proxyService.measureLatency(effectiveProxy, { timeoutSeconds }))
+    .catch((error): ProxyLatencyResult => ({ checkedAt, ok: false, error: (error as Error).message }));
+  await repository.saveProxyLatencyResult(id, result);
+  return { id, result };
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, work: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, async () => {
+    for (;;) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= items.length) return;
+      results[index] = await work(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 function requireDesktopToken(request: express.Request, response: express.Response, next: express.NextFunction): void {
@@ -1106,15 +1296,175 @@ async function createApp(): Promise<express.Express> {
     }
   });
 
+  // Share links pasted or a subscription body: every parsable node becomes a library entry, plain
+  // socks/http links as native proxies and everything else as an xray node. Links already in the
+  // library are skipped so a re-imported subscription does not duplicate it.
+  app.post("/api/proxies/import-links", async (request, response) => {
+    try {
+      const text = typeof request.body?.text === "string" ? request.body.text : "";
+      response.status(201).json(await proxySubscriptionService.importLinks(text));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  // With `remember`, the address is kept as a subscription whose members are the imported nodes,
+  // so a later refresh can replace them; without it the nodes are ordinary standalone proxies.
+  app.post("/api/proxies/import-subscription", async (request, response) => {
+    try {
+      const url = typeof request.body?.url === "string" ? request.body.url.trim() : "";
+      const remember = request.body?.remember === true
+        ? {
+            name: typeof request.body?.name === "string" ? request.body.name : undefined,
+            autoRefresh: request.body?.autoRefresh === true,
+            refreshIntervalHours: typeof request.body?.refreshIntervalHours === "number" ? request.body.refreshIntervalHours : undefined,
+          }
+        : undefined;
+      response.status(201).json(await proxySubscriptionService.importSubscription(url, { remember }));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.get("/api/proxy-subscriptions", async (_request, response) => {
+    try {
+      response.json(await repository.listProxySubscriptions());
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  // Remembering an address reads it once right away; an address that cannot be read is not kept.
+  app.post("/api/proxy-subscriptions", async (request, response) => {
+    try {
+      response.status(201).json(await proxySubscriptionService.createSubscription(proxySubscriptionInputFrom(request.body)));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.post("/api/proxy-subscriptions/refresh-all", async (_request, response) => {
+    try {
+      response.json({ results: await proxySubscriptionService.refreshAll() });
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.get("/api/proxy-subscriptions/:id", async (request, response) => {
+    try {
+      const includeSecrets = request.query.secrets === "1";
+      const subscription = await repository.getProxySubscription(request.params.id, { includeSecrets });
+      if (!subscription) {
+        response.status(404).json({ error: "订阅不存在" });
+        return;
+      }
+      response.json(subscription);
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.put("/api/proxy-subscriptions/:id", async (request, response) => {
+    try {
+      response.json(await repository.updateProxySubscription(request.params.id, proxySubscriptionInputFrom(request.body)));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.post("/api/proxy-subscriptions/:id/refresh", async (request, response) => {
+    try {
+      response.json(await proxySubscriptionService.refresh(request.params.id));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  // `?proxies=delete` removes the members nothing uses; the default keeps every member as a standalone proxy.
+  app.delete("/api/proxy-subscriptions/:id", async (request, response) => {
+    try {
+      const proxies = request.query.proxies === "delete" ? "delete" : "keep";
+      response.json(await repository.deleteProxySubscription(request.params.id, { proxies }));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  // Batch routes sit ahead of the `:id` routes on purpose: Express would otherwise read "batch" as an id.
+  app.post("/api/proxies/batch/check", async (request, response) => {
+    try {
+      const ids = readProxyIdList(request.body?.ids);
+      const settings = await repository.getSettings();
+      const results = await mapWithConcurrency(ids, PROXY_BATCH_CHECK_CONCURRENCY, (id) => checkProxyById(id, settings.networkTrace));
+      response.json({ results });
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.post("/api/proxies/batch/latency", async (request, response) => {
+    try {
+      const ids = readProxyIdList(request.body?.ids);
+      const settings = await repository.getSettings();
+      const results = await mapWithConcurrency(ids, PROXY_BATCH_LATENCY_CONCURRENCY, (id) => measureProxyLatencyById(id, settings.networkTrace.timeoutSeconds));
+      response.json({ results });
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  // Referenced proxies are reported rather than force-unbound: a batch is not the place to silently
+  // change which proxy an environment launches through.
+  app.post("/api/proxies/batch/delete", async (request, response) => {
+    try {
+      const ids = readProxyIdList(request.body?.ids);
+      const result: ProxyBatchDeleteResult = { deleted: [], blocked: [] };
+      const names = new Map((await repository.listProxies()).map((proxy) => [proxy.id, proxy.name]));
+      for (const id of ids) {
+        try {
+          await repository.deleteProxy(id);
+          result.deleted.push(id);
+        } catch (error) {
+          const failure = error as { code?: string; status?: number; usage?: { count?: number } };
+          if (failure.code === "REFERENCE_CONFLICT") {
+            result.blocked.push({ id, name: names.get(id) ?? id, count: failure.usage?.count ?? 0 });
+            continue;
+          }
+          if (failure.status === 404) continue;
+          throw error;
+        }
+      }
+      response.json(result);
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.post("/api/proxies/:id/latency", async (request, response) => {
+    try {
+      await findProxyWithSecrets(request.params.id);
+      const settings = await repository.getSettings();
+      const { result } = await measureProxyLatencyById(request.params.id, settings.networkTrace.timeoutSeconds);
+      if (!result.ok) {
+        sendError(response, Object.assign(new Error(result.error ?? "真延迟检测失败"), { status: 502, code: "PROXY_LATENCY_FAILED" }));
+        return;
+      }
+      response.json(result);
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
   app.post("/api/proxies/:id/check", async (request, response) => {
     try {
       const proxy = await findProxyWithSecrets(request.params.id);
       try {
         const settings = await repository.getSettings();
-        const result = await proxyService.check(proxySettingsFrom(proxy), {
+        const result = await withProxyThroughEngine(proxySettingsFrom(proxy), (effectiveProxy) => proxyService.check(effectiveProxy, {
           traceSettings: settings.networkTrace,
           source: "proxy-check",
-        });
+        }));
         await repository.saveProxyCheckResult(request.params.id, result);
         response.json(result);
       } catch (error) {
@@ -1389,10 +1739,49 @@ async function createApp(): Promise<express.Express> {
       // credentials stay server-side. Absent means "do not resolve", which keeps this route free of
       // network calls exactly as before.
       const proxyId = typeof request.query.proxyId === "string" ? request.query.proxyId.trim() : "";
-      response.json(await systemDiagnostics(proxyId ? await proxyUrlForEntity(proxyId) : undefined));
+      if (!proxyId) {
+        response.json(await systemDiagnostics());
+        return;
+      }
+      const proxy = await findProxyWithSecrets(proxyId);
+      response.json(await withProxyThroughEngine(proxySettingsFrom(proxy), async (effectiveProxy) => {
+        const proxyUrl = buildProxyUrl({ ...defaultProfile().proxy, ...effectiveProxy });
+        if (!proxyUrl) throw Object.assign(new Error("代理配置不完整"), { status: 400 });
+        return systemDiagnostics(proxyUrl);
+      }));
     } catch (error) {
       sendError(response, error);
     }
+  });
+
+  app.get("/api/xray", async (_request, response) => {
+    try {
+      response.json(await xrayService.readStatus());
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  // Install and update are one operation: the latest release replaces whatever build is there.
+  app.post("/api/xray/install", async (_request, response) => {
+    try {
+      response.json(await xrayService.install());
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.post("/api/xray/check-update", async (_request, response) => {
+    try {
+      const check = await xrayService.checkUpdate();
+      response.json({ check, status: await xrayService.readStatus() });
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.post("/api/xray/operation/cancel", (_request, response) => {
+    response.json({ cancelled: xrayService.cancelOperation() });
   });
 
   app.post("/api/profiles", async (request, response) => {
@@ -1577,10 +1966,11 @@ async function createApp(): Promise<express.Express> {
 
   app.post("/api/proxy/check", async (request, response) => {
     try {
-      response.json(await proxyService.check(request.body?.proxy, {
-        traceSettings: (await repository.getSettings()).networkTrace,
+      const traceSettings = (await repository.getSettings()).networkTrace;
+      response.json(await withProxyThroughEngine(proxySettingsFromRequest(request.body?.proxy), (effectiveProxy) => proxyService.check(effectiveProxy, {
+        traceSettings,
         source: "proxy-check",
-      }));
+      })));
     } catch (error) {
       sendError(response, error);
     }
@@ -1592,10 +1982,11 @@ async function createApp(): Promise<express.Express> {
   // the result is not persisted — it answers a question about a draft, it is not the proxy's status.
   app.post("/api/proxy/geoip", async (request, response) => {
     try {
-      response.json(await proxyService.resolveLaunchGeo(request.body?.proxy, {
-        traceSettings: (await repository.getSettings()).networkTrace,
-        geoipDbPath: await binaryService.resolveGeoipDbPath(),
-      }));
+      const [settings, geoipDbPath] = await Promise.all([repository.getSettings(), binaryService.resolveGeoipDbPath()]);
+      response.json(await withProxyThroughEngine(proxySettingsFromRequest(request.body?.proxy), (effectiveProxy) => proxyService.resolveLaunchGeo(effectiveProxy, {
+        traceSettings: settings.networkTrace,
+        geoipDbPath,
+      })));
     } catch (error) {
       sendError(response, error);
     }
@@ -1750,11 +2141,15 @@ async function main(): Promise<void> {
     console.log(`CBPanel running at http://127.0.0.1:${PORT}`);
     console.log(`Data directory: ${DATA_DIR}`);
   });
+  proxySubscriptionService.startScheduler();
 }
 
 async function shutdown(): Promise<void> {
   shutdownPromise ??= (async () => {
+    proxySubscriptionService.stopScheduler();
     await sessionService.stopAll();
+    // Sessions release their own engines; this catches check instances and anything a wedged close left.
+    await xrayService.stopAll();
     repository.close();
     server?.close();
   })();

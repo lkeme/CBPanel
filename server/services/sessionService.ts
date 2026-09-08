@@ -7,7 +7,9 @@ import {
   type BrowserProfile,
   type ProfilePreflightEnvironment,
   type ProfilePreflightReport,
+  type ProfilePreflightXrayEngine,
   type SessionEvent,
+  type SessionEventLevel,
   type SessionSummary,
   buildLaunchPreview,
   browserVersionLaunchHints,
@@ -15,6 +17,7 @@ import {
   buildPuppeteerPageSetup,
   buildSessionLaunchPlan,
   preflightProfile,
+  withLocalXrayProxy,
 } from "../../src/shared/profile";
 import type { BrowserEnvironment, NetworkCheckResult } from "../../src/shared/entities";
 import { networkCheckSummaryText } from "../../src/shared/networkCheckDisplay";
@@ -59,9 +62,35 @@ export type ExtensionRegistrationPreflightProcess = {
 
 type RegistrationPreflightRuntimeHandle = ExtensionRegistrationPreflightProcess;
 
+/** A running Xray engine bound to one session: the local SOCKS5 port the browser was launched with. */
+export type SessionXrayHandle = {
+  port: number;
+  localProxyUrl: string;
+  upstream: string;
+  preProxy?: string;
+  stop: () => Promise<void>;
+};
+
+/**
+ * The Xray engine as the session service sees it. Injected rather than imported so this file knows
+ * nothing about binaries, share links or the proxy library: it asks whether a profile needs the
+ * engine, gets a local port back, and points CloakBrowser at that port.
+ */
+export type SessionXrayBridge = {
+  /** Whether this launch goes through the engine; async because the answer can depend on settings and on whether a binary is installed. */
+  isRequired: (profile: BrowserProfile) => boolean | Promise<boolean>;
+  start: (
+    profile: BrowserProfile,
+    ownerId: string,
+    onEvent: (level: SessionEventLevel, message: string, detail?: string) => void,
+  ) => Promise<SessionXrayHandle>;
+  preflight: (profile: BrowserProfile) => Promise<ProfilePreflightXrayEngine>;
+};
+
 type RunningSession = SessionSummary & {
   runtime?: RuntimeHandle;
   runtimePromise?: Promise<RuntimeHandle>;
+  xrayHandle?: SessionXrayHandle;
   registrationPreflightRuntime?: RegistrationPreflightRuntimeHandle;
   registrationPreflightPromise?: Promise<RegistrationPreflightRuntimeHandle>;
   closingByPanel?: boolean;
@@ -112,6 +141,7 @@ type SessionServiceOptions = {
   // launch consumes. The callback includes queued work because start* publishes that state
   // synchronously, closing the route-to-launch race before the async worker begins.
   activeDataOperation?: () => string | undefined;
+  xray?: SessionXrayBridge;
 };
 
 type CloakBrowserModule = {
@@ -333,7 +363,25 @@ export class SessionService {
         });
       }
 
-      const networkCheck = await this.checkNetworkBeforeLaunch(runtimeProfile);
+      // A share-link node or a chained proxy is not something CloakBrowser can dial. The Xray engine
+      // comes up first and the rest of the launch — the exit check included — sees a plain socks5
+      // proxy on the loopback, so the check measures the very path the browser will use.
+      let launchProfile = runtimeProfile;
+      if (this.options.xray && await this.options.xray.isRequired(runtimeProfile)) {
+        const handle = await this.options.xray.start(
+          runtimeProfile,
+          profile.id,
+          (level, message, detail) => pushSessionEvent(session, level, message, detail),
+        );
+        session.xrayHandle = handle;
+        if (!this.isCurrentLaunching(session)) {
+          await this.releaseSessionXray(session);
+          return publicSession(session);
+        }
+        launchProfile = withLocalXrayProxy(runtimeProfile, handle.port);
+      }
+
+      const networkCheck = await this.checkNetworkBeforeLaunch(launchProfile);
       if (networkCheck) {
         pushSessionEvent(
           session,
@@ -347,7 +395,8 @@ export class SessionService {
       // at the final point before a browser process is created.
       this.assertCanLaunch();
       const userDataDir = this.profileDataDir(runtimeProfile);
-      session.launch = buildSessionLaunchPlan(runtimeProfile, userDataDir);
+      session.launch = buildSessionLaunchPlan(launchProfile, userDataDir);
+      if (session.xrayHandle) session.launch.proxy = describeXrayLaunchProxy(session.xrayHandle);
       pushSessionEvent(session, "info", "启动计划已生成", `${session.launch.runtimeLauncher} -> ${session.launch.sdkLauncher}`);
       if (resolved.extensionRegistrations.some((registration) => registration.migrationRequired)) {
         if (!this.isCurrentLaunching(session)) return publicSession(session);
@@ -366,7 +415,7 @@ export class SessionService {
       formalLaunchStarted = true;
       const formalDeadline = Date.now() + Math.max(1, this.formalLaunchTimeoutMs());
       const runtimePromise = this.startRuntime(
-        runtimeProfile,
+        launchProfile,
         session,
         binary,
         resolved.extensionRegistrations,
@@ -400,6 +449,8 @@ export class SessionService {
 
       return publicSession(session);
     } catch (error) {
+      // Whatever else happens to this record, no browser will be launched through this engine.
+      void this.releaseSessionXray(session);
       if (!this.isCurrentSession(session) || session.launchCancelled) return publicSession(session);
       if (session.status !== "launching") {
         // Registration-preflight ownership failures can mark the generation error/unconfirmed before
@@ -505,6 +556,9 @@ export class SessionService {
     this.unconfirmedCloses.add(session);
     session.launchInterruption.resolve();
     delete session.closingByPanel;
+    // A browser whose exit was never confirmed may still be alive, but the operator asked for it to
+    // stop: without its engine it fails closed rather than keeps browsing through the node.
+    void this.releaseSessionXray(expectedSession ?? session);
     const closeError = `${reason}：浏览器可能仍在运行。可再次点击停止，或手动结束该浏览器进程。`;
     if (!session.launchFailed) session.lastError = closeError;
     pushSessionEvent(session, "error", event, closeError);
@@ -518,14 +572,35 @@ export class SessionService {
   // Both awaits are inside the budget on purpose: a launch that never finishes leaves runtimePromise
   // pending, which wedged the stop before close() was even reached.
   private async closeSessionRuntime(session: RunningSession): Promise<void> {
-    const preflight = session.registrationPreflightRuntime
-      ?? (await session.registrationPreflightPromise?.catch(() => undefined));
-    if (preflight) {
-      await preflight.close();
-      return;
+    try {
+      const preflight = session.registrationPreflightRuntime
+        ?? (await session.registrationPreflightPromise?.catch(() => undefined));
+      if (preflight) {
+        await preflight.close();
+        return;
+      }
+      const runtime = session.runtime ?? (await session.runtimePromise?.catch(() => undefined));
+      await runtime?.close();
+    } finally {
+      // After the browser, never before: a browser that is still shutting down must not lose its
+      // proxy mid-request, and a close that fails still leaves nothing worth proxying for.
+      await this.releaseSessionXray(session);
     }
-    const runtime = session.runtime ?? (await session.runtimePromise?.catch(() => undefined));
-    await runtime?.close();
+  }
+
+  // Idempotent by construction: the handle is dropped before the stop is awaited, so the several
+  // paths that end a session — a panel stop, the browser's own exit, a failed launch — can all call
+  // this without stopping the engine twice or racing each other.
+  private async releaseSessionXray(session: RunningSession): Promise<void> {
+    const handle = session.xrayHandle;
+    if (!handle) return;
+    delete session.xrayHandle;
+    try {
+      await handle.stop();
+      pushSessionEvent(session, "info", "Xray 引擎已停止", `socks5://127.0.0.1:${handle.port}`);
+    } catch (error) {
+      pushSessionEvent(session, "warn", "Xray 引擎停止失败", errorMessage(error));
+    }
   }
 
   // A seam, not a setting: the tests already override startRuntime this way, and a real knob for how
@@ -786,6 +861,9 @@ export class SessionService {
       Promise.all(profile.runtime.extensionPaths.map((extensionPath) => checkPathExists(extensionPath))),
     ]);
     const environment = await this.options.readEnvironment?.(profile.id);
+    const xrayEngine = this.options.xray && await this.options.xray.isRequired(profile)
+      ? await this.options.xray.preflight(profile)
+      : undefined;
 
     return {
       checkedAt: new Date().toISOString(),
@@ -799,6 +877,7 @@ export class SessionService {
       extensionErrors,
       extensionWarnings,
       networkCheck: environment?.lastNetworkCheck,
+      xrayEngine,
     };
   }
 
@@ -899,6 +978,8 @@ export class SessionService {
       closedSession.launchCancelled = true;
       closedSession.launchInterruption.resolve();
       this.unconfirmedCloses.delete(closedSession);
+      // The browser is gone — by the panel's hand or its own — so its engine goes with it.
+      void this.releaseSessionXray(closedSession);
     }
     // A timed-out close and the old browser's disconnect event may settle after the user has relaunched
     // the same profile. Those callbacks belong to the replaced record and must never stop the new one.
@@ -2832,6 +2913,11 @@ function coreOperationText(operation: string): string {
   if (operation === "import-zip") return "导入";
   if (operation === "clear-cache") return "清理缓存";
   return "执行操作";
+}
+
+function describeXrayLaunchProxy(handle: SessionXrayHandle): string {
+  const chain = handle.preProxy ? `${handle.preProxy} → ${handle.upstream}` : handle.upstream;
+  return `${chain} · Xray socks5://127.0.0.1:${handle.port}`;
 }
 
 function proxyCheckLaunchError(check: NetworkCheckResult): Error {

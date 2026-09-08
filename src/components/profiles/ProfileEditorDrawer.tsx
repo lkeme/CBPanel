@@ -17,7 +17,8 @@ import {
 
 import type { TranslationKey } from "../../i18n";
 import type { BrowserProfile } from "../../shared/profile";
-import type { BrowserEnvironment, ExtensionEntity, GroupEntity, ProxyEntity, TagEntity } from "../../shared/entities";
+import type { BrowserEnvironment, ExtensionEntity, GroupEntity, ProxyEntity, TagEntity, XrayEngineStatus } from "../../shared/entities";
+import type { XrayNativeProxyRouting } from "../../shared/settings";
 import { Drawer } from "../ui/form-controls";
 import { ProfileEditorAdvancedTab } from "./ProfileEditorAdvancedTab";
 import { ProfileEditorFingerprintTab } from "./ProfileEditorFingerprintTab";
@@ -68,6 +69,9 @@ export function ProfileEditorDrawer(props: {
   launchProfile: () => Promise<void>;
   importConfigFromClipboard: () => Promise<void>;
   shareConfigToClipboard: () => Promise<void>;
+  installXray?: () => Promise<unknown>;
+  nativeProxyRouting?: XrayNativeProxyRouting;
+  xrayStatus?: XrayEngineStatus | null;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }) {
   const { activeTab, canStop, close, draft, draftIsNew, saveDraft, setActiveTab, stopPending, t } = props;
@@ -160,6 +164,9 @@ export function ProfileEditorDrawer(props: {
                 proxyCheck={props.proxyCheck}
                 proxyLibraryDraftIds={props.proxyLibraryDraftIds}
                 checkProxy={props.checkProxy}
+                installXray={props.installXray}
+                nativeProxyRouting={props.nativeProxyRouting}
+                xrayStatus={props.xrayStatus}
                 resolveProxyGeoip={props.resolveProxyGeoip}
                 saveDraftProxyToLibrary={props.saveDraftProxyToLibrary}
                 setDraftProxyLibraryId={props.setDraftProxyLibraryId}

@@ -3,7 +3,7 @@ import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
-import type { NetworkCheckResult, NetworkGeoResult, NetworkTraceResult } from "../../src/shared/entities";
+import type { NetworkCheckResult, NetworkGeoResult, NetworkTraceResult, ProxyLatencyResult } from "../../src/shared/entities";
 import { buildProxyUrl, defaultProfile, type ProxySettings } from "../../src/shared/profile";
 import {
   DEFAULT_APP_SETTINGS,
@@ -18,6 +18,27 @@ export type ProxyCheckOptions = {
   source?: NetworkCheckResult["source"];
   traceSettings?: NetworkTraceSettings;
 };
+
+export type ProxyLatencyOptions = {
+  timeoutSeconds?: number;
+  targets?: string[];
+};
+
+/**
+ * Small, always-on endpoints that answer a HEAD in one round trip. Raced, because no single one is
+ * reachable from every exit: gstatic and Cloudflare are blocked behind some domestic proxies, the
+ * Microsoft connectivity check is reachable from nearly everywhere.
+ */
+export const LATENCY_PROBE_TARGETS = [
+  "https://www.gstatic.com/generate_204",
+  "https://cp.cloudflare.com/generate_204",
+  "http://www.msftconnecttest.com/connecttest.txt",
+] as const;
+
+// A provider that answers with something other than its trace format is retried once before the
+// check is called off: the JSONP endpoints in particular are rate-limited and answer a bare error
+// page now and then, and one retry turns most of those into a result instead of a red row.
+const TRACE_FORMAT_RETRIES = 1;
 
 // Mirrors `cloakbrowser info --proxy <url>`: what a `geoip: true` launch through this proxy would
 // actually inject, which is a different question from `check()`'s "what does the trace provider see".
@@ -127,12 +148,50 @@ export class ProxyService {
     traceSettings: NetworkTraceSettings,
   ): Promise<{ ip: string; provider: NetworkTraceProvider; values: ParsedNetworkTrace; startedAt: number }> {
     const provider = resolveNetworkTraceProvider(traceSettings);
-    const traceRequest = buildTraceRequest(provider);
-    const startedAt = Date.now();
-    const traceResponse = await this.readTrace(proxyUrl, traceRequest, traceSettings.timeoutSeconds);
-    const values = parseNetworkTraceResponse(provider, traceResponse, traceRequest.callbackName);
-    if (!values.ip) throw Object.assign(new Error(`出口检测响应缺少 ip 字段：${provider.name}`), { status: 502 });
-    return { ip: values.ip, provider, values, startedAt };
+    let lastFormatError: Error | undefined;
+    for (let attempt = 0; attempt <= TRACE_FORMAT_RETRIES; attempt += 1) {
+      // A fresh request each time: JSONP providers bind the callback name to the request.
+      const traceRequest = buildTraceRequest(provider);
+      const startedAt = Date.now();
+      const traceResponse = await this.readTrace(proxyUrl, traceRequest, traceSettings.timeoutSeconds);
+      try {
+        const values = parseNetworkTraceResponse(provider, traceResponse, traceRequest.callbackName);
+        if (!values.ip) throw traceFormatError("响应中没有 ip 字段");
+        return { ip: values.ip, provider, values, startedAt };
+      } catch (error) {
+        if (!isTraceFormatError(error)) throw error;
+        lastFormatError = describeTraceFormatError(provider, traceResponse, error as Error);
+      }
+    }
+    throw lastFormatError ?? traceFormatError("响应格式无效");
+  }
+
+  /**
+   * One round trip through the proxy to the first probe endpoint that answers. The exit check
+   * measures a trace provider; this measures the proxy, which is the number an operator compares
+   * nodes by. Goes through the same transports as the check, so a proxy that fails here fails there.
+   */
+  async measureLatency(proxy: unknown, options: ProxyLatencyOptions = {}): Promise<ProxyLatencyResult> {
+    const proxyUrl = proxyUrlFrom(proxy);
+    const timeoutSeconds = options.timeoutSeconds ?? DEFAULT_APP_SETTINGS.networkTrace.timeoutSeconds;
+    const targets = options.targets?.length ? options.targets : [...LATENCY_PROBE_TARGETS];
+    const checkedAt = new Date().toISOString();
+    const attempts = targets.map(async (target) => {
+      const startedAt = performance.now();
+      await this.readTrace(proxyUrl, { providerId: "latency-probe", url: target, method: "HEAD" }, timeoutSeconds);
+      return { target, latencyMs: Math.max(1, Math.round(performance.now() - startedAt)) };
+    });
+    try {
+      const winner = await Promise.any(attempts);
+      return { checkedAt, ok: true, latencyMs: winner.latencyMs, target: winner.target };
+    } catch (error) {
+      const failures = error instanceof AggregateError ? error.errors : [error];
+      const first = failures[0] instanceof Error ? failures[0] : new Error(String(failures[0]));
+      throw Object.assign(new Error(`真延迟检测失败：${first.message}`), {
+        status: errorStatus(first),
+        code: "PROXY_LATENCY_FAILED",
+      });
+    }
   }
 
   private async readLaunchGeo(dbPath: string | undefined, ip: string): Promise<LaunchGeoDbLookup> {
@@ -190,7 +249,11 @@ export class ProxyService {
     request: ProxyTraceRequest,
     timeoutSeconds: number,
   ): Promise<ProxyTraceResponse> {
-    const agent = new SocksProxyAgent(proxyUrl);
+    // `socks5h`, not `socks5`: Chromium hands the hostname to a SOCKS5 proxy and lets the far end resolve
+    // it, so the check must do the same or it measures a different path — and with the Xray engine on the
+    // loopback, a locally resolved name (a fake-IP resolver, a split-horizon DNS) would be sent to the
+    // node as an address the node cannot reach.
+    const agent = new SocksProxyAgent(proxyUrl.replace(/^socks5:\/\//i, "socks5h://"));
     const requestWithProtocol = new URL(request.url).protocol === "http:" ? httpRequest : httpsRequest;
     try {
       return await new Promise<ProxyTraceResponse>((resolve, reject) => {
@@ -306,16 +369,63 @@ function errorStatus(error: unknown): number {
 
 function proxyCheckErrorMessage(message: string): string {
   const lower = message.toLowerCase();
-  if (lower.includes("socket closed") || lower.includes("socket hang up") || lower.includes("econnreset")) {
-    return "代理连接已关闭，出口检测失败。请确认代理仍可用后重试。";
+  if (lower.includes("socks5 authentication failed") || lower.includes("authentication failed") || lower.includes("http 407") || lower.includes("proxy authentication required")) {
+    return "代理拒绝了账号密码（认证失败）。请检查用户名和密码。";
   }
-  if (lower.includes("timeout") || message.includes("超时")) {
-    return "代理出口检测超时。请确认代理质量或调高检测超时后重试。";
+  if (lower.includes("socket closed") || lower.includes("socket hang up") || lower.includes("econnreset") || lower.includes("epipe")) {
+    return "代理连接已关闭，出口检测失败。代理可能已失效、拒绝了该目标或正在限流，请稍后重试。";
   }
-  if (lower.includes("connect") || lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("ehostunreach")) {
+  if (lower.includes("timeout") || lower.includes("timed out") || message.includes("超时")) {
+    return "代理出口检测超时。代理响应过慢或目标被阻断；可调高检测超时或更换检测端点后重试。";
+  }
+  if (lower.includes("enotfound") || lower.includes("eai_again") || lower.includes("getaddrinfo")) {
+    return "无法解析代理服务器主机名。请检查主机名拼写和本机 DNS。";
+  }
+  if (lower.includes("econnrefused")) {
+    return "代理服务器拒绝连接（端口未开放或服务未运行）。请检查主机和端口。";
+  }
+  if (lower.includes("ehostunreach") || lower.includes("enetunreach")) {
+    return "代理服务器不可达（路由不可达）。请检查网络或代理地址。";
+  }
+  // The far end closed the tunnel before the TLS handshake even started: with a SOCKS/HTTP proxy that
+  // means the proxy (or the engine's node) could not connect to the target — not a TLS problem.
+  if (lower.includes("before secure tls connection") || lower.includes("disconnected before secure")) {
+    return "代理未能连通目标（节点不可达、拒绝连接或链路中断），连接在 TLS 握手前被断开。";
+  }
+  if (lower.includes("certificate") || lower.includes("self signed") || lower.includes("self-signed") || lower.includes("unable to verify") || lower.includes("tls")) {
+    return `与目标建立 TLS 连接失败：${message}。代理可能在拦截或替换证书。`;
+  }
+  if (lower.includes("socks")) {
+    return `SOCKS 握手失败：${message}。请确认协议是 SOCKS5 且代理允许该目标。`;
+  }
+  if (lower.includes("connect")) {
     return "无法连接到代理服务器。请检查协议、主机、端口和账号密码。";
   }
   return message || "代理出口检测失败";
+}
+
+const TRACE_FORMAT_ERROR = Symbol("trace-format-error");
+
+function traceFormatError(detail: string): Error {
+  return Object.assign(new Error(detail), { status: 502, [TRACE_FORMAT_ERROR]: true });
+}
+
+function isTraceFormatError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as Record<symbol, unknown>)[TRACE_FORMAT_ERROR] === true;
+}
+
+/** Names the provider and shows the start of what it actually sent, so a blocked page or a rate-limit notice is recognisable at a glance. */
+function describeTraceFormatError(provider: NetworkTraceProvider, response: ProxyTraceResponse, error: Error): Error {
+  const excerpt = response.text.replace(/\s+/g, " ").trim().slice(0, 80);
+  const status = typeof response.status === "number" ? `HTTP ${response.status}` : "无状态码";
+  const looksLikeHtml = /^\s*<(!doctype|html|head|body)/i.test(response.text);
+  const hint = looksLikeHtml
+    ? "端点返回了网页而不是检测数据，通常是代理注入了拦截页或该端点被屏蔽"
+    : "端点返回了无法解析的内容，可能被限流或屏蔽";
+  return Object.assign(
+    new Error(`出口检测端点 ${provider.name} 响应异常（${status}，${error.message}）：${hint}；已重试仍失败，可在设置 → 网络切换检测端点。${excerpt ? ` 响应开头：${excerpt}` : ""}`),
+    { status: 502, code: "PROXY_CHECK_TRACE_INVALID" },
+  );
 }
 
 export function parseNetworkTraceResponse(
@@ -540,18 +650,18 @@ function extractFirstIp(value: string): string | undefined {
 function parseJsonpObject(text: string, expectedCallback?: string): Record<string, unknown> {
   const trimmed = text.trim().replace(/^﻿/, "");
   const match = trimmed.match(/^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(([\s\S]*)\)\s*;?$/);
-  if (!match) throw Object.assign(new Error("出口检测 JSONP 响应格式无效"), { status: 502 });
+  if (!match) throw traceFormatError("JSONP 响应格式无效");
   const [, callbackName, jsonText] = match;
   if (expectedCallback && callbackName !== expectedCallback) {
-    throw Object.assign(new Error("出口检测 JSONP callback 不匹配"), { status: 502 });
+    throw traceFormatError("JSONP callback 不匹配");
   }
   try {
     const parsed = JSON.parse(jsonText.trim()) as unknown;
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
   } catch (error) {
-    throw Object.assign(new Error(`出口检测 JSONP JSON 无法解析：${(error as Error).message}`), { status: 502 });
+    throw traceFormatError(`JSONP JSON 无法解析：${(error as Error).message}`);
   }
-  throw Object.assign(new Error("出口检测 JSONP payload 不是对象"), { status: 502 });
+  throw traceFormatError("JSONP payload 不是对象");
 }
 
 function flattenJsonPayload(value: unknown, prefix = "", output: Record<string, string> = {}): Record<string, string> {

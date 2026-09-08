@@ -1,5 +1,6 @@
 import type { TranslationKey } from "../../i18n";
 import type { BinaryInfo } from "../../shared/browserCore";
+import type { XrayEngineStatus } from "../../shared/entities";
 import type { GithubMirrorProbeResponse } from "../../shared/githubMirror";
 import {
   ADVANCED_WEB_ENTRY_CODE,
@@ -25,12 +26,14 @@ export function SettingsDrawer({
   cancelBrowserCoreOperation,
   checkBrowserCoreUpdate,
   checkGithubMirrors,
+  checkXrayUpdate,
   close,
   clearBinaryCache,
   importBrowserCoreZip,
   exportAppBackup,
   initialTab,
   installBinary,
+  installXray,
   restoreAppBackup,
   openRuntimeCheck,
   requestAdvancedWebEntry,
@@ -39,12 +42,14 @@ export function SettingsDrawer({
   saveSettings,
   t,
   updateBinary,
+  xrayStatus = null,
 }: {
   binaryInfo: BinaryInfo | null;
   busy: string;
   cancelBrowserCoreOperation: () => Promise<void>;
   checkBrowserCoreUpdate: () => Promise<void>;
   checkGithubMirrors: (customGithubMirrorPrefix: string) => Promise<GithubMirrorProbeResponse>;
+  checkXrayUpdate?: () => Promise<unknown>;
   close: () => void;
   clearBinaryCache: () => Promise<void>;
   exportAppBackup: () => Promise<void>;
@@ -54,6 +59,7 @@ export function SettingsDrawer({
   ) => void;
   initialTab: SettingsTab;
   installBinary: () => Promise<void>;
+  installXray?: () => Promise<unknown>;
   openRuntimeCheck: () => void;
   requestAdvancedWebEntry: () => void;
   restoreAppBackup: () => Promise<void>;
@@ -62,6 +68,7 @@ export function SettingsDrawer({
   saveSettings: (patch: AppSettingsPatch) => Promise<void>;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
   updateBinary: () => Promise<void>;
+  xrayStatus?: XrayEngineStatus | null;
 }) {
   const normalized = normalizeSettings(settings);
   function setAdvancedWebEntry(advancedWebEntry: boolean) {
@@ -192,10 +199,14 @@ export function SettingsDrawer({
 
         <TabsContent value="network" className="motion-tab-content">
           <NetworkSettingsPanel
+            busy={busy}
             checkGithubMirrors={checkGithubMirrors}
+            checkXrayUpdate={checkXrayUpdate}
+            installXray={installXray}
             saveSettings={saveSettings}
             settings={normalized}
             t={t}
+            xrayStatus={xrayStatus}
           />
         </TabsContent>
 
