@@ -37,16 +37,55 @@ Desktop commands:
 
 ```bash
 npm run desktop:dev
+npm run desktop:portable
 npm run release:windows
 npm run release:linux
+npm run release:mac
 ```
 
+## Xray engine (universal proxy support)
+
+CloakBrowser itself only speaks HTTP, HTTPS and SOCKS5. CBPanel bundles an **Xray engine** that
+turns everything else into a local SOCKS5 proxy at launch, so a profile can run through any node
+you would otherwise use in v2rayN or Clash:
+
+- **Protocols**: VMess, VLESS, Trojan, Shadowsocks (including SS-2022), SOCKS5, HTTP — pasted as
+  `vmess://`, `vless://`, `trojan://`, `ss://`, `socks://`, `http://` share links, or imported in bulk
+  from a subscription URL / base64 subscription body (Proxies → Import nodes).
+- **Transports**: REALITY, XHTTP, gRPC, mKCP, WebSocket, HTTP/2, HTTPUpgrade, QUIC, TCP with HTTP
+  camouflage; uTLS fingerprints follow the profile's browser brand unless the link pins its own.
+- **Chained proxies**: any proxy (a plain socks5/http one included) can name a *front proxy* from the
+  library, giving `[this machine] → [front proxy] → [proxy] → [website]` — the layout used to hide the
+  real IP behind a residential exit.
+- **Dual stack**: an IPv4/IPv6 strategy per proxy (auto, IPv4/IPv6 first, IPv4/IPv6 only) decides
+  how the engine resolves the node address.
+- **Library tooling**: the proxy list is paged and supports multi-select with batch availability
+  checks, batch *real latency* probes (one round trip through the proxy to a small always-on
+  endpoint) and batch delete; the last result of both probes is shown on every row and in the
+  environment editor's proxy picker.
+- **Remembered subscriptions**: a subscription URL can be kept (tick *Remember this subscription*
+  when importing, or add one in the Subscriptions area of the proxy registry) and refreshed by hand
+  or on a schedule (every 1–168 h while the panel runs). A refresh makes the subscription's nodes
+  match what the address lists now — new nodes are added, vanished nodes removed, renamed nodes
+  renamed in place. A node an environment already uses (or another proxy chains through) is never
+  deleted: it leaves the subscription and stays as a standalone proxy, and standalone proxies are
+  never touched by a refresh. Deleting a subscription keeps its nodes by default.
+
+How it works: each launch that needs the engine starts its own `xray` process on a loopback SOCKS5
+port, the exit check runs through that port, CloakBrowser is launched against it, and the process is
+stopped with the browser. An engine that dies under a running browser is restarted on the same port.
+Xray-core is downloaded on demand from GitHub Releases into `data/xray/` (Settings → Network → Xray
+engine; the GitHub mirror setting applies) — or point the panel at your own `xray` binary.
+
 ## Downloads
+
+Artifacts are published on the [GitHub Releases](https://github.com/lkeme/CBPanel/releases) page.
 
 | Platform | Artifact |
 | --- | --- |
 | Windows | Installer `.exe` or portable `.zip` |
 | Linux | x64 `.AppImage` |
+| macOS | `.dmg` |
 
 Linux:
 
