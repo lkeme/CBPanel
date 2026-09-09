@@ -9,6 +9,7 @@ import {
   applyProfilePreset,
 } from "../../shared/profile";
 import type { GroupEntity, TagEntity } from "../../shared/entities";
+import type { WatermarkStyle } from "../../shared/watermark";
 import { Field, FormSection, OptionControl, Segmented } from "../ui/form-controls";
 import { Switch } from "../ui/switch";
 import { GroupPicker, TagPicker } from "./ProfileEditorIdentityPickers";
@@ -190,6 +191,17 @@ export function ProfileEditorRuntimeTab({
             onChange={(humanPreset) => setDraft({ ...draft, runtime: { ...draft.runtime, humanPreset } })}
           />
         </OptionControl>
+        <Field label={t("form.watermark")} help={t("tips.watermark")}>
+          <Segmented<WatermarkStyle>
+            value={draft.runtime.watermark}
+            options={[
+              { value: "off", label: t("watermark.off") },
+              { value: "banner", label: t("watermark.banner") },
+              { value: "enhanced", label: t("watermark.enhanced") },
+            ]}
+            onChange={(watermark) => setDraft({ ...draft, runtime: { ...draft.runtime, watermark } })}
+          />
+        </Field>
       </FormSection>
     </div>
   );

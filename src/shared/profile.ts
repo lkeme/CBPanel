@@ -10,6 +10,7 @@ import type {
   TrashEnvironment,
 } from "./entities";
 import { networkCheckSummaryText } from "./networkCheckDisplay";
+import { WATERMARK_STYLES, type WatermarkStyle } from "./watermark";
 import {
   XRAY_IP_STRATEGIES,
   type XrayIpStrategy,
@@ -100,6 +101,8 @@ export interface RuntimeSettings {
   geoip: boolean;
   humanize: boolean;
   humanPreset: HumanPreset;
+  /** Page overlay that identifies this environment. `off` injects nothing at all. */
+  watermark: WatermarkStyle;
   extensionPaths: string[];
   extraArgs: string[];
 }
@@ -558,6 +561,7 @@ export function defaultProfile(input: Partial<BrowserProfile> = {}): BrowserProf
       geoip: true,
       humanize: true,
       humanPreset: "default",
+      watermark: "off",
       extensionPaths: [],
       extraArgs: [],
     },
@@ -581,6 +585,14 @@ export function defaultProfile(input: Partial<BrowserProfile> = {}): BrowserProf
   return { ...mergeProfile(base, input), id };
 }
 
+const WATERMARK_STYLE_VALUES: ReadonlySet<string> = new Set(WATERMARK_STYLES);
+
+// A stored row from before the field existed, or a hand-edited/share-string value that is not one of
+// the three styles, must never reach the launcher: `off` is the only safe fallback.
+function normalizeWatermarkStyle(value: unknown): WatermarkStyle {
+  return typeof value === "string" && WATERMARK_STYLE_VALUES.has(value) ? (value as WatermarkStyle) : "off";
+}
+
 export function mergeProfile(base: BrowserProfile, input: Partial<BrowserProfile>): BrowserProfile {
   const cleanInput = omitUndefined(input);
   return {
@@ -592,6 +604,7 @@ export function mergeProfile(base: BrowserProfile, input: Partial<BrowserProfile
     runtime: {
       ...base.runtime,
       ...omitUndefined(cleanInput.runtime ?? {}),
+      watermark: normalizeWatermarkStyle(cleanInput.runtime?.watermark ?? base.runtime.watermark),
       extensionPaths: Array.isArray(cleanInput.runtime?.extensionPaths)
         ? cleanInput.runtime.extensionPaths
         : base.runtime.extensionPaths,

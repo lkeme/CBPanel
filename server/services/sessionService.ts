@@ -21,6 +21,7 @@ import {
 } from "../../src/shared/profile";
 import type { BrowserEnvironment, NetworkCheckResult } from "../../src/shared/entities";
 import { networkCheckSummaryText } from "../../src/shared/networkCheckDisplay";
+import { buildWatermarkScript } from "../../src/shared/watermark";
 import type { BrowserCoreTier } from "../../src/shared/browserCore";
 import { normalizeSettings, type AppSettings } from "../../src/shared/settings";
 import type { ExtensionLaunchRegistration, ExtensionService } from "./extensionService";
@@ -155,7 +156,9 @@ type PuppeteerBrowser = {
   newPage: () => Promise<PuppeteerPage>;
   pages: () => Promise<PuppeteerPage[]>;
   targets?: () => PuppeteerTarget[];
-  on?: (event: "disconnected", handler: () => void) => void;
+  // A real puppeteer Browser also emits "targetcreated" (cloakbrowser's own humanize layer listens to
+  // it); the handler's target is optional only so one signature covers both events.
+  on?: (event: "disconnected" | "targetcreated", handler: (target?: PuppeteerTarget) => void) => void;
   once?: (event: "disconnected", handler: () => void) => void;
 };
 
@@ -179,6 +182,7 @@ type PuppeteerPage = {
   createCDPSession?: () => Promise<unknown>;
   setUserAgent?: (userAgent: string) => Promise<void>;
   setViewport?: (viewport: { width: number; height: number }) => Promise<void>;
+  evaluateOnNewDocument?: (script: string) => Promise<unknown>;
 };
 
 type BrowserPageCdpSession = {
@@ -190,6 +194,7 @@ type PuppeteerTarget = {
   type: () => string;
   url: () => string;
   worker?: () => Promise<PuppeteerWorker | null>;
+  page?: () => Promise<PuppeteerPage | null>;
 };
 
 type PuppeteerWorker = {
@@ -1289,6 +1294,9 @@ export class SessionService {
 
     if (!context) throw new Error("CloakBrowser 未返回 BrowserContext");
     this.watchExternalClose(session, context, "close");
+    // Empty for `off`: an empty addInitScript would still be an observable surface, so skip the call.
+    const watermark = buildWatermarkScript(profile.name, profile.runtime.watermark);
+    if (watermark) await context.addInitScript(watermark);
     let page: ReturnType<BrowserContext["pages"]>[number] | undefined;
     const ready = (async (): Promise<RuntimeReady> => {
       const registrationBrowser = playwrightRegistrationMigrationBrowser(context);
@@ -1336,6 +1344,9 @@ export class SessionService {
     let page: ReturnType<BrowserContext["pages"]>[number] | undefined;
     const ready = (async (): Promise<RuntimeReady> => {
       context = await browser.newContext(buildPlaywrightContextOptions(profile));
+      // Covers every page this context creates, including later tabs and popups.
+      const watermark = buildWatermarkScript(profile.name, profile.runtime.watermark);
+      if (watermark) await context.addInitScript(watermark);
       // This launcher owns a Browser process, not a persistent context. A child context may close while
       // the browser remains connected, so only Browser.disconnected can confirm process exit and release
       // the generation hold. Failed initialization still flows through the browser-level close owner.
@@ -1391,6 +1402,11 @@ export class SessionService {
       page = await getOrCreatePuppeteerPage(browser);
       let warning: string | undefined;
       if (page) {
+        const watermark = buildWatermarkScript(profile.name, profile.runtime.watermark);
+        if (watermark) {
+          await page.evaluateOnNewDocument?.(watermark);
+          attachPuppeteerWatermark(browser, watermark);
+        }
         const setup = buildPuppeteerPageSetup(profile);
         if (setup.userAgent) await page.setUserAgent?.(setup.userAgent);
         if (setup.viewport) await page.setViewport?.(setup.viewport);
@@ -2946,6 +2962,26 @@ export async function getOrCreatePuppeteerPage(
   browser: Pick<PuppeteerBrowser, "pages" | "newPage">,
 ): Promise<PuppeteerPage> {
   return selectSafeStartPage(await browser.pages()) ?? (await browser.newPage());
+}
+
+/**
+ * Puppeteer has no context-level init script, so later tabs and popups only get the watermark through
+ * a `targetcreated` hook. The first document of a popup can still race the hook — the label then
+ * appears on its next navigation, not before. Best-effort: nothing here may fail the launch.
+ */
+function attachPuppeteerWatermark(browser: PuppeteerBrowser, script: string): void {
+  if (typeof browser.on !== "function") return;
+  browser.on("targetcreated", (target) => {
+    void (async () => {
+      try {
+        if (!target || target.type() !== "page" || typeof target.page !== "function") return;
+        const page = await target.page();
+        await page?.evaluateOnNewDocument?.(script);
+      } catch {
+        // The page closed or navigated before the hook attached; the label is best-effort only.
+      }
+    })();
+  });
 }
 
 function selectSafeStartPage<Page extends { url: () => string }>(pages: Page[]): Page | undefined {
