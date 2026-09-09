@@ -9,7 +9,7 @@ import { PasswordInput } from "../ui/PasswordInput";
 import { Field, Segmented } from "../ui/form-controls";
 import { SelectMenu } from "../ui/SelectMenu";
 import { maskManagedProxyForDisplay } from "./proxyDisplay";
-import { IpStrategyField, PreProxyField, XrayShareLinkField, proxyHealthSummary, proxyOptionMeta } from "./XrayProxyFields";
+import { IpStrategyField, PreProxyField, UtlsPreferenceField, XrayShareLinkField, proxyHealthSummary, proxyOptionMeta } from "./XrayProxyFields";
 
 export type ProxySourceMode = "local" | "managed";
 
@@ -118,12 +118,20 @@ export function ManualProxyFields({
           value={draft.proxy.preProxyId}
         />
         {(isXray || chained) && (
-          <IpStrategyField
-            disabled={!proxyEnabled || usingManagedProxy}
-            onChange={(ipStrategy) => updateProxyParts({ ipStrategy })}
-            t={t}
-            value={draft.proxy.ipStrategy}
-          />
+          <>
+            <IpStrategyField
+              disabled={!proxyEnabled || usingManagedProxy}
+              onChange={(ipStrategy) => updateProxyParts({ ipStrategy })}
+              t={t}
+              value={draft.proxy.ipStrategy}
+            />
+            <UtlsPreferenceField
+              disabled={!proxyEnabled || usingManagedProxy}
+              onChange={(utlsFingerprint) => updateProxyParts({ utlsFingerprint })}
+              t={t}
+              value={draft.proxy.utlsFingerprint}
+            />
+          </>
         )}
       </div>
     </fieldset>

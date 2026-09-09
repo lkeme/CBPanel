@@ -429,6 +429,7 @@ export class EnvironmentPackageService {
               // A package travels to another panel, where the front proxy's id means nothing.
               preProxyId: "",
               ipStrategy: proxy.ipStrategy,
+              utlsFingerprint: proxy.utlsFingerprint,
             },
             runtime: {
               ...environment.runtimeProfile.runtime,

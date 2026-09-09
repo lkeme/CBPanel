@@ -20,7 +20,7 @@ async function makeRepository(): Promise<{ repository: SqlitePanelRepository; di
 test("an xray proxy is stored from its share link and read back without the secret", async () => {
   const { repository, directory } = await makeRepository();
   try {
-    const created = await repository.createProxy({ scheme: "xray", shareLink: VLESS_LINK, ipStrategy: "ipv6-first" });
+    const created = await repository.createProxy({ scheme: "xray", shareLink: VLESS_LINK, ipStrategy: "ipv6-first", utlsFingerprint: "qq" });
     assert.equal(created.scheme, "xray");
     assert.equal(created.name, "香港 01");
     assert.equal(created.host, "node.example.com");
@@ -29,12 +29,14 @@ test("an xray proxy is stored from its share link and read back without the secr
     assert.equal(created.password, "");
     assert.equal(created.shareLink, VLESS_LINK);
     assert.equal(created.ipStrategy, "ipv6-first");
+    assert.equal(created.utlsFingerprint, "qq");
     assert.equal(created.xrayNode?.protocol, "vless");
     assert.equal(created.xrayNode?.network, "grpc");
     assert.equal(created.xrayNode?.security, "reality");
 
     const listed = (await repository.listProxies()).find((proxy) => proxy.id === created.id);
     assert.equal(listed?.shareLink, "");
+    assert.equal(listed?.utlsFingerprint, "qq");
     assert.equal(listed?.xrayNode?.protocol, "vless");
     assert.equal(listed?.host, "node.example.com");
 
@@ -66,6 +68,7 @@ test("updating with a masked share link keeps the real one, and self-chaining is
     assert.equal(plain.shareLink, "");
     assert.equal(plain.preProxyId, "");
     assert.equal(plain.ipStrategy, "auto");
+    assert.equal(plain.utlsFingerprint, "");
     assert.equal(plain.xrayNode, undefined);
   } finally {
     repository.close();
@@ -77,7 +80,7 @@ test("binding an environment to an xray proxy carries the engine fields into its
   const { repository, directory } = await makeRepository();
   try {
     const front = await repository.createProxy({ name: "Front", scheme: "socks5", host: "front.example.com", port: "1080" });
-    const node = await repository.createProxy({ scheme: "xray", shareLink: VLESS_LINK, preProxyId: front.id, ipStrategy: "ipv4-only" });
+    const node = await repository.createProxy({ scheme: "xray", shareLink: VLESS_LINK, preProxyId: front.id, ipStrategy: "ipv4-only", utlsFingerprint: "360" });
     const environment = await repository.createEnvironment(defaultProfile({ name: "Chained env" }));
     const bound = await repository.updateEnvironment(environment.id, { proxyId: node.id });
     assert.equal(bound.proxyId, node.id);
@@ -85,6 +88,7 @@ test("binding an environment to an xray proxy carries the engine fields into its
     assert.equal(bound.runtimeProfile.proxy.shareLink, VLESS_LINK);
     assert.equal(bound.runtimeProfile.proxy.preProxyId, front.id);
     assert.equal(bound.runtimeProfile.proxy.ipStrategy, "ipv4-only");
+    assert.equal(bound.runtimeProfile.proxy.utlsFingerprint, "360");
     assert.equal(bound.runtimeProfile.proxy.host, "node.example.com");
 
     const profile = await repository.getProfile(environment.id);
@@ -157,6 +161,7 @@ test("a database written before the engine fields gains them with their defaults
   database.exec("ALTER TABLE proxies DROP COLUMN share_link");
   database.exec("ALTER TABLE proxies DROP COLUMN pre_proxy_id");
   database.exec("ALTER TABLE proxies DROP COLUMN ip_strategy");
+  database.exec("ALTER TABLE proxies DROP COLUMN utls_fingerprint");
   database.prepare(`
     INSERT INTO proxies (id, name, scheme, host, port, username, password, bypass, notes, status, last_check_json, created_at, updated_at)
     VALUES ('proxy-legacy', 'Legacy', 'http', 'legacy.example.com', '8080', 'u', 'p', '', '', 'enabled', NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
@@ -170,9 +175,11 @@ test("a database written before the engine fields gains them with their defaults
     assert.equal(legacy?.shareLink, "");
     assert.equal(legacy?.preProxyId, "");
     assert.equal(legacy?.ipStrategy, "auto");
+    assert.equal(legacy?.utlsFingerprint, "");
     assert.equal(legacy?.password, "p");
-    const upgraded = await reopened.updateProxy("proxy-legacy", { ipStrategy: "ipv4-first" });
+    const upgraded = await reopened.updateProxy("proxy-legacy", { ipStrategy: "ipv4-first", utlsFingerprint: "edge" });
     assert.equal(upgraded.ipStrategy, "ipv4-first");
+    assert.equal(upgraded.utlsFingerprint, "edge");
   } finally {
     reopened.close();
     await fs.rm(directory, { recursive: true, force: true });

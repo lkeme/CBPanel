@@ -4,8 +4,10 @@ import type { TranslationKey } from "../../i18n";
 import type { ProxyEntity } from "../../shared/entities";
 import {
   XRAY_IP_STRATEGIES,
+  XRAY_UTLS_PREFERENCES,
   type ParsedXrayShareLink,
   type XrayIpStrategy,
+  type XrayUtlsPreference,
   describeXrayNode,
   isMaskedXrayShareLink,
   parseXrayShareLink,
@@ -185,4 +187,35 @@ export function IpStrategyField({
 
 function formatAddress(address: string): string {
   return address.includes(":") ? `[${address}]` : address;
+}
+
+/**
+ * The per-proxy uTLS ClientHello. `""` is "inherit the global setting" and must stay distinct from the
+ * explicit "auto" value, which overrides the global setting and follows the profile's brand.
+ */
+export function UtlsPreferenceField({
+  disabled = false,
+  onChange,
+  t,
+  value,
+}: {
+  disabled?: boolean;
+  onChange: (value: XrayUtlsPreference) => void;
+  t: Translate;
+  value: XrayUtlsPreference;
+}) {
+  return (
+    <Field label={t("form.utlsPreference")} help={t("tips.utlsPreference")}>
+      <SelectMenu<XrayUtlsPreference>
+        disabled={disabled}
+        onChange={onChange}
+        options={XRAY_UTLS_PREFERENCES.map((preference) => ({
+          value: preference,
+          label: preference === "" ? t("utls.inherit") : preference === "auto" ? t("xray.utls.auto") : preference,
+        }))}
+        placeholder={t("utls.inherit")}
+        value={value}
+      />
+    </Field>
+  );
 }

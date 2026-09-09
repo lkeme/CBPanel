@@ -1082,6 +1082,7 @@ function App() {
           shareLink: draft.proxy.shareLink,
           preProxyId: draft.proxy.preProxyId,
           ipStrategy: draft.proxy.ipStrategy,
+          utlsFingerprint: draft.proxy.utlsFingerprint,
           status: "enabled",
         }),
       });

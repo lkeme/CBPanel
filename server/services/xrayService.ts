@@ -291,7 +291,15 @@ export class XrayService {
     for (const warning of [...main.summary.warnings, ...(pre?.summary.warnings ?? [])]) {
       request.onEvent?.("warn", "Xray 节点参数提示", warning);
     }
-    const utlsFingerprint = deriveUtlsFingerprint(settings.xray.utlsFingerprint, request.fingerprint ?? {});
+    // A proxy's own uTLS choice wins over the global setting; an empty one inherits it. Each outbound
+    // resolves separately because the main node and the front proxy are different TLS hops.
+    const globalUtls = settings.xray.utlsFingerprint;
+    const utlsFingerprint = {
+      main: deriveUtlsFingerprint(request.proxy.utlsFingerprint || globalUtls, request.fingerprint ?? {}),
+      pre: request.preProxy
+        ? deriveUtlsFingerprint(request.preProxy.utlsFingerprint || globalUtls, request.fingerprint ?? {})
+        : undefined,
+    };
     const instanceDir = path.join(this.options.dataDir, "xray", "instances", safeFileName(request.ownerId));
     await fs.mkdir(instanceDir, { recursive: true });
     const configPath = path.join(instanceDir, "config.json");

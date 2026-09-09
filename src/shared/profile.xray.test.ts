@@ -11,6 +11,7 @@ import {
   normalizeProfile,
   normalizeProxySettings,
   normalizeXrayIpStrategy,
+  normalizeXrayUtlsPreference,
   parseProxyUrlInput,
   preflightProfile,
   proxyRequiresXray,
@@ -34,6 +35,7 @@ test("defaultProfile carries the engine fields with safe defaults", () => {
   assert.equal(proxy.shareLink, "");
   assert.equal(proxy.preProxyId, "");
   assert.equal(proxy.ipStrategy, "auto");
+  assert.equal(proxy.utlsFingerprint, "");
   // Profiles stored before the fields existed normalize onto the same defaults.
   const legacy = normalizeProfile({
     proxy: { enabled: true, raw: "", scheme: "socks5", host: "10.0.0.1", port: "1080", username: "", password: "", bypass: "" } as unknown as ProxySettings,
@@ -41,6 +43,21 @@ test("defaultProfile carries the engine fields with safe defaults", () => {
   assert.equal(legacy.proxy.shareLink, "");
   assert.equal(legacy.proxy.preProxyId, "");
   assert.equal(legacy.proxy.ipStrategy, "auto");
+  assert.equal(legacy.proxy.utlsFingerprint, "");
+});
+
+test("normalizeXrayUtlsPreference whitelists the panel's values and falls back to inherit", () => {
+  assert.equal(normalizeXrayUtlsPreference("qq"), "qq");
+  assert.equal(normalizeXrayUtlsPreference("360"), "360");
+  assert.equal(normalizeXrayUtlsPreference("hellorandomizednoalpn"), "hellorandomizednoalpn");
+  assert.equal(normalizeXrayUtlsPreference("chrome"), "chrome");
+  assert.equal(normalizeXrayUtlsPreference(""), "");
+  assert.equal(normalizeXrayUtlsPreference("definitely-not-a-fingerprint"), "");
+  assert.equal(normalizeXrayUtlsPreference(undefined), "");
+  assert.equal(normalizeXrayUtlsPreference(42), "");
+  // The stored value survives normalization and an unknown one never reaches the engine.
+  assert.equal(normalizeProxySettings(xrayProxy({ utlsFingerprint: "firefox" })).utlsFingerprint, "firefox");
+  assert.equal(normalizeProxySettings(xrayProxy({ utlsFingerprint: "bogus" as never })).utlsFingerprint, "");
 });
 
 test("normalizeProxySettings projects an xray link onto host/port and drops URL credentials", () => {
@@ -121,6 +138,7 @@ test("withLocalXrayProxy points the profile at the engine's inbound and keeps th
     shareLink: "",
     preProxyId: "",
     ipStrategy: "auto",
+    utlsFingerprint: "",
   });
   assert.equal(profile.proxy.scheme, "xray");
   assert.equal(buildProxyUrl(local.proxy), "socks5://127.0.0.1:41234");

@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   XRAY_MAIN_OUTBOUND_TAG,
   XRAY_PRE_OUTBOUND_TAG,
+  XRAY_UTLS_FINGERPRINTS,
+  XRAY_UTLS_PREFERENCES,
   XrayShareLinkError,
   buildXrayConfig,
   decodeBase64Content,
@@ -300,7 +302,7 @@ test("buildXrayConfig exposes one loopback SOCKS inbound routed to the main outb
 test("buildXrayConfig chains the main node through the front proxy at the transport layer", () => {
   const main = parseXrayShareLink(`vless://${UUID}@main.example.com:443?security=reality&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&sni=s`).outbound;
   const pre = parseXrayShareLink("socks5://u:p@front.example.com:1080").outbound;
-  const config = buildXrayConfig({ localPort: 1, main, pre, ipStrategy: "ipv4-first", utlsFingerprint: "chrome" });
+  const config = buildXrayConfig({ localPort: 1, main, pre, ipStrategy: "ipv4-first", utlsFingerprint: { main: "chrome" } });
   const [mainOut, preOut] = config.outbounds as Array<{ tag: string; proxySettings?: unknown; streamSettings?: { sockopt?: unknown; realitySettings?: { fingerprint?: string } } }>;
   assert.equal(mainOut.tag, XRAY_MAIN_OUTBOUND_TAG);
   assert.equal(preOut.tag, XRAY_PRE_OUTBOUND_TAG);
@@ -315,10 +317,33 @@ test("buildXrayConfig chains the main node through the front proxy at the transp
 
 test("buildXrayConfig keeps a link's own uTLS fingerprint ahead of the panel default", () => {
   const main = parseXrayShareLink(`trojan://pw@t.example.com:443?fp=safari`).outbound;
-  const config = buildXrayConfig({ localPort: 1, main, utlsFingerprint: "chrome", ipStrategy: "ipv6-only" });
+  const config = buildXrayConfig({ localPort: 1, main, utlsFingerprint: { main: "chrome" }, ipStrategy: "ipv6-only" });
   const mainOut = config.outbounds[0] as { streamSettings: { tlsSettings: { fingerprint?: string }; sockopt?: { domainStrategy?: string } } };
   assert.equal(mainOut.streamSettings.tlsSettings.fingerprint, "safari");
   assert.deepEqual(mainOut.streamSettings.sockopt, { domainStrategy: "UseIPv6" });
+});
+
+test("buildXrayConfig applies the uTLS fingerprint per outbound", () => {
+  const main = parseXrayShareLink(`vless://${UUID}@main.example.com:443?security=reality&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&sni=s`).outbound;
+  const pre = parseXrayShareLink(`vless://${UUID}@front.example.com:443?security=reality&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&sni=f`).outbound;
+  const config = buildXrayConfig({ localPort: 1, main, pre, utlsFingerprint: { main: "chrome", pre: "firefox" } });
+  const [mainOut, preOut] = config.outbounds as Array<{ tag: string; streamSettings?: { realitySettings?: { fingerprint?: string } } }>;
+  assert.equal(mainOut.streamSettings?.realitySettings?.fingerprint, "chrome");
+  assert.equal(preOut.streamSettings?.realitySettings?.fingerprint, "firefox");
+
+  // Omitting the pre entry leaves the front proxy without a panel default, and the main one untouched.
+  const partial = buildXrayConfig({ localPort: 1, main, pre, utlsFingerprint: { main: "edge" } });
+  const [partialMain, partialPre] = partial.outbounds as Array<{ streamSettings?: { realitySettings?: { fingerprint?: string } } }>;
+  assert.equal(partialMain.streamSettings?.realitySettings?.fingerprint, "edge");
+  assert.equal(partialPre.streamSettings?.realitySettings?.fingerprint, undefined);
+});
+
+test("the uTLS value lists carry the panel's own choices plus the inherit sentinel", () => {
+  for (const fingerprint of ["qq", "360", "hellorandomizednoalpn"] as const) {
+    assert.equal(XRAY_UTLS_FINGERPRINTS.includes(fingerprint), true);
+  }
+  assert.deepEqual(XRAY_UTLS_PREFERENCES, ["", ...XRAY_UTLS_FINGERPRINTS]);
+  assert.equal(XRAY_UTLS_PREFERENCES[0], "");
 });
 
 test("IP strategy and uTLS helpers map to Xray vocabulary", () => {

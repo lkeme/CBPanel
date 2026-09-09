@@ -8,6 +8,7 @@ import {
   normalizeProfile,
   normalizeProxyScheme,
   normalizeXrayIpStrategy,
+  normalizeXrayUtlsPreference,
   nowIso,
 } from "../../src/shared/profile";
 import {
@@ -144,6 +145,7 @@ type ProxyRow = {
   share_link: string | null;
   pre_proxy_id: string | null;
   ip_strategy: string | null;
+  utls_fingerprint: string | null;
   subscription_id: string | null;
   created_at: string;
   updated_at: string;
@@ -1432,6 +1434,7 @@ export class SqlitePanelRepository implements PanelRepository {
         share_link TEXT NOT NULL DEFAULT '',
         pre_proxy_id TEXT NOT NULL DEFAULT '',
         ip_strategy TEXT NOT NULL DEFAULT 'auto',
+        utls_fingerprint TEXT NOT NULL DEFAULT '',
         subscription_id TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -1569,6 +1572,7 @@ export class SqlitePanelRepository implements PanelRepository {
     this.ensureColumn("proxies", "share_link", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("proxies", "pre_proxy_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("proxies", "ip_strategy", "TEXT NOT NULL DEFAULT 'auto'");
+    this.ensureColumn("proxies", "utls_fingerprint", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("proxies", "last_latency_json", "TEXT");
     // Remembered subscriptions: a proxy that names none is standalone, which is what every proxy
     // written before subscriptions existed was.
@@ -2163,8 +2167,8 @@ export class SqlitePanelRepository implements PanelRepository {
       .prepare(`
         INSERT INTO proxies (
           id, name, scheme, host, port, username, password, bypass, notes, status,
-          last_check_json, last_latency_json, share_link, pre_proxy_id, ip_strategy, subscription_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          last_check_json, last_latency_json, share_link, pre_proxy_id, ip_strategy, utls_fingerprint, subscription_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           scheme = excluded.scheme,
@@ -2180,6 +2184,7 @@ export class SqlitePanelRepository implements PanelRepository {
           share_link = excluded.share_link,
           pre_proxy_id = excluded.pre_proxy_id,
           ip_strategy = excluded.ip_strategy,
+          utls_fingerprint = excluded.utls_fingerprint,
           subscription_id = excluded.subscription_id,
           updated_at = excluded.updated_at
       `)
@@ -2191,8 +2196,8 @@ export class SqlitePanelRepository implements PanelRepository {
       .prepare(`
         INSERT INTO proxies (
           id, name, scheme, host, port, username, password, bypass, notes, status,
-          last_check_json, last_latency_json, share_link, pre_proxy_id, ip_strategy, subscription_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          last_check_json, last_latency_json, share_link, pre_proxy_id, ip_strategy, utls_fingerprint, subscription_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(...proxyRowValues(proxy));
   }
@@ -2859,6 +2864,7 @@ function normalizeProxyEntity(input: Partial<ProxyEntity>): ProxyEntity {
   const preProxyId = typeof input.preProxyId === "string" ? input.preProxyId.trim() : "";
   if (preProxyId && preProxyId === id) throw Object.assign(new Error("前置代理不能是代理自身"), { status: 400 });
   const ipStrategy = normalizeXrayIpStrategy(input.ipStrategy);
+  const utlsFingerprint = normalizeXrayUtlsPreference(input.utlsFingerprint);
   const subscriptionId = typeof input.subscriptionId === "string" ? input.subscriptionId.trim() : "";
   const bypass = typeof input.bypass === "string" ? input.bypass : "localhost,127.0.0.1";
   const notes = typeof input.notes === "string" ? input.notes.trim() : "";
@@ -2893,6 +2899,7 @@ function normalizeProxyEntity(input: Partial<ProxyEntity>): ProxyEntity {
       shareLink,
       preProxyId,
       ipStrategy,
+      utlsFingerprint,
       xrayNode: parsed.summary,
       subscriptionId,
       createdAt: input.createdAt ?? now,
@@ -2919,6 +2926,7 @@ function normalizeProxyEntity(input: Partial<ProxyEntity>): ProxyEntity {
     shareLink: "",
     preProxyId,
     ipStrategy,
+    utlsFingerprint,
     subscriptionId,
     createdAt: input.createdAt ?? now,
     updatedAt: input.updatedAt ?? now,
@@ -2943,6 +2951,7 @@ function proxyRowValues(proxy: ProxyEntity): Array<string | null> {
     proxy.shareLink ?? "",
     proxy.preProxyId ?? "",
     normalizeXrayIpStrategy(proxy.ipStrategy),
+    normalizeXrayUtlsPreference(proxy.utlsFingerprint),
     proxy.subscriptionId ?? "",
     proxy.createdAt,
     proxy.updatedAt,
@@ -3095,6 +3104,7 @@ function proxyToProfileSettings(proxy: ProxyEntity): BrowserProfile["proxy"] {
     shareLink: proxy.shareLink,
     preProxyId: proxy.preProxyId,
     ipStrategy: proxy.ipStrategy,
+    utlsFingerprint: proxy.utlsFingerprint,
   };
 }
 
@@ -3213,6 +3223,7 @@ function proxyFromRow(row: ProxyRow, options: { includeSecrets: boolean }): Prox
     shareLink: options.includeSecrets ? row.share_link ?? "" : "",
     preProxyId: row.pre_proxy_id ?? "",
     ipStrategy: normalizeXrayIpStrategy(row.ip_strategy),
+    utlsFingerprint: normalizeXrayUtlsPreference(row.utls_fingerprint),
     ...(xrayNode ? { xrayNode } : {}),
     subscriptionId: row.subscription_id ?? "",
     createdAt: row.created_at,

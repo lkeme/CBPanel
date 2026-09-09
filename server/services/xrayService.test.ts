@@ -154,6 +154,25 @@ test("start chains a native proxy behind a front proxy and masks both", async ()
   }
 });
 
+test("a proxy's own uTLS fingerprint overrides the global setting per outbound", async () => {
+  const harness = await createHarness({ xray: { utlsFingerprint: "firefox" } });
+  try {
+    await harness.service.start({
+      ownerId: "profile-utls",
+      proxy: xrayProxy({ utlsFingerprint: "qq" }),
+      // An empty value inherits the global setting; the two hops resolve independently.
+      preProxy: xrayProxy({ utlsFingerprint: "" }),
+    });
+    const config = JSON.parse(await fs.readFile(path.join(harness.dataDir, "xray", "instances", "profile-utls", "config.json"), "utf8")) as {
+      outbounds: Array<{ tag: string; streamSettings?: { realitySettings?: { fingerprint?: string } } }>;
+    };
+    assert.equal(config.outbounds[0].streamSettings?.realitySettings?.fingerprint, "qq");
+    assert.equal(config.outbounds[1].streamSettings?.realitySettings?.fingerprint, "firefox");
+  } finally {
+    await harness.dispose();
+  }
+});
+
 test("start retries on another port when the engine reports a bind failure", async () => {
   const harness = await createHarness();
   try {

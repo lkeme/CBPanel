@@ -36,12 +36,13 @@ test("GET /api/xray reports the engine as not installed on a fresh data director
 });
 
 test("xray proxies round-trip through the registry routes with the share link kept secret", async () => {
-  const created = await panel.request("POST", "/api/proxies", { scheme: "xray", shareLink: VLESS_LINK, ipStrategy: "ipv4-first" });
+  const created = await panel.request("POST", "/api/proxies", { scheme: "xray", shareLink: VLESS_LINK, ipStrategy: "ipv4-first", utlsFingerprint: "hellorandomizednoalpn" });
   assert.equal(created.status, 201);
   const proxy = created.body as ProxyEntity;
   assert.equal(proxy.name, "Node A");
   assert.equal(proxy.host, "node.example.com");
   assert.equal(proxy.port, "443");
+  assert.equal(proxy.utlsFingerprint, "hellorandomizednoalpn");
   assert.equal(proxy.xrayNode?.protocol, "vless");
   assert.equal(proxy.xrayNode?.network, "ws");
 

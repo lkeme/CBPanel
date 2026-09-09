@@ -24,7 +24,7 @@ import { Field, Segmented, ToggleField } from "../ui/form-controls";
 import { PasswordInput } from "../ui/PasswordInput";
 import { SelectMenu } from "../ui/SelectMenu";
 import { maskManagedProxyForDisplay } from "../profiles/proxyDisplay";
-import { IpStrategyField, PreProxyField, XrayShareLinkField, analyzeXrayShareLink, xrayShareLinkError } from "../profiles/XrayProxyFields";
+import { IpStrategyField, PreProxyField, UtlsPreferenceField, XrayShareLinkField, analyzeXrayShareLink, xrayShareLinkError } from "../profiles/XrayProxyFields";
 import { useExtensionAcquisitionDialogFocus } from "./extensionAcquisitionDialogFocus";
 import type { ExtensionAcquisitionUiTranslator } from "./extensionAcquisitionUi";
 
@@ -194,6 +194,7 @@ function proxyEditorInitialDraft(proxy?: ProxyEntity): ProxyEntity {
     shareLink: proxy?.shareLink ?? "",
     preProxyId: proxy?.preProxyId ?? "",
     ipStrategy: proxy?.ipStrategy ?? "auto",
+    utlsFingerprint: proxy?.utlsFingerprint ?? "",
     xrayNode: proxy?.xrayNode,
     createdAt: proxy?.createdAt ?? timestamp,
     updatedAt: proxy?.updatedAt ?? timestamp,
@@ -1041,7 +1042,10 @@ export function ProxyEditorDialog({
           value={draft.preProxyId}
         />
         {(isXray || chained) && (
-          <IpStrategyField onChange={(ipStrategy) => updateParts({ ipStrategy })} t={t} value={draft.ipStrategy} />
+          <>
+            <IpStrategyField onChange={(ipStrategy) => updateParts({ ipStrategy })} t={t} value={draft.ipStrategy} />
+            <UtlsPreferenceField onChange={(utlsFingerprint) => updateParts({ utlsFingerprint })} t={t} value={draft.utlsFingerprint} />
+          </>
         )}
         <Field label={t("form.notes")} wide>
           <textarea value={draft.notes} onChange={(event) => updateParts({ notes: event.target.value })} placeholder={t("placeholder.notes")} />

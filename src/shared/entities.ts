@@ -1,6 +1,6 @@
 import type { CloakBrowserDiagnostics } from "./browserCore";
 import type { BrowserProfile, ProfileMode, ProxyScheme } from "./profile";
-import type { XrayIpStrategy, XrayNodeSummary } from "./xray";
+import type { XrayIpStrategy, XrayNodeSummary, XrayUtlsPreference } from "./xray";
 import type {
   ExtensionProvenanceV1,
   ExtensionStoreIdentity,
@@ -160,6 +160,8 @@ export interface ProxyEntity {
   /** Front proxy (another library entry) for a `[local] -> [front] -> [this] -> [target]` chain, or "". */
   preProxyId: string;
   ipStrategy: XrayIpStrategy;
+  /** The node's own uTLS ClientHello, or "" to inherit the global Xray setting. */
+  utlsFingerprint: XrayUtlsPreference;
   /** Server-derived, credential-free view of an xray node so the panel can badge and search it without the link. */
   xrayNode?: XrayNodeSummary;
   /**

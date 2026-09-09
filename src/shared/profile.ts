@@ -13,7 +13,9 @@ import { networkCheckSummaryText } from "./networkCheckDisplay";
 import { WATERMARK_STYLES, type WatermarkStyle } from "./watermark";
 import {
   XRAY_IP_STRATEGIES,
+  XRAY_UTLS_PREFERENCES,
   type XrayIpStrategy,
+  type XrayUtlsPreference,
   describeXrayNode,
   maskXrayShareLink,
   parseXrayShareLink,
@@ -60,6 +62,8 @@ export interface ProxySettings {
   preProxyId: string;
   /** How the Xray engine resolves the node address when it dials it (dual-stack policy). */
   ipStrategy: XrayIpStrategy;
+  /** The node's own uTLS ClientHello, or "" to inherit the global Xray setting. */
+  utlsFingerprint: XrayUtlsPreference;
 }
 
 export type ProxyUrlParts = Pick<ProxySettings, "scheme" | "host" | "port" | "username" | "password">;
@@ -530,6 +534,7 @@ export function defaultProfile(input: Partial<BrowserProfile> = {}): BrowserProf
       shareLink: "",
       preProxyId: "",
       ipStrategy: "auto",
+      utlsFingerprint: "",
     },
     fingerprint: {
       seed: "",
@@ -913,6 +918,13 @@ export function normalizeXrayIpStrategy(value: unknown): XrayIpStrategy {
     : "auto";
 }
 
+/** A stored row from before the field existed, or a hand-edited value, inherits the global setting. */
+export function normalizeXrayUtlsPreference(value: unknown): XrayUtlsPreference {
+  return typeof value === "string" && (XRAY_UTLS_PREFERENCES as readonly string[]).includes(value)
+    ? (value as XrayUtlsPreference)
+    : "";
+}
+
 /**
  * The stored shape with the engine fields made total. An `xray` proxy keeps `host`/`port` in step
  * with its share link so every place that prints `scheme://host:port` — the table, the library
@@ -927,6 +939,7 @@ export function normalizeProxySettings(proxy: ProxySettings): ProxySettings {
     shareLink,
     preProxyId: typeof proxy.preProxyId === "string" ? proxy.preProxyId.trim() : "",
     ipStrategy: normalizeXrayIpStrategy(proxy.ipStrategy),
+    utlsFingerprint: normalizeXrayUtlsPreference(proxy.utlsFingerprint),
   };
   if (scheme === "xray") {
     const parsed = tryParseXrayShareLink(shareLink);
@@ -984,6 +997,7 @@ export function withLocalXrayProxy(profile: BrowserProfile, localPort: number): 
       shareLink: "",
       preProxyId: "",
       ipStrategy: "auto",
+      utlsFingerprint: "",
     },
   };
 }

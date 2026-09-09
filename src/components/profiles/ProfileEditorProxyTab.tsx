@@ -87,6 +87,7 @@ export function ProfileEditorProxyTab({
         shareLink: proxy.shareLink,
         preProxyId: proxy.preProxyId,
         ipStrategy: proxy.ipStrategy,
+        utlsFingerprint: proxy.utlsFingerprint,
       },
     });
   };

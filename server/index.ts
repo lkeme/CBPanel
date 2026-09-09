@@ -336,6 +336,7 @@ function proxySettingsFrom(proxy: ProxyEntity): ProxySettings {
     shareLink: proxy.shareLink,
     preProxyId: proxy.preProxyId,
     ipStrategy: proxy.ipStrategy,
+    utlsFingerprint: proxy.utlsFingerprint,
   };
 }
 

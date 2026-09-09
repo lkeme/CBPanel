@@ -25,7 +25,22 @@ export type XrayLogLevel = "none" | "error" | "warning" | "info" | "debug";
 export type XrayIpStrategy = "auto" | "ipv4-first" | "ipv6-first" | "ipv4-only" | "ipv6-only";
 
 /** The uTLS ClientHello a TLS/REALITY node connection imitates. "auto" follows the profile's fingerprint brand. */
-export type XrayUtlsFingerprint = "auto" | "chrome" | "firefox" | "safari" | "edge" | "ios" | "android" | "random" | "randomized";
+export type XrayUtlsFingerprint =
+  | "auto"
+  | "chrome"
+  | "firefox"
+  | "safari"
+  | "edge"
+  | "ios"
+  | "android"
+  | "qq"
+  | "360"
+  | "hellorandomizednoalpn"
+  | "random"
+  | "randomized";
+
+/** A per-proxy uTLS choice: a concrete fingerprint, or "" to inherit the global setting. */
+export type XrayUtlsPreference = XrayUtlsFingerprint | "";
 
 export const XRAY_PROTOCOLS: readonly XrayProtocol[] = ["vmess", "vless", "trojan", "shadowsocks", "socks", "http"];
 export const XRAY_IP_STRATEGIES: readonly XrayIpStrategy[] = ["auto", "ipv4-first", "ipv6-first", "ipv4-only", "ipv6-only"];
@@ -37,9 +52,14 @@ export const XRAY_UTLS_FINGERPRINTS: readonly XrayUtlsFingerprint[] = [
   "edge",
   "ios",
   "android",
+  "qq",
+  "360",
+  "hellorandomizednoalpn",
   "random",
   "randomized",
 ];
+/** `""` first, so a picker can offer "inherit the global setting" ahead of the concrete values. */
+export const XRAY_UTLS_PREFERENCES: readonly XrayUtlsPreference[] = ["", ...XRAY_UTLS_FINGERPRINTS];
 export const XRAY_LOG_LEVELS: readonly XrayLogLevel[] = ["none", "error", "warning", "info", "debug"];
 export const XRAY_MAIN_OUTBOUND_TAG = "proxy-main";
 export const XRAY_PRE_OUTBOUND_TAG = "proxy-pre";
@@ -138,8 +158,11 @@ export interface XrayConfigOptions {
   /** The front proxy of a `[local] -> [pre] -> [main] -> [target]` chain. */
   pre?: XrayOutbound;
   ipStrategy?: XrayIpStrategy;
-  /** Applied to every TLS/REALITY stream whose link did not pin its own `fp`. */
-  utlsFingerprint?: string;
+  /**
+   * The uTLS ClientHello to apply per outbound, resolved by the caller. Applied to every TLS/REALITY
+   * stream whose link did not pin its own `fp`.
+   */
+  utlsFingerprint?: { main?: string; pre?: string };
   logLevel?: XrayLogLevel;
   udp?: boolean;
 }
@@ -393,10 +416,10 @@ export function buildXrayConfig(options: XrayConfigOptions): XrayConfig {
   const pre = options.pre ? cloneOutbound(options.pre, XRAY_PRE_OUTBOUND_TAG) : undefined;
   const domainStrategy = sockoptDomainStrategy(options.ipStrategy);
 
-  for (const outbound of [main, pre]) {
-    if (!outbound) continue;
-    applyUtlsFingerprint(outbound, options.utlsFingerprint);
-  }
+  // Each outbound can carry its own ClientHello: the main node and the front proxy are separate
+  // TLS/REALITY hops, and a node's link may already pin one.
+  applyUtlsFingerprint(main, options.utlsFingerprint?.main);
+  if (pre) applyUtlsFingerprint(pre, options.utlsFingerprint?.pre);
   // The dialing outbound is the one that resolves a hostname locally: with a chain that is the
   // front proxy, since the main node's address travels to the front proxy as a name.
   const dialing = pre ?? main;
