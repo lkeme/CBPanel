@@ -5,6 +5,7 @@ import type { BrowserProfile, ProxyScheme, ProxySettings } from "../../shared/pr
 import { describeXrayProxy, maskProxyUrlForDisplay, proxyRequiresXray, proxyUsesXray } from "../../shared/profile";
 import type { ProxyEntity, XrayEngineStatus } from "../../shared/entities";
 import type { XrayNativeProxyRouting } from "../../shared/settings";
+import type { XrayUtlsFingerprint } from "../../shared/xray";
 import { PasswordInput } from "../ui/PasswordInput";
 import { Field, Segmented } from "../ui/form-controls";
 import { SelectMenu } from "../ui/SelectMenu";
@@ -45,6 +46,7 @@ export function ManagedProxyPicker({
 
 export function ManualProxyFields({
   draft,
+  globalUtlsFingerprint,
   proxies,
   proxyEnabled,
   proxyUrlError,
@@ -55,6 +57,7 @@ export function ManualProxyFields({
   usingManagedProxy,
 }: {
   draft: BrowserProfile;
+  globalUtlsFingerprint?: XrayUtlsFingerprint;
   proxies: ProxyEntity[];
   proxyEnabled: boolean;
   proxyUrlError: string;
@@ -131,6 +134,7 @@ export function ManualProxyFields({
         {utlsApplies && (
           <UtlsPreferenceField
             disabled={!proxyEnabled || usingManagedProxy}
+            globalUtls={globalUtlsFingerprint}
             onChange={(utlsFingerprint) => updateProxyParts({ utlsFingerprint })}
             t={t}
             value={draft.proxy.utlsFingerprint}

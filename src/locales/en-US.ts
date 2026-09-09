@@ -958,6 +958,8 @@ export const enUS: Dictionary = {
   "form.utlsPreference": "uTLS fingerprint",
   "tips.utlsPreference": "The ClientHello this node's TLS/REALITY handshake imitates, overriding the global value in Settings; \"Inherit global\" uses whatever Settings holds. Auto follows the profile's browser brand; a link's own fp parameter still wins.",
   "utls.inherit": "Inherit global",
+  "utls.inheritResolved": "Inherit global (currently: {value})",
+  "utls.inheritAuto": "Auto (follows the profile brand)",
   "proxy.statusDisabled": "disabled",
   "proxy.xray.viaEngine": "via the Xray engine",
   "proxy.xray.chained": "Front proxy: {name}",

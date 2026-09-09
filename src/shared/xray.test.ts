@@ -336,6 +336,12 @@ test("buildXrayConfig applies the uTLS fingerprint per outbound", () => {
   const [partialMain, partialPre] = partial.outbounds as Array<{ streamSettings?: { realitySettings?: { fingerprint?: string } } }>;
   assert.equal(partialMain.streamSettings?.realitySettings?.fingerprint, "edge");
   assert.equal(partialPre.streamSettings?.realitySettings?.fingerprint, undefined);
+
+  // A plain https proxy hop is security "tls", so a per-proxy override has to land there as well.
+  const https = xrayOutboundFromProxy({ scheme: "https", host: "proxy.example.com", port: "443", username: "", password: "", shareLink: "" }).outbound;
+  const httpsConfig = buildXrayConfig({ localPort: 1, main: https, utlsFingerprint: { main: "360" } });
+  const httpsMain = httpsConfig.outbounds[0] as { streamSettings?: { tlsSettings?: { fingerprint?: string } } };
+  assert.equal(httpsMain.streamSettings?.tlsSettings?.fingerprint, "360");
 });
 
 test("the uTLS value lists carry the panel's own choices plus the inherit sentinel", () => {

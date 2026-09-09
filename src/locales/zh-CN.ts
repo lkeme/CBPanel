@@ -953,6 +953,8 @@ export const zhCN = {
   "form.utlsPreference": "uTLS 指纹",
   "tips.utlsPreference": "该节点到服务器 TLS/REALITY 握手模拟的 ClientHello，覆盖设置页的全局值；“继承全局”使用设置页当前值。auto 跟随环境指纹的浏览器品牌；链接自带 fp 参数时仍以链接为准。",
   "utls.inherit": "继承全局",
+  "utls.inheritResolved": "继承全局（当前：{value}）",
+  "utls.inheritAuto": "自动（跟随环境品牌）",
   "proxy.statusDisabled": "已停用",
   "proxy.xray.viaEngine": "经 Xray 引擎中转",
   "proxy.xray.chained": "前置代理：{name}",

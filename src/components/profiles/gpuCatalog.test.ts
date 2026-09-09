@@ -124,3 +124,23 @@ test("an unknown platform offers every entry instead of emptying the menu", () =
     GPU_PROFILE_CATALOG.map((entry) => entry.id),
   );
 });
+
+test("the picker value always resolves inside the offered options", () => {
+  // SelectMenu falls back to its placeholder whenever the value is not an option, so a dropped row
+  // would silently show "Custom" while the profile still holds the catalog pair.
+  for (const platform of ["auto", "windows", "macos", "linux"] as const) {
+    for (const entry of GPU_PROFILE_CATALOG) {
+      const value = gpuSelectionValue(entry.vendor, entry.renderer);
+      assert.ok(
+        gpuCatalogOptions(platform, entry.vendor, entry.renderer).some((option) => option.id === value),
+        `${entry.id} under ${platform} must keep its own row`,
+      );
+    }
+    // The custom marker is a placeholder signal, never a selectable row.
+    assert.equal(
+      gpuCatalogOptions(platform, "NVIDIA Corporation", "NVIDIA GeForce RTX 3060").some((option) => option.id === GPU_CUSTOM_VALUE),
+      false,
+      `${platform} must not offer the custom marker as an option`,
+    );
+  }
+});

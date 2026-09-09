@@ -53,7 +53,8 @@ you would otherwise use in v2rayN or Clash:
   `vmess://`, `vless://`, `trojan://`, `ss://`, `socks://`, `http://` share links, or imported in bulk
   from a subscription URL / base64 subscription body (Proxies → Import nodes).
 - **Transports**: REALITY, XHTTP, gRPC, mKCP, WebSocket, HTTP/2, HTTPUpgrade, QUIC, TCP with HTTP
-  camouflage; uTLS fingerprints follow the profile's browser brand unless the link pins its own.
+  camouflage; the uTLS ClientHello is the proxy entry's own setting, else the global one, and `auto`
+  follows the profile's browser brand — a link's own `fp` parameter still wins.
 - **Chained proxies**: any proxy (a plain socks5/http one included) can name a *front proxy* from the
   library, giving `[this machine] → [front proxy] → [proxy] → [website]` — the layout used to hide the
   real IP behind a residential exit.

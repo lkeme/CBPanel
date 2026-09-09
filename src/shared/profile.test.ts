@@ -35,6 +35,7 @@ import {
   validateStartUrl,
 } from "./profile";
 import type { BrowserProfile } from "./profile";
+import { buildWatermarkScript } from "./watermark";
 
 test("defaultProfile starts on CreepJS for first-run fingerprint inspection", () => {
   assert.equal(defaultProfile().startUrl, DEFAULT_START_URL);
@@ -1205,6 +1206,75 @@ test("a profile name cannot break out of the generated watermark literal", () =>
   // Backticks and `${` are escaped, so the copied snippet can neither end nor interpolate the literal.
   assert.ok(code.includes("a\\`b\\${process.exit(1)}c"));
   assert.equal(code.includes("a`b${process.exit"), false);
+});
+
+/**
+ * Runs the generated snippet against stub launchers and returns every script it registered. The
+ * snippet is parsed (so an incomplete escape throws here) and the argument is compared to what the
+ * launcher itself builds, which a substring assertion cannot prove.
+ */
+async function captureInjectedScripts(code: string): Promise<string[]> {
+  const scripts: string[] = [];
+  const page = {
+    url: () => "about:blank",
+    goto: async () => undefined,
+    setUserAgent: async () => undefined,
+    setViewport: async () => undefined,
+    evaluateOnNewDocument: async (script: string) => {
+      scripts.push(script);
+    },
+  };
+  const universal: Record<string, unknown> = {
+    addInitScript: async (script: string) => {
+      scripts.push(script);
+    },
+    newPage: async () => page,
+    pages: () => [],
+    newContext: async () => universal,
+    close: async () => undefined,
+    on: () => undefined,
+    once: () => undefined,
+  };
+  const body = code
+    .split("\n")
+    .filter((line) => !/^import .* from .*;$/.test(line))
+    .join("\n");
+  const imported = [...code.matchAll(/^import \{ ([^}]+) \} from/gm)].map((match) => match[1].trim());
+  const factory = new Function(...imported, `return (async () => {\n${body}\n})();`);
+  await factory(...imported.map(() => async () => universal));
+  return scripts;
+}
+
+test("a hostile profile name round-trips into the generated watermark script", async () => {
+  const names = [
+    "a`b${process.exit(1)}c",
+    "back\\slash",
+    "trailing\\",
+    "line\nbreak",
+    // U+2028/U+2029: JSON.stringify leaves these raw, so they must survive the template literal.
+    "  ",
+    "${`${`}`}",
+    "\\`${x}\\`",
+  ];
+
+  for (const name of names) {
+    for (const launcher of ["playwright-context", "playwright-browser", "puppeteer-browser"] as const) {
+      for (const mode of ["persistent", "ephemeral"] as const) {
+        const profile = defaultProfile({
+          name,
+          mode,
+          runtime: { ...defaultProfile().runtime, launcher, watermark: "banner" },
+        });
+        const scripts = await captureInjectedScripts(generateLaunchCode(profile));
+
+        assert.deepEqual(
+          scripts,
+          [buildWatermarkScript(name, "banner")],
+          `${launcher}/${mode} with name ${JSON.stringify(name)}`,
+        );
+      }
+    }
+  }
 });
 
 test("residential proxy preset preserves existing proxy credentials", () => {

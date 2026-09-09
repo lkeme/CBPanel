@@ -168,6 +168,18 @@ test("a proxy's own uTLS fingerprint overrides the global setting per outbound",
     };
     assert.equal(config.outbounds[0].streamSettings?.realitySettings?.fingerprint, "qq");
     assert.equal(config.outbounds[1].streamSettings?.realitySettings?.fingerprint, "firefox");
+
+    // "auto" is a value, not a synonym for inherit: it overrides the concrete global and follows the
+    // profile's brand, which is what the editor's separate "Auto" option promises.
+    await harness.service.start({
+      ownerId: "profile-utls-auto",
+      proxy: xrayProxy({ utlsFingerprint: "auto" }),
+      fingerprint: { brand: "Microsoft Edge" },
+    });
+    const autoConfig = JSON.parse(await fs.readFile(path.join(harness.dataDir, "xray", "instances", "profile-utls-auto", "config.json"), "utf8")) as {
+      outbounds: Array<{ tag: string; streamSettings?: { realitySettings?: { fingerprint?: string } } }>;
+    };
+    assert.equal(autoConfig.outbounds[0].streamSettings?.realitySettings?.fingerprint, "edge");
   } finally {
     await harness.dispose();
   }

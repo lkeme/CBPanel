@@ -18,7 +18,7 @@ import type {
 import { DEFAULT_PROXY_SUBSCRIPTION_INTERVAL_HOURS, PROXY_SUBSCRIPTION_INTERVAL_HOURS } from "../../shared/entities";
 import type { ProxySubscriptionImportOptions } from "../../hooks/useProxyActions";
 import { type ProxyScheme, nowIso, parseProxyUrlInput, proxyUrlFromParts } from "../../shared/profile";
-import { detectXrayShareLinkProtocol } from "../../shared/xray";
+import { detectXrayShareLinkProtocol, type XrayUtlsFingerprint } from "../../shared/xray";
 import { DialogShell } from "../ui/DialogShell";
 import { Field, Segmented, ToggleField } from "../ui/form-controls";
 import { PasswordInput } from "../ui/PasswordInput";
@@ -904,6 +904,7 @@ export function ProxyReferenceDialog({
 export function ProxyEditorDialog({
   busy,
   close,
+  globalUtlsFingerprint,
   mode,
   proxies = [],
   proxy,
@@ -912,6 +913,8 @@ export function ProxyEditorDialog({
 }: {
   busy: string;
   close: () => void;
+  /** The global `xray.utlsFingerprint`, so the inherit option can say what it currently resolves to. */
+  globalUtlsFingerprint?: XrayUtlsFingerprint;
   mode: "create" | "edit";
   /** The library, for the front-proxy picker; the entry being edited is excluded from it. */
   proxies?: ProxyEntity[];
@@ -1048,7 +1051,7 @@ export function ProxyEditorDialog({
           <IpStrategyField onChange={(ipStrategy) => updateParts({ ipStrategy })} t={t} value={draft.ipStrategy} />
         )}
         {utlsApplies && (
-          <UtlsPreferenceField onChange={(utlsFingerprint) => updateParts({ utlsFingerprint })} t={t} value={draft.utlsFingerprint} />
+          <UtlsPreferenceField globalUtls={globalUtlsFingerprint} onChange={(utlsFingerprint) => updateParts({ utlsFingerprint })} t={t} value={draft.utlsFingerprint} />
         )}
         <Field label={t("form.notes")} wide>
           <textarea value={draft.notes} onChange={(event) => updateParts({ notes: event.target.value })} placeholder={t("placeholder.notes")} />

@@ -52,7 +52,8 @@ CloakBrowser 自身只支持 HTTP、HTTPS 和 SOCKS5。CBPanel 内置了 **Xray 
   `vmess://`、`vless://`、`trojan://`、`ss://`、`socks://`、`http://` 分享链接，或在“代理 → 导入节点”
   中通过订阅地址 / base64 订阅内容批量导入。
 - **传输层**：REALITY、XHTTP、gRPC、mKCP、WebSocket、HTTP/2、HTTPUpgrade、QUIC、TCP HTTP 伪装；
-  uTLS 指纹默认跟随环境指纹的浏览器品牌，链接自带 `fp` 参数时以链接为准。
+  uTLS 指纹取代理条目自身的设置，未设置时用全局设置，`auto` 跟随环境指纹的浏览器品牌；
+  链接自带 `fp` 参数时仍以链接为准。
 - **前置代理（链式代理）**：任意代理（包括普通 socks5/http）都可以指定代理库中的另一条记录作为
   前置代理，形成 `[本机] → [前置代理] → [当前代理] → [网站]`，用于隐藏真实 IP。
 - **双栈支持**：每个代理可单独设置 IPv4/IPv6 策略（自动、IPv4/IPv6 优先、仅 IPv4/IPv6），决定

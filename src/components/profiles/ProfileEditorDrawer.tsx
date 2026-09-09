@@ -19,6 +19,7 @@ import type { TranslationKey } from "../../i18n";
 import type { BrowserProfile } from "../../shared/profile";
 import type { BrowserEnvironment, ExtensionEntity, GroupEntity, ProxyEntity, TagEntity, XrayEngineStatus } from "../../shared/entities";
 import type { XrayNativeProxyRouting } from "../../shared/settings";
+import type { XrayUtlsFingerprint } from "../../shared/xray";
 import { Drawer } from "../ui/form-controls";
 import { ProfileEditorAdvancedTab } from "./ProfileEditorAdvancedTab";
 import { ProfileEditorFingerprintTab } from "./ProfileEditorFingerprintTab";
@@ -70,6 +71,7 @@ export function ProfileEditorDrawer(props: {
   importConfigFromClipboard: () => Promise<void>;
   shareConfigToClipboard: () => Promise<void>;
   installXray?: () => Promise<unknown>;
+  globalUtlsFingerprint?: XrayUtlsFingerprint;
   nativeProxyRouting?: XrayNativeProxyRouting;
   xrayStatus?: XrayEngineStatus | null;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
@@ -164,6 +166,7 @@ export function ProfileEditorDrawer(props: {
                 proxyCheck={props.proxyCheck}
                 proxyLibraryDraftIds={props.proxyLibraryDraftIds}
                 checkProxy={props.checkProxy}
+                globalUtlsFingerprint={props.globalUtlsFingerprint}
                 installXray={props.installXray}
                 nativeProxyRouting={props.nativeProxyRouting}
                 xrayStatus={props.xrayStatus}

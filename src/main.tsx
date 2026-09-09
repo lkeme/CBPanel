@@ -1781,6 +1781,7 @@ function App() {
           importConfigFromClipboard={importDraftConfigFromClipboard}
           shareConfigToClipboard={shareDraftConfigToClipboard}
           installXray={installXrayEngine}
+          globalUtlsFingerprint={normalizedSettings.xray.utlsFingerprint}
           nativeProxyRouting={normalizedSettings.xray.nativeProxyRouting}
           xrayStatus={xrayStatus}
           t={t}
@@ -1848,6 +1849,7 @@ function App() {
         <ProxyEditorDialogRenderer
           busy={busy}
           close={() => setProxyEditor(null)}
+          globalUtlsFingerprint={normalizedSettings.xray.utlsFingerprint}
           mode={proxyEditor.mode}
           proxies={state?.proxies ?? []}
           proxy={proxyEditor.mode === "edit" ? proxyEditor.proxy : undefined}

@@ -7,6 +7,7 @@ import {
   XRAY_UTLS_PREFERENCES,
   type ParsedXrayShareLink,
   type XrayIpStrategy,
+  type XrayUtlsFingerprint,
   type XrayUtlsPreference,
   describeXrayNode,
   isMaskedXrayShareLink,
@@ -190,20 +191,34 @@ function formatAddress(address: string): string {
 }
 
 /**
+ * The inherit option's label. When the entry inherits and the global value is known, the label names what
+ * it resolves to; a global "auto" stays described rather than resolved, because the concrete ClientHello
+ * then follows the profile's brand, which a proxy editor cannot see.
+ */
+export function utlsInheritLabel(value: XrayUtlsPreference, globalUtls: XrayUtlsFingerprint | undefined, t: Translate): string {
+  if (value !== "" || globalUtls === undefined) return t("utls.inherit");
+  return t("utls.inheritResolved", { value: globalUtls === "auto" ? t("utls.inheritAuto") : globalUtls });
+}
+
+/**
  * The per-proxy uTLS ClientHello. `""` is "inherit the global setting" and must stay distinct from the
  * explicit "auto" value, which overrides the global setting and follows the profile's brand.
  */
 export function UtlsPreferenceField({
   disabled = false,
+  globalUtls,
   onChange,
   t,
   value,
 }: {
   disabled?: boolean;
+  /** The global `xray.utlsFingerprint`, so the inherit option can say what it currently resolves to. */
+  globalUtls?: XrayUtlsFingerprint;
   onChange: (value: XrayUtlsPreference) => void;
   t: Translate;
   value: XrayUtlsPreference;
 }) {
+  const inheritLabel = utlsInheritLabel(value, globalUtls, t);
   return (
     <Field label={t("form.utlsPreference")} help={t("tips.utlsPreference")}>
       <SelectMenu<XrayUtlsPreference>
@@ -211,7 +226,7 @@ export function UtlsPreferenceField({
         onChange={onChange}
         options={XRAY_UTLS_PREFERENCES.map((preference) => ({
           value: preference,
-          label: preference === "" ? t("utls.inherit") : preference === "auto" ? t("xray.utls.auto") : preference,
+          label: preference === "" ? inheritLabel : preference === "auto" ? t("xray.utls.auto") : preference,
         }))}
         placeholder={t("utls.inherit")}
         value={value}

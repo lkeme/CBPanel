@@ -10,7 +10,7 @@ import {
 } from "../../shared/profile";
 import type { BrowserEnvironment, ProxyEntity, XrayEngineStatus } from "../../shared/entities";
 import type { XrayNativeProxyRouting } from "../../shared/settings";
-import { detectXrayShareLinkProtocol } from "../../shared/xray";
+import { detectXrayShareLinkProtocol, type XrayUtlsFingerprint } from "../../shared/xray";
 import { Field, Segmented } from "../ui/form-controls";
 import { Switch } from "../ui/switch";
 import { ManagedProxyPicker, ManualProxyFields, ProxyCheckPanel, type ProxySourceMode } from "./ProfileEditorProxyFields";
@@ -23,6 +23,7 @@ export function ProfileEditorProxyTab({
   setDraftProxyLibraryId,
   setDraftProxyLocal,
   busy,
+  globalUtlsFingerprint,
   localProxyDraftIds,
   proxies,
   proxyLibraryDraftIds,
@@ -38,6 +39,7 @@ export function ProfileEditorProxyTab({
   copyManagedProxyToLocal: () => void;
   draft: BrowserProfile;
   environments: BrowserEnvironment[];
+  globalUtlsFingerprint?: XrayUtlsFingerprint;
   installXray?: () => Promise<unknown>;
   nativeProxyRouting?: XrayNativeProxyRouting;
   xrayStatus?: XrayEngineStatus | null;
@@ -191,6 +193,7 @@ export function ProfileEditorProxyTab({
       )}
       <ManualProxyFields
         draft={draft}
+        globalUtlsFingerprint={globalUtlsFingerprint}
         proxies={proxies}
         proxyEnabled={proxyEnabled}
         proxyUrlError={proxyUrlError}
