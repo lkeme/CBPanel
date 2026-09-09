@@ -66,6 +66,9 @@ export function ManualProxyFields({
 }) {
   const isXray = draft.proxy.scheme === "xray";
   const chained = Boolean(draft.proxy.preProxyId);
+  // An https proxy also gets streamSettings.security = "tls" (see xrayOutboundFromProxy), so
+  // applyUtlsFingerprint emits a ClientHello on that hop too.
+  const utlsApplies = isXray || chained || draft.proxy.scheme === "https";
   return (
     <fieldset className="proxy-manual-fields wide" disabled={!proxyEnabled || usingManagedProxy}>
       <div className="form-grid two compact-section">
@@ -118,20 +121,20 @@ export function ManualProxyFields({
           value={draft.proxy.preProxyId}
         />
         {(isXray || chained) && (
-          <>
-            <IpStrategyField
-              disabled={!proxyEnabled || usingManagedProxy}
-              onChange={(ipStrategy) => updateProxyParts({ ipStrategy })}
-              t={t}
-              value={draft.proxy.ipStrategy}
-            />
-            <UtlsPreferenceField
-              disabled={!proxyEnabled || usingManagedProxy}
-              onChange={(utlsFingerprint) => updateProxyParts({ utlsFingerprint })}
-              t={t}
-              value={draft.proxy.utlsFingerprint}
-            />
-          </>
+          <IpStrategyField
+            disabled={!proxyEnabled || usingManagedProxy}
+            onChange={(ipStrategy) => updateProxyParts({ ipStrategy })}
+            t={t}
+            value={draft.proxy.ipStrategy}
+          />
+        )}
+        {utlsApplies && (
+          <UtlsPreferenceField
+            disabled={!proxyEnabled || usingManagedProxy}
+            onChange={(utlsFingerprint) => updateProxyParts({ utlsFingerprint })}
+            t={t}
+            value={draft.proxy.utlsFingerprint}
+          />
         )}
       </div>
     </fieldset>

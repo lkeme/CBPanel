@@ -924,6 +924,9 @@ export function ProxyEditorDialog({
   const [proxyUrlError, setProxyUrlError] = useState("");
   const isXray = draft.scheme === "xray";
   const chained = Boolean(draft.preProxyId);
+  // An https proxy also gets streamSettings.security = "tls" (see xrayOutboundFromProxy), so
+  // applyUtlsFingerprint emits a ClientHello on that hop too.
+  const utlsApplies = isXray || chained || draft.scheme === "https";
   const shareLinkAnalysis = isXray ? analyzeXrayShareLink(draft.shareLink) : undefined;
   const nameError = draft.name.trim() || shareLinkAnalysis?.parsed ? "" : t("proxy.editor.validationName");
   const hostError = isXray || draft.host.trim() ? "" : t("proxy.editor.validationHost");
@@ -1042,10 +1045,10 @@ export function ProxyEditorDialog({
           value={draft.preProxyId}
         />
         {(isXray || chained) && (
-          <>
-            <IpStrategyField onChange={(ipStrategy) => updateParts({ ipStrategy })} t={t} value={draft.ipStrategy} />
-            <UtlsPreferenceField onChange={(utlsFingerprint) => updateParts({ utlsFingerprint })} t={t} value={draft.utlsFingerprint} />
-          </>
+          <IpStrategyField onChange={(ipStrategy) => updateParts({ ipStrategy })} t={t} value={draft.ipStrategy} />
+        )}
+        {utlsApplies && (
+          <UtlsPreferenceField onChange={(utlsFingerprint) => updateParts({ utlsFingerprint })} t={t} value={draft.utlsFingerprint} />
         )}
         <Field label={t("form.notes")} wide>
           <textarea value={draft.notes} onChange={(event) => updateParts({ notes: event.target.value })} placeholder={t("placeholder.notes")} />

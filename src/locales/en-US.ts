@@ -1042,7 +1042,7 @@ export const enUS: Dictionary = {
   "xray.customBinaryPathHelp": "Leave empty to use the build CBPanel downloads; set it to use your own xray executable.",
   "xray.logLevel": "Log level",
   "xray.utlsFingerprint": "uTLS fingerprint",
-  "xray.utlsFingerprintHelp": "The ClientHello that TLS/REALITY node connections imitate. \"Auto\" follows the profile's browser brand; a link's own fp parameter wins.",
+  "xray.utlsFingerprintHelp": "The ClientHello a TLS/REALITY connection imitates when the proxy entry sets no value of its own. Precedence: the proxy entry's value, then this global setting; \"Auto\" follows the profile's browser brand, and a link's own fp parameter still wins.",
   "xray.utls.auto": "Auto (follow brand)",
   "xray.autoRestart": "Restart the engine if it exits unexpectedly",
   "xray.autoRestartHelp": "An Xray process that dies while a session is running is relaunched on the same port, up to 3 times.",

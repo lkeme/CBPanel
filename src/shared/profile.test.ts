@@ -16,6 +16,7 @@ import {
   createProfileSnapshot,
   defaultProfile,
   effectiveWebrtcIpMode,
+  generateLaunchCode,
   generateLaunchSnippets,
   isRuntimeQuickArgEnabled,
   maskProfileSecrets,
@@ -717,6 +718,24 @@ test("profile audit accepts valid advanced json", () => {
   assert.equal(report.items.find((item) => item.id === "human-json")?.severity, "pass");
 });
 
+test("profile audit warns only when a watermark is injected", () => {
+  const off = defaultProfile();
+  assert.equal(auditProfile(off).items.find((item) => item.id === "watermark"), undefined);
+
+  for (const watermark of ["banner", "enhanced"] as const) {
+    const profile = defaultProfile({ runtime: { ...defaultProfile().runtime, watermark } });
+    const report = auditProfile(profile);
+    const item = report.items.find((candidate) => candidate.id === "watermark");
+
+    assert.ok(item, `${watermark} must be audited`);
+    assert.equal(item.category, "runtime");
+    assert.equal(item.severity, "warn");
+    assert.match(item.detail, new RegExp(watermark));
+    // The warning has to move the score, or the audit would read as if the extra DOM node were free.
+    assert.ok(report.score < auditProfile(off).score);
+  }
+});
+
 test("profile preflight fails invalid launch json before startup", () => {
   const profile = defaultProfile({
     advanced: {
@@ -1135,6 +1154,57 @@ test("launch snippets include masked launch preview and binary utilities", () =>
     password: "****",
   });
   assert.ok(snippets.find((snippet) => snippet.id === "binary-tools")?.code.includes("ensureBinary"));
+});
+
+test("launch code injects the watermark init script for every launcher shape", () => {
+  const expectedCall = {
+    "playwright-context": "await context.addInitScript(",
+    "playwright-browser": "await context.addInitScript(",
+    "puppeteer-browser": "await page.evaluateOnNewDocument(",
+  } as const;
+
+  for (const launcher of ["playwright-context", "playwright-browser", "puppeteer-browser"] as const) {
+    for (const mode of ["persistent", "ephemeral"] as const) {
+      for (const watermark of ["banner", "enhanced"] as const) {
+        const profile = defaultProfile({
+          mode,
+          runtime: { ...defaultProfile().runtime, launcher, watermark },
+        });
+        const code = generateLaunchCode(profile);
+        const label = `${launcher}/${mode}/${watermark}`;
+
+        assert.ok(code.includes(expectedCall[launcher]), `${label} must inject the watermark`);
+        assert.ok(code.includes("cbpanel-watermark"), `${label} must carry the script body`);
+        // The init script has to be installed before the first navigation, or the start page misses it.
+        const callIndex = code.indexOf(expectedCall[launcher]);
+        const gotoIndex = code.indexOf("page.goto(");
+        assert.ok(gotoIndex === -1 || callIndex < gotoIndex, `${label} must inject before goto`);
+      }
+    }
+  }
+});
+
+test("launch code omits the watermark injection when the style is off", () => {
+  for (const launcher of ["playwright-context", "playwright-browser", "puppeteer-browser"] as const) {
+    const profile = defaultProfile({ runtime: { ...defaultProfile().runtime, launcher, watermark: "off" } });
+    const code = generateLaunchCode(profile);
+
+    assert.equal(code.includes("addInitScript"), false, `${launcher} must not inject`);
+    assert.equal(code.includes("evaluateOnNewDocument"), false, `${launcher} must not inject`);
+    assert.equal(code.includes("cbpanel-watermark"), false, `${launcher} must not carry the script`);
+  }
+});
+
+test("a profile name cannot break out of the generated watermark literal", () => {
+  const profile = defaultProfile({
+    name: "a`b${process.exit(1)}c",
+    runtime: { ...defaultProfile().runtime, watermark: "banner" },
+  });
+  const code = generateLaunchCode(profile);
+
+  // Backticks and `${` are escaped, so the copied snippet can neither end nor interpolate the literal.
+  assert.ok(code.includes("a\\`b\\${process.exit(1)}c"));
+  assert.equal(code.includes("a`b${process.exit"), false);
 });
 
 test("residential proxy preset preserves existing proxy credentials", () => {

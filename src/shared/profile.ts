@@ -10,7 +10,7 @@ import type {
   TrashEnvironment,
 } from "./entities";
 import { networkCheckSummaryText } from "./networkCheckDisplay";
-import { WATERMARK_STYLES, type WatermarkStyle } from "./watermark";
+import { WATERMARK_STYLES, buildWatermarkScript, type WatermarkStyle } from "./watermark";
 import {
   XRAY_IP_STRATEGIES,
   XRAY_UTLS_PREFERENCES,
@@ -1704,9 +1704,22 @@ export function generateLaunchCode(profile: BrowserProfile): string {
   return generateLaunchCodeFromPreview(profile, preview);
 }
 
+/**
+ * The watermark script as a template literal: the generated snippet keeps the script's own line
+ * breaks, while backslashes, backticks and `${` are escaped so a profile name can neither terminate
+ * the literal nor interpolate into it when the snippet is copied and run.
+ */
+function watermarkScriptLiteral(script: string): string {
+  const escaped = script.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${");
+  return `\`${escaped}\``;
+}
+
 function generateLaunchCodeFromPreview(profile: BrowserProfile, preview: LaunchPreview): string {
   const optionsJson = JSON.stringify(preview.options, null, 2);
   const startUrl = profile.startUrl.trim();
+  // Empty for `off`, exactly like the launcher: the snippet then shows no injection call at all.
+  const watermark = buildWatermarkScript(profile.name, profile.runtime.watermark);
+  const watermarkLine = watermark ? `\nawait context.addInitScript(${watermarkScriptLiteral(watermark)});` : "";
 
   if (preview.resultType === "context") {
     const firstPage =
@@ -1718,7 +1731,7 @@ function generateLaunchCodeFromPreview(profile: BrowserProfile, preview: LaunchP
 
     return `import { ${preview.importName} } from '${preview.importPath}';
 
-const context = await ${preview.importName}(${optionsJson});${firstPage}
+const context = await ${preview.importName}(${optionsJson});${watermarkLine}${firstPage}
 
 // await context.close();`;
   }
@@ -1732,7 +1745,7 @@ const context = await ${preview.importName}(${optionsJson});${firstPage}
     return `import { launch } from 'cloakbrowser';
 
 const browser = await launch(${optionsJson});
-const context = await browser.newContext(${contextOptionsJson});
+const context = await browser.newContext(${contextOptionsJson});${watermarkLine}
 const page = await context.newPage();${gotoLine}
 
 // await browser.close();`;
@@ -1740,6 +1753,7 @@ const page = await context.newPage();${gotoLine}
 
   const setup = buildPuppeteerPageSetup(profile);
   const setupLines = [
+    watermark ? `await page.evaluateOnNewDocument(${watermarkScriptLiteral(watermark)});` : "",
     setup.userAgent ? `await page.setUserAgent(${JSON.stringify(setup.userAgent)});` : "",
     setup.viewport ? `await page.setViewport(${JSON.stringify(setup.viewport)});` : "",
     startUrl ? `await page.goto(${JSON.stringify(startUrl)}, { waitUntil: 'domcontentloaded' });` : "",
@@ -1935,6 +1949,16 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
     title: "窗口模式",
     detail: profile.runtime.headless ? "无头模式更省资源，但部分站点仍会提高风险分。" : "可见窗口更接近人工调试场景。",
   });
+
+  if (profile.runtime.watermark !== "off") {
+    pushAudit(items, {
+      id: "watermark",
+      category: "runtime",
+      severity: "warn",
+      title: "环境水印",
+      detail: `已启用 ${profile.runtime.watermark} 水印：每个页面都会注入一个可检测的 DOM 节点，可能成为跨环境关联信号。`,
+    });
+  }
 
   pushAudit(items, {
     id: "fingerprint-seed",

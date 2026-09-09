@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildFingerprintArgs, defaultProfile } from "../../shared/profile";
+import type { FingerprintPlatform } from "../../shared/profile";
 import {
   GPU_CUSTOM_VALUE,
   GPU_PROFILE_CATALOG,
@@ -106,5 +107,20 @@ test("an orphaned custom pair adds no row", () => {
   assert.deepEqual(
     gpuCatalogOptions("windows", "NVIDIA Corporation", "NVIDIA GeForce RTX 3060").map((entry) => entry.id),
     WINDOWS_ENTRIES.map((entry) => entry.id),
+  );
+});
+
+test("an unknown platform offers every entry instead of emptying the menu", () => {
+  // A hand-edited share string can carry e.g. platform: "win"; the picker must not silently go blank.
+  const unknown = "win" as FingerprintPlatform;
+
+  assert.deepEqual(
+    gpuCatalogOptions(unknown, "", "").map((entry) => entry.id),
+    GPU_PROFILE_CATALOG.map((entry) => entry.id),
+  );
+  // The pair already selected still resolves to its own entry under the fallback.
+  assert.deepEqual(
+    gpuCatalogOptions(unknown, MACOS_ENTRY.vendor, MACOS_ENTRY.renderer).map((entry) => entry.id),
+    GPU_PROFILE_CATALOG.map((entry) => entry.id),
   );
 });

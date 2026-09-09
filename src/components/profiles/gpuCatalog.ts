@@ -188,17 +188,24 @@ export function applyGpuEntry(entry: GpuProfileEntry): { gpuVendor: string; gpuR
   return { gpuVendor: entry.vendor, gpuRenderer: entry.renderer };
 }
 
+const GPU_CATALOG_PLATFORMS: ReadonlySet<string> = new Set<GpuCatalogPlatform>(["windows", "macos", "linux"]);
+
 /**
  * The rows the picker offers. A concrete platform narrows the list to its own entries; `auto` shows
- * every entry in catalog order. The entry the current pair already names is kept even when the
- * platform filter excludes it, so switching platform cannot silently drop the selection.
+ * every entry in catalog order. A hand-edited share string can carry a platform the catalog does not
+ * know (`"win"`); rather than silently emptying the menu, that value is treated like `auto`. The entry
+ * the current pair already names is kept even when the platform filter excludes it, so switching
+ * platform cannot silently drop the selection.
  */
 export function gpuCatalogOptions(
   platform: FingerprintPlatform,
   currentVendor: string,
   currentRenderer: string,
 ): GpuProfileEntry[] {
-  const filtered = platform === "auto" ? GPU_PROFILE_CATALOG : GPU_PROFILE_CATALOG.filter((entry) => entry.platform === platform);
+  const filtered =
+    platform === "auto" || !GPU_CATALOG_PLATFORMS.has(platform)
+      ? GPU_PROFILE_CATALOG
+      : GPU_PROFILE_CATALOG.filter((entry) => entry.platform === platform);
   const current = GPU_PROFILE_CATALOG.find((entry) => entry.id === gpuEntryId(currentVendor, currentRenderer));
   if (!current || filtered.includes(current)) return filtered;
   return [...filtered, current];

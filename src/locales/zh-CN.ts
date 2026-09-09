@@ -1037,7 +1037,7 @@ export const zhCN = {
   "xray.customBinaryPathHelp": "留空使用 CBPanel 下载的版本；填写后使用你自己的 xray 可执行文件。",
   "xray.logLevel": "日志级别",
   "xray.utlsFingerprint": "uTLS 指纹",
-  "xray.utlsFingerprintHelp": "TLS/REALITY 节点连接模拟的 ClientHello。“自动”跟随环境指纹的浏览器品牌；链接自带 fp 参数时以链接为准。",
+  "xray.utlsFingerprintHelp": "代理条目未单独设置时，TLS/REALITY 连接模拟的 ClientHello。优先级：代理条目 → 此全局设置；“自动”跟随环境指纹的浏览器品牌；链接自带 fp 参数时仍以链接为准。",
   "xray.utls.auto": "自动（跟随品牌）",
   "xray.autoRestart": "引擎意外退出时自动重启",
   "xray.autoRestartHelp": "会话运行期间 Xray 进程退出时在同一端口自动拉起，最多 3 次。",
