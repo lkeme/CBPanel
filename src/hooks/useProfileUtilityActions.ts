@@ -1,7 +1,7 @@
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
-import type { TranslationKey } from "../i18n";
+import type { Locale, TranslationKey } from "../i18n";
 import type { TextInputDialogState } from "../components/registry/RegistryDialogs";
 import type { ConfirmDialogState } from "../components/ui/ConfirmDialog";
 import { api } from "../lib/apiClient";
@@ -23,6 +23,7 @@ export function useProfileUtilityActions({
   draft,
   importInput,
   loadState,
+  locale,
   selectedProfiles,
   sessionsByProfileId,
   setBusy,
@@ -40,6 +41,7 @@ export function useProfileUtilityActions({
   draft: BrowserProfile | null;
   importInput: RefObject<HTMLInputElement | null>;
   loadState: () => Promise<unknown>;
+  locale: Locale;
   selectedProfiles: BrowserProfile[];
   sessionsByProfileId: Map<string, SessionSummary>;
   setBusy: Dispatch<SetStateAction<string>>;
@@ -161,7 +163,7 @@ export function useProfileUtilityActions({
   async function copySnapshotMarkdown() {
     if (!draft) return;
     try {
-      await navigator.clipboard.writeText(snapshotToMarkdown(createProfileSnapshot(draft)));
+      await navigator.clipboard.writeText(snapshotToMarkdown(createProfileSnapshot(draft, t, locale), t));
       toast("success", t("toast.snapshotCopied"));
     } catch (error) {
       toast("error", (error as Error).message);
@@ -171,8 +173,8 @@ export function useProfileUtilityActions({
   async function downloadSnapshot(format: "json" | "md") {
     if (!draft) return;
     try {
-      const snapshot = createProfileSnapshot(draft);
-      const content = format === "json" ? `${JSON.stringify(snapshot, null, 2)}\n` : snapshotToMarkdown(snapshot);
+      const snapshot = createProfileSnapshot(draft, t, locale);
+      const content = format === "json" ? `${JSON.stringify(snapshot, null, 2)}\n` : snapshotToMarkdown(snapshot, t);
       const type = format === "json" ? "application/json" : "text/markdown";
       const saved = await downloadTextFile(content, `cbpanel-${slugify(draft.name)}-snapshot.${format}`, type);
       if (saved) toast("success", t("toast.snapshotExported", { format: format.toUpperCase() }));

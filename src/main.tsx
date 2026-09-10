@@ -1355,6 +1355,7 @@ function App() {
     draft,
     importInput,
     loadState,
+    locale,
     selectedProfiles,
     sessionsByProfileId,
     setBusy,
@@ -1724,6 +1725,7 @@ function App() {
                   downloadSnapshot={downloadSnapshot}
                   draft={draft}
                   editProfile={() => setDrawerMode("edit")}
+                  locale={locale}
                   preflight={preflight}
                   runPreflightAction={runPreflightAction}
                   selectedSession={selectedSession}
@@ -1837,6 +1839,7 @@ function App() {
           draft={draft}
           busy={busy}
           editProfile={() => setDrawerMode("edit")}
+          locale={locale}
           preflight={preflight}
           runPreflightAction={runPreflightAction}
           selectedSession={selectedSession}

@@ -381,7 +381,7 @@ export function useProfileLifecycleActions({
       if (warnOnly) {
         toast("info", t("toast.preflightPassWithWarnings", { count: report.summary.warn }));
       } else {
-        toast(report.ok ? "success" : "error", preflightToastMessage(report, t));
+        toast(report.ok ? "success" : "error", preflightToastMessage(report, t, locale));
       }
     } catch (error) {
       // Preflight saves the draft first, so this catch also sees the store's name 409.

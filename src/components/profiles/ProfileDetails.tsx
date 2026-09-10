@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Braces, Check, CircleAlert, Copy, Download, FileInput, Fingerprint, ListChecks, Monitor, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 
-import type { TranslationKey } from "../../i18n";
+import type { Locale, TranslationKey } from "../../i18n";
 import { formatTime } from "../../lib/utils";
 import {
   type BrowserProfile,
@@ -12,8 +12,10 @@ import {
   type SessionSummary,
   auditProfile,
   generateLaunchSnippets,
+  localizedText,
   profileScore,
 } from "../../shared/profile";
+import { resolveLocalizedText } from "../../shared/reportText";
 import type { StorageInfo } from "../../shared/settings";
 import { KeyValueList } from "../ui/KeyValueList";
 import { StatusPill, type StatusPillTone } from "../ui/StatusPill";
@@ -26,6 +28,7 @@ export function ProfileInspectorAside({
   downloadSnapshot,
   draft,
   editProfile,
+  locale,
   preflight,
   runPreflightAction,
   selectedSession,
@@ -39,6 +42,7 @@ export function ProfileInspectorAside({
   downloadSnapshot: (format: "json" | "md") => void;
   draft: BrowserProfile;
   editProfile: () => void;
+  locale: Locale;
   preflight: ProfilePreflightReport | null;
   runPreflightAction: (action: ProfilePreflightAction) => Promise<void>;
   selectedSession?: SessionSummary;
@@ -64,13 +68,14 @@ export function ProfileInspectorAside({
       </header>
       <LaunchFailurePanel editProfile={editProfile} session={selectedSession} t={t} />
       <ProfileSummaryPanel draft={draft} session={selectedSession} storage={storage} t={t} />
-      <PreflightPanel busy={busy} launchBlocked={launchFailed} onAction={runPreflightAction} report={preflight} t={t} />
+      <PreflightPanel busy={busy} launchBlocked={launchFailed} locale={locale} onAction={runPreflightAction} report={preflight} t={t} />
       <SessionPanel session={selectedSession} state={state} draft={draft} t={t} />
-      <ScorePanel draft={draft} t={t} />
+      <ScorePanel draft={draft} locale={locale} t={t} />
       <CodePanel
         copySnippet={copySnippet}
         copySnapshotMarkdown={copySnapshotMarkdown}
         downloadSnapshot={downloadSnapshot}
+        locale={locale}
         snippets={safeGenerateLaunchSnippets(draft, t)}
         t={t}
       />
@@ -86,6 +91,7 @@ export function DetailsDrawer({
   draft,
   busy,
   editProfile,
+  locale,
   preflight,
   runPreflightAction,
   selectedSession,
@@ -100,6 +106,7 @@ export function DetailsDrawer({
   draft: BrowserProfile;
   busy: string;
   editProfile: () => void;
+  locale: Locale;
   preflight: ProfilePreflightReport | null;
   runPreflightAction: (action: ProfilePreflightAction) => Promise<void>;
   selectedSession?: SessionSummary;
@@ -132,13 +139,14 @@ export function DetailsDrawer({
         )}
         <LaunchFailurePanel editProfile={editProfile} session={selectedSession} t={t} />
         <ProfileSummaryPanel draft={draft} session={selectedSession} storage={storage} t={t} />
-        <PreflightPanel busy={busy} launchBlocked={launchFailed} onAction={runPreflightAction} report={preflight} t={t} />
+        <PreflightPanel busy={busy} launchBlocked={launchFailed} locale={locale} onAction={runPreflightAction} report={preflight} t={t} />
         <SessionPanel session={selectedSession} state={state} draft={draft} t={t} />
-        <ScorePanel draft={draft} t={t} />
+        <ScorePanel draft={draft} locale={locale} t={t} />
         <CodePanel
           copySnippet={copySnippet}
           copySnapshotMarkdown={copySnapshotMarkdown}
           downloadSnapshot={downloadSnapshot}
+          locale={locale}
           snippets={safeGenerateLaunchSnippets(draft, t)}
           t={t}
         />
@@ -254,12 +262,14 @@ export function SessionPanel({ session, state, draft, t }: { session?: SessionSu
 export function PreflightPanel({
   busy,
   launchBlocked,
+  locale,
   onAction,
   report,
   t,
 }: {
   busy: string;
   launchBlocked?: boolean;
+  locale: Locale;
   onAction: (action: ProfilePreflightAction) => Promise<void>;
   report: ProfilePreflightReport | null;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
@@ -289,13 +299,13 @@ export function PreflightPanel({
           {firstFailure && (
             <div className="preflight-focus">
               <span>{t("preflight.firstFailure")}</span>
-              <strong>{firstFailure.title}</strong>
-              <small>{firstFailure.detail || t("preflight.noDetail")}</small>
+              <strong>{resolveLocalizedText(firstFailure.title, t, locale)}</strong>
+              <small>{resolveLocalizedText(firstFailure.detail, t, locale) || t("preflight.noDetail")}</small>
               {firstFailure.actions && firstFailure.actions.length > 0 && (
                 <span className="preflight-actions">
                   {firstFailure.actions.map((action) => (
                     <button className="mini-action" disabled={busy === "binary-install" || busy === "xray-install"} key={`focus-${firstFailure.id}-${action.id}`} onClick={() => void onAction(action)} type="button">
-                      {action.label}
+                      {resolveLocalizedText(action.label, t, locale)}
                     </button>
                   ))}
                 </span>
@@ -303,24 +313,28 @@ export function PreflightPanel({
             </div>
           )}
           <div className="score-list">
-            {report.items.map((item) => (
-              <div className={`score-row ${item.severity}`} key={`${item.id}-${item.detail}`}>
-                {item.severity === "pass" ? <Check size={16} className="ok" /> : <CircleAlert size={16} className={item.severity} />}
-                <span>
-                  <strong>{item.title}</strong>
-                  <small>{item.detail}</small>
-                  {item.actions && item.actions.length > 0 && (
-                    <span className="preflight-actions">
-                      {item.actions.map((action) => (
-                        <button className="mini-action" disabled={busy === "binary-install" || busy === "xray-install"} key={`${item.id}-${action.id}`} onClick={() => void onAction(action)} type="button">
-                          {action.label}
-                        </button>
-                      ))}
-                    </span>
-                  )}
-                </span>
-              </div>
-            ))}
+            {report.items.map((item) => {
+              const title = resolveLocalizedText(item.title, t, locale);
+              const detail = resolveLocalizedText(item.detail, t, locale);
+              return (
+                <div className={`score-row ${item.severity}`} key={`${item.id}-${detail}`}>
+                  {item.severity === "pass" ? <Check size={16} className="ok" /> : <CircleAlert size={16} className={item.severity} />}
+                  <span>
+                    <strong>{title}</strong>
+                    <small>{detail}</small>
+                    {item.actions && item.actions.length > 0 && (
+                      <span className="preflight-actions">
+                        {item.actions.map((action) => (
+                          <button className="mini-action" disabled={busy === "binary-install" || busy === "xray-install"} key={`${item.id}-${action.id}`} onClick={() => void onAction(action)} type="button">
+                            {resolveLocalizedText(action.label, t, locale)}
+                          </button>
+                        ))}
+                      </span>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </>
       )}
@@ -362,18 +376,19 @@ function proxyExitFailureTitle(message: string, t: (key: TranslationKey) => stri
 export function preflightToastMessage(
   report: ProfilePreflightReport,
   t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+  locale: Locale,
 ): string {
   if (report.ok) return t("toast.preflightPass");
   const failure = firstPreflightFailure(report);
   if (!failure) return t("toast.preflightFail", { count: report.summary.fail });
   return t("toast.preflightFailDetail", {
     count: report.summary.fail,
-    title: failure.title,
-    detail: failure.detail || t("preflight.noDetail"),
+    title: resolveLocalizedText(failure.title, t, locale),
+    detail: resolveLocalizedText(failure.detail, t, locale) || t("preflight.noDetail"),
   });
 }
 
-export function ScorePanel({ draft, t }: { draft: BrowserProfile; t: (key: TranslationKey) => string }) {
+export function ScorePanel({ draft, locale, t }: { draft: BrowserProfile; locale: Locale; t: (key: TranslationKey, params?: Record<string, string | number>) => string }) {
   const report = auditProfile(draft);
   return (
     <section className="side-section">
@@ -393,8 +408,8 @@ export function ScorePanel({ draft, t }: { draft: BrowserProfile; t: (key: Trans
           <div className={`score-row ${item.severity}`} key={item.id}>
             {item.severity === "pass" ? <Check size={16} className="ok" /> : <CircleAlert size={16} className={item.severity} />}
             <span>
-              <strong>{item.title}</strong>
-              <small>{item.detail}</small>
+              <strong>{resolveLocalizedText(item.title, t, locale)}</strong>
+              <small>{resolveLocalizedText(item.detail, t, locale)}</small>
             </span>
           </div>
         ))}
@@ -402,11 +417,11 @@ export function ScorePanel({ draft, t }: { draft: BrowserProfile; t: (key: Trans
       <details className="baseline-score">
         <summary>{t("summary.legacyBaseline")}</summary>
         {profileScore(draft).map((item) => (
-          <div className="score-row" key={item.label}>
+          <div className="score-row" key={resolveLocalizedText(item.label, t, locale)}>
             {item.ok ? <Check size={16} className="ok" /> : <CircleAlert size={16} className="warn" />}
             <span>
-              <strong>{item.label}</strong>
-              <small>{item.detail}</small>
+              <strong>{resolveLocalizedText(item.label, t, locale)}</strong>
+              <small>{resolveLocalizedText(item.detail, t, locale)}</small>
             </span>
           </div>
         ))}
@@ -420,12 +435,14 @@ export function CodePanel({
   copySnippet,
   copySnapshotMarkdown,
   downloadSnapshot,
+  locale,
   t,
 }: {
   snippets: LaunchSnippet[];
   copySnippet: (code: string) => Promise<void>;
   copySnapshotMarkdown: () => Promise<void>;
   downloadSnapshot: (format: "json" | "md") => void;
+  locale: Locale;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }) {
   const [activeSnippetId, setActiveSnippetId] = useState(snippets[0]?.id ?? "");
@@ -459,7 +476,7 @@ export function CodePanel({
       <div className="snippet-tabs" aria-label={t("aria.launchSnippets")}>
         {snippets.map((snippet) => (
           <button className={snippet.id === activeSnippet?.id ? "active" : ""} key={snippet.id} onClick={() => setActiveSnippetId(snippet.id)} type="button">
-            {snippet.title}
+            {resolveLocalizedText(snippet.title, t, locale)}
           </button>
         ))}
       </div>
@@ -475,13 +492,13 @@ export function safeGenerateLaunchSnippets(
   try {
     return generateLaunchSnippets(profile);
   } catch (error) {
-    const title = t("error.config");
+    const title = localizedText("error.config");
     return [
       {
         id: "launch-error",
         title,
         language: "ts",
-        code: `${title}: ${(error as Error).message}`,
+        code: `${t("error.config")}: ${(error as Error).message}`,
       },
     ];
   }

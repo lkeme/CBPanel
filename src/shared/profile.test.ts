@@ -34,9 +34,22 @@ import {
   updateDetectionCheck,
   validateStartUrl,
 } from "./profile";
-import type { BrowserProfile } from "./profile";
+import type { BrowserProfile, LocalizedText } from "./profile";
 import { buildWatermarkScript } from "./watermark";
 import { buildVoicesScript, voicesSeed } from "./voices";
+import { translate } from "../i18n";
+import type { TranslationKey } from "../i18n";
+
+const tZh = (key: TranslationKey, params?: Record<string, string | number>) => translate("zh-CN", key, params);
+
+/** The dictionary key an item's text resolves to, or undefined for the external-message arm. */
+function textKey(text: LocalizedText | undefined): string | undefined {
+  return text && "key" in text ? text.key : undefined;
+}
+
+function textParams(text: LocalizedText | undefined): Record<string, unknown> | undefined {
+  return text && "key" in text ? text.params : undefined;
+}
 
 test("defaultProfile starts on CreepJS for first-run fingerprint inspection", () => {
   assert.equal(defaultProfile().startUrl, DEFAULT_START_URL);
@@ -446,13 +459,12 @@ test("launch preview delegates Chromium sandbox compatibility in every launcher 
     const preflightWarning = preflightProfile(profile).items.find((item) => item.id === "chromium-sandbox");
     const auditWarning = auditProfile(profile).items.find((item) => item.id === "chromium-sandbox");
     assert.equal(preflightWarning?.severity, "warn");
-    assert.equal(auditWarning?.detail, preflightWarning?.detail);
+    // Both reports describe the same override with the same text; the preflight item copies it.
+    assert.deepEqual(auditWarning?.detail, preflightWarning?.detail);
     if (scenario.launcher === "puppeteer-browser") {
-      assert.match(preflightWarning?.detail ?? "", /CloakBrowser\/Puppeteer/);
-      assert.doesNotMatch(preflightWarning?.detail ?? "", /Playwright 当前默认使用 --no-sandbox/);
+      assert.equal(textKey(preflightWarning?.detail), "preflightItem.chromiumSandbox.detail.puppeteer");
     } else {
-      assert.match(preflightWarning?.detail ?? "", /Playwright 当前默认使用 --no-sandbox/);
-      assert.doesNotMatch(preflightWarning?.detail ?? "", /CloakBrowser\/Puppeteer/);
+      assert.equal(textKey(preflightWarning?.detail), "preflightItem.chromiumSandbox.detail.playwright");
     }
   }
 });
@@ -732,7 +744,7 @@ test("profile audit warns only when a watermark is injected", () => {
     assert.ok(item, `${watermark} must be audited`);
     assert.equal(item.category, "runtime");
     assert.equal(item.severity, "warn");
-    assert.match(item.detail, new RegExp(watermark));
+    assert.deepEqual(item.detail, { key: "profileAudit.watermark.detail.enabled", params: { watermark } });
     // The warning has to move the score, or the audit would read as if the extra DOM node were free.
     assert.ok(report.score < auditProfile(off).score);
   }
@@ -791,7 +803,7 @@ test("profile preflight includes environment failures without launching", () => 
   assert.deepEqual(report.items.find((item) => item.id === "binary")?.actions?.[0], {
     id: "install-binary",
     kind: "install-binary",
-    label: "安装内核",
+    label: { key: "preflightItem.action.installBinary" },
   });
   assert.equal(report.items.find((item) => item.id === "user-data-dir")?.severity, "fail");
   assert.equal(report.items.find((item) => item.id === "proxy-config")?.severity, "fail");
@@ -808,7 +820,7 @@ test("profile preflight reports registry extension installation failures", () =>
 
   const item = report.items.find((entry) => entry.id === "extension-error-0");
   assert.equal(item?.severity, "fail");
-  assert.match(item?.detail ?? "", /Store Metadata/);
+  assert.equal(textParams(item?.detail)?.name, "Store Metadata");
   assert.equal(report.ok, false);
 });
 
@@ -822,7 +834,10 @@ test("profile preflight warns about bound extensions that will not be loaded", (
   assert.equal(item?.severity, "warn");
   assert.equal(item?.category, "runtime");
   // The reason arrives fully worded from the service; preflight must not append its own suffix.
-  assert.equal(item?.detail, "Disabled Extension: 扩展已停用，本次启动不会加载");
+  assert.deepEqual(item?.detail, {
+    key: "preflightItem.extensionWarning.detail",
+    params: { name: "Disabled Extension", detail: "扩展已停用，本次启动不会加载" },
+  });
   assert.equal(item?.actions?.[0]?.target, "advanced");
   assert.deepEqual(profile.runtime.extensionPaths, []);
   assert.equal(report.items.find((entry) => entry.id === "extensions"), undefined);
@@ -863,11 +878,11 @@ test("profile preflight warns that extension data does not persist in throwaway 
   const ephemeralItem = ephemeralReport.items.find((item) => item.id === "extension-persistence");
   assert.equal(ephemeralItem?.severity, "warn");
   assert.equal(ephemeralItem?.category, "runtime");
-  assert.equal(ephemeralItem?.title, "扩展持久化");
-  assert.match(ephemeralItem?.detail ?? "", /不会在会话之间保留/);
+  assert.equal(textKey(ephemeralItem?.title), "preflightItem.extensionPersistence.title");
+  assert.equal(textKey(ephemeralItem?.detail), "preflightItem.extensionPersistence.detail.ephemeral");
   const browserItem = browserReport.items.find((item) => item.id === "extension-persistence");
   assert.equal(browserItem?.severity, "warn");
-  assert.match(browserItem?.detail ?? "", /可能根本不会加载/);
+  assert.equal(textKey(browserItem?.detail), "preflightItem.extensionPersistence.detail.browser");
   assert.equal(
     preflightProfile({ ...ephemeralContext, runtime: { ...ephemeralContext.runtime, extensionPaths: [] } }, {})
       .items.find((item) => item.id === "extension-persistence"),
@@ -938,11 +953,15 @@ test("profile preflight reports proxy exit trace checks", () => {
     },
   });
   assert.equal(withCheck.items.find((item) => item.id === "network-check")?.severity, "pass");
-  const networkCheckDetail = withCheck.items.find((item) => item.id === "network-check")?.detail ?? "";
-  assert.match(networkCheckDetail, /203\.0\.113\.42/);
-  assert.match(networkCheckDetail, /US/);
-  assert.match(networkCheckDetail, /LAX/);
-  assert.doesNotMatch(networkCheckDetail, /Cloudflare/);
+  const networkCheckDetail = withCheck.items.find((item) => item.id === "network-check")?.detail;
+  assert.equal(textKey(networkCheckDetail), "preflightItem.networkCheck.detail.pass");
+  // The builder carries the region as a code: only the renderer knows the reader's language.
+  assert.deepEqual(textParams(networkCheckDetail), {
+    head: "203.0.113.42 · ",
+    region: { region: "US" },
+    tail: " · LAX · 88ms",
+  });
+  assert.equal(JSON.stringify(textParams(networkCheckDetail)).includes("Cloudflare"), false);
   assert.equal(withCheck.items.some((item) => item.id === "geoip-database"), false);
 });
 
@@ -1003,7 +1022,7 @@ test("geoip proxy makes WebRTC effectively protected without persisting an expli
   const audit = auditProfile(profile);
   const webrtc = audit.items.find((item) => item.id === "webrtc");
   assert.equal(webrtc?.severity, "pass");
-  assert.match(webrtc?.detail ?? "", /GeoIP/);
+  assert.equal(textKey(webrtc?.detail), "profileAudit.webrtc.detail.geoipProxy");
 
   const report = preflightProfile(profile, { binaryInstalled: true });
   assert.equal(report.items.find((item) => item.id === "webrtc-geoip-effective")?.severity, "pass");
@@ -1033,7 +1052,7 @@ test("geoip without proxy follows the current public exit instead of warning", (
   const webrtc = report.items.find((item) => item.id === "webrtc-geoip-effective");
 
   assert.equal(geoip?.severity, "pass");
-  assert.match(geoip?.detail ?? "", /当前机器公网出口/);
+  assert.equal(textKey(geoip?.detail), "preflightItem.geoipWithoutProxy.detail");
   assert.equal(webrtc?.severity, "pass");
   assert.equal(report.items.some((item) => item.id === "webrtc-auto-without-network-anchor"), false);
 });
@@ -1087,9 +1106,9 @@ test("webrtc auto warns when geoip cannot provide an exit IP without proxy", () 
   const preflight = report.items.find((item) => item.id === "webrtc-auto-without-network-anchor");
 
   assert.equal(webrtc?.severity, "warn");
-  assert.match(webrtc?.detail ?? "", /不会从 GeoIP 解析/);
+  assert.equal(textKey(webrtc?.detail), "profileAudit.webrtc.detail.autoUnanchored");
   assert.equal(preflight?.severity, "warn");
-  assert.match(preflight?.detail ?? "", /移除 auto 参数/);
+  assert.equal(textKey(preflight?.detail), "preflightItem.webrtcAutoWithoutAnchor.detail");
   assert.equal(report.items.some((item) => item.id === "webrtc-geoip-effective"), false);
 });
 
@@ -1106,9 +1125,9 @@ test("profile snapshot masks proxy credentials and sensitive launch options", ()
     },
   });
 
-  const snapshot = createProfileSnapshot(profile, "2026-05-30T00:00:00.000Z");
+  const snapshot = createProfileSnapshot(profile, tZh, "zh-CN", "2026-05-30T00:00:00.000Z");
   const serialized = JSON.stringify(snapshot);
-  const markdown = snapshotToMarkdown(snapshot);
+  const markdown = snapshotToMarkdown(snapshot, tZh);
 
   assert.equal(snapshot.profile.proxy, "http://alice:****@proxy.example.com:8080");
   assert.equal((snapshot.launchPreview.options.launchOptions as { password: string }).password, "****");

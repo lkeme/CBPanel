@@ -1,4 +1,5 @@
 import type { AppSettings, StorageInfo } from "./settings";
+import type { Locale } from "../i18n";
 import type {
   BrowserEnvironment,
   ExtensionEntity,
@@ -9,7 +10,8 @@ import type {
   TagEntity,
   TrashEnvironment,
 } from "./entities";
-import { networkCheckSummaryText } from "./networkCheckDisplay";
+import { resolveLocalizedText, type Translator } from "./reportText";
+import { networkCheckCountryCode } from "./networkCheckDisplay";
 import { WATERMARK_STYLES, buildWatermarkScript, type WatermarkStyle } from "./watermark";
 import { buildVoicesScript, voicesSeed } from "./voices";
 import {
@@ -224,12 +226,41 @@ export interface SessionSummary {
 export type AuditSeverity = "pass" | "warn" | "fail" | "info";
 export type AuditCategory = "identity" | "network" | "runtime" | "persistence" | "advanced";
 
+/**
+ * A parameter interpolated into a `LocalizedText` template: a plain value, another localized
+ * fragment the template embeds (an xray engine role), or a region code the renderer formats with the
+ * active locale instead of printing the raw code.
+ */
+export type LocalizedTextParam = string | number | { region: string } | LocalizedText;
+
+/**
+ * User-facing text on a report item.
+ *
+ * `key` is a dictionary key the renderer translates with the active locale. The builders stay
+ * locale-free on purpose: `preflightProfile` runs on the server and the client caches its report, so
+ * translating in the builder would freeze a cached report in the language it was fetched with.
+ * `text` carries a message this panel does not localize — a server error, an extension failure
+ * reason, an xray parse error — as the whole detail.
+ */
+export type LocalizedText =
+  | { key: string; params?: Record<string, LocalizedTextParam> }
+  | { text: string };
+
+export function localizedText(key: string, params?: Record<string, LocalizedTextParam>): LocalizedText {
+  return params ? { key, params } : { key };
+}
+
+/** The detail is the external message itself; the panel has no template to translate around it. */
+export function externalText(value: string): LocalizedText {
+  return { text: value };
+}
+
 export interface AuditItem {
   id: string;
   category: AuditCategory;
   severity: AuditSeverity;
-  title: string;
-  detail: string;
+  title: LocalizedText;
+  detail: LocalizedText;
 }
 
 export interface ProfileAuditReport {
@@ -251,7 +282,7 @@ export type PreflightActionTarget = "runtime" | "proxy" | "fingerprint" | "advan
 export interface ProfilePreflightAction {
   id: string;
   kind: PreflightActionKind;
-  label: string;
+  label: LocalizedText;
   target?: PreflightActionTarget;
 }
 
@@ -259,8 +290,8 @@ export interface ProfilePreflightItem {
   id: string;
   category: PreflightCategory;
   severity: PreflightSeverity;
-  title: string;
-  detail: string;
+  title: LocalizedText;
+  detail: LocalizedText;
   actions?: ProfilePreflightAction[];
 }
 
@@ -300,6 +331,18 @@ export interface ProfilePreflightReport {
   preview?: LaunchPreview;
 }
 
+/**
+ * The audit report with its text resolved for export: a snapshot freezes the language of the moment
+ * it was generated, so it carries strings rather than dictionary keys.
+ */
+export interface ProfileSnapshotAuditItem {
+  id: string;
+  category: AuditCategory;
+  severity: AuditSeverity;
+  title: string;
+  detail: string;
+}
+
 export interface ProfileSnapshot {
   exportedAt: string;
   profile: {
@@ -315,7 +358,11 @@ export interface ProfileSnapshot {
     locale: string;
     viewport: string;
   };
-  audit: ProfileAuditReport;
+  audit: {
+    score: number;
+    summary: ProfileAuditReport["summary"];
+    items: ProfileSnapshotAuditItem[];
+  };
   launchPreview: LaunchPreview;
   launchCode: string;
 }
@@ -335,7 +382,7 @@ export interface RuntimeQuickArg {
 
 export interface LaunchSnippet {
   id: string;
-  title: string;
+  title: LocalizedText;
   language: "ts" | "json";
   code: string;
 }
@@ -1229,11 +1276,12 @@ function hasUnsupportedChromiumSandboxOverride(profile: BrowserProfile): boolean
   }
 }
 
-function chromiumSandboxOverrideDetail(profile: BrowserProfile): string {
-  if (profile.runtime.launcher === "puppeteer-browser") {
-    return "检测到仅适用于 Playwright 的 chromiumSandbox=true；CBPanel 会忽略该覆盖，并将实际 Chromium 沙箱参数交由 CloakBrowser/Puppeteer 的当前启动参数策略。";
-  }
-  return "检测到 chromiumSandbox=true；CBPanel 会忽略该覆盖。Playwright 当前默认使用 --no-sandbox，避免 Chromium 151 卡在启动握手阶段。";
+function chromiumSandboxOverrideDetail(profile: BrowserProfile): LocalizedText {
+  return localizedText(
+    profile.runtime.launcher === "puppeteer-browser"
+      ? "preflightItem.chromiumSandbox.detail.puppeteer"
+      : "preflightItem.chromiumSandbox.detail.playwright",
+  );
 }
 
 export function buildFingerprintArgs(profile: BrowserProfile): string[] {
@@ -1390,18 +1438,30 @@ export function preflightProfile(
   let preview: LaunchPreview | undefined;
   let launch: SessionLaunchPlan | undefined;
 
-  pushPreflight(items, preflightFromAudit(validateJsonAudit("launch-json", "advanced", "launchOptions JSON", profile.advanced.launchOptionsJson)));
-  pushPreflight(items, preflightFromAudit(validateJsonAudit("context-json", "advanced", "contextOptions JSON", profile.advanced.contextOptionsJson)));
-  pushPreflight(items, preflightFromAudit(validateJsonAudit("human-json", "advanced", "humanConfig JSON", profile.advanced.humanConfigJson)));
+  pushPreflight(items, preflightFromAudit(validateJsonAudit("launch-json", "advanced", {
+    title: "preflightItem.launchJson.title",
+    empty: "preflightItem.launchJson.detail.empty",
+    valid: "preflightItem.launchJson.detail.valid",
+  }, "launchOptions JSON", profile.advanced.launchOptionsJson)));
+  pushPreflight(items, preflightFromAudit(validateJsonAudit("context-json", "advanced", {
+    title: "preflightItem.contextJson.title",
+    empty: "preflightItem.contextJson.detail.empty",
+    valid: "preflightItem.contextJson.detail.valid",
+  }, "contextOptions JSON", profile.advanced.contextOptionsJson)));
+  pushPreflight(items, preflightFromAudit(validateJsonAudit("human-json", "advanced", {
+    title: "preflightItem.humanJson.title",
+    empty: "preflightItem.humanJson.detail.empty",
+    valid: "preflightItem.humanJson.detail.valid",
+  }, "humanConfig JSON", profile.advanced.humanConfigJson)));
 
   if (hasUnsupportedChromiumSandboxOverride(profile)) {
     pushPreflight(items, {
       id: "chromium-sandbox",
       category: "runtime",
       severity: "warn",
-      title: "Chromium 沙箱",
+      title: localizedText("preflightItem.chromiumSandbox.title"),
       detail: chromiumSandboxOverrideDetail(profile),
-      actions: [openTabAction("advanced", "移除手动覆盖")],
+      actions: [openTabAction("advanced", "preflightItem.action.removeOverride")],
     });
   }
 
@@ -1412,17 +1472,20 @@ export function preflightProfile(
       id: "launch-preview",
       category: "runtime",
       severity: "pass",
-      title: "启动参数",
-      detail: `${preview.launcher} / ${preview.resultType} 可生成。`,
+      title: localizedText("preflightItem.launchPreview.title"),
+      detail: localizedText("preflightItem.launchPreview.detail.generated", {
+        launcher: preview.launcher,
+        resultType: preview.resultType,
+      }),
     });
   } catch (error) {
     pushPreflight(items, {
       id: "launch-preview",
       category: "runtime",
       severity: "fail",
-      title: "启动参数",
-      detail: (error as Error).message,
-      actions: [openTabAction("advanced", "检查 JSON")],
+      title: localizedText("preflightItem.launchPreview.title"),
+      detail: externalText((error as Error).message),
+      actions: [openTabAction("advanced", "preflightItem.action.checkJson")],
     });
   }
 
@@ -1431,21 +1494,23 @@ export function preflightProfile(
       id: "binary",
       category: "environment",
       severity: "info",
-      title: "CloakBrowser 内核",
-      detail: "当前报告未包含内核安装状态。",
+      title: localizedText("preflightItem.binary.title"),
+      detail: localizedText("preflightItem.binary.detail.unknown"),
     });
   } else {
     pushPreflight(items, {
       id: "binary",
       category: "environment",
       severity: environment.binaryInstalled ? "pass" : "fail",
-      title: "CloakBrowser 内核",
+      title: localizedText("preflightItem.binary.title"),
       detail: environment.binaryInstalled
         ? environment.binaryPath
-          ? `已安装：${environment.binaryPath}`
-          : "已安装。"
-        : environment.binaryDetail ?? "未安装；启动前需要先安装或更新 CloakBrowser 内核。",
-      actions: environment.binaryInstalled ? undefined : [{ id: "install-binary", kind: "install-binary", label: "安装内核" }],
+          ? localizedText("preflightItem.binary.detail.installed", { path: environment.binaryPath })
+          : localizedText("preflightItem.binary.detail.installedNoPath")
+        : environment.binaryDetail
+          ? externalText(environment.binaryDetail)
+          : localizedText("preflightItem.binary.detail.missing"),
+      actions: environment.binaryInstalled ? undefined : [{ id: "install-binary", kind: "install-binary", label: localizedText("preflightItem.action.installBinary") }],
     });
   }
 
@@ -1455,19 +1520,23 @@ export function preflightProfile(
         id: "user-data-dir",
         category: "persistence",
         severity: "info",
-        title: "用户数据目录",
-        detail: environment.userDataDir ?? "当前报告未包含目录写入探针。",
+        title: localizedText("preflightItem.userDataDir.title"),
+        detail: environment.userDataDir
+          ? localizedText("preflightItem.userDataDir.detail.path", { path: environment.userDataDir })
+          : localizedText("preflightItem.userDataDir.detail.noProbe"),
       });
     } else {
       pushPreflight(items, {
         id: "user-data-dir",
         category: "persistence",
         severity: environment.userDataDirWritable ? "pass" : "fail",
-        title: "用户数据目录",
+        title: localizedText("preflightItem.userDataDir.title"),
         detail: environment.userDataDirWritable
-          ? `可写：${environment.userDataDir ?? "profile data dir"}`
-          : environment.userDataDirDetail ?? "持久化目录不可写。",
-        actions: environment.userDataDirWritable ? undefined : [openTabAction("runtime", "检查模式")],
+          ? localizedText("preflightItem.userDataDir.detail.writable", { path: environment.userDataDir ?? "profile data dir" })
+          : environment.userDataDirDetail
+            ? externalText(environment.userDataDirDetail)
+            : localizedText("preflightItem.userDataDir.detail.notWritable"),
+        actions: environment.userDataDirWritable ? undefined : [openTabAction("runtime", "preflightItem.action.checkMode")],
       });
     }
   } else {
@@ -1475,8 +1544,8 @@ export function preflightProfile(
       id: "user-data-dir",
       category: "persistence",
       severity: "info",
-      title: "用户数据目录",
-      detail: "临时上下文不会复用持久化用户数据目录。",
+      title: localizedText("preflightItem.userDataDir.title"),
+      detail: localizedText("preflightItem.userDataDir.detail.ephemeral"),
     });
   }
 
@@ -1485,9 +1554,9 @@ export function preflightProfile(
       id: "persistent-playwright-browser",
       category: "runtime",
       severity: "warn",
-      title: "持久化映射",
-      detail: "Playwright Browser 模式不会把 userDataDir 交给 launch；需要长期状态时优先使用 Playwright Context 或 Puppeteer 持久化。",
-      actions: [openTabAction("runtime", "调整运行器")],
+      title: localizedText("preflightItem.persistentPlaywrightBrowser.title"),
+      detail: localizedText("preflightItem.persistentPlaywrightBrowser.detail"),
+      actions: [openTabAction("runtime", "preflightItem.action.adjustLauncher")],
     });
   }
 
@@ -1497,15 +1566,15 @@ export function preflightProfile(
       id: "proxy-config",
       category: "network",
       severity: proxyUrl ? "pass" : "fail",
-      title: "代理配置",
+      title: localizedText("preflightItem.proxyConfig.title"),
       detail: proxyUrl
         ? xrayNode
-          ? `已配置 Xray 节点 ${maskProxyUrl(proxyUrl)}（${xrayNode}）。`
-          : `已配置 ${maskProxyUrl(proxyUrl)}。`
+          ? localizedText("preflightItem.proxyConfig.detail.xrayNode", { proxy: maskProxyUrl(proxyUrl), node: xrayNode })
+          : localizedText("preflightItem.proxyConfig.detail.configured", { proxy: maskProxyUrl(proxyUrl) })
         : profile.proxy.scheme === "xray"
-          ? `Xray 分享链接无法解析：${xrayShareLinkProblem(profile.proxy.shareLink)}`
-          : "代理已启用，但 URL 或 host/port 不完整。",
-      actions: proxyUrl ? undefined : [openTabAction("proxy", "补全代理")],
+          ? localizedText("preflightItem.proxyConfig.detail.unparsable", { message: xrayShareLinkProblem(profile.proxy.shareLink) })
+          : localizedText("preflightItem.proxyConfig.detail.incomplete"),
+      actions: proxyUrl ? undefined : [openTabAction("proxy", "preflightItem.action.completeProxy")],
     });
     // A hard requirement (node or chain) is reported even without engine information; a plain proxy
     // routed through the engine by settings is reported when the environment says it will be.
@@ -1515,8 +1584,8 @@ export function preflightProfile(
       id: "proxy-config",
       category: "network",
       severity: "info",
-      title: "代理配置",
-      detail: "未启用代理，启动会使用当前机器出口。",
+      title: localizedText("preflightItem.proxyConfig.title"),
+      detail: localizedText("preflightItem.proxyConfig.detail.disabled"),
     });
   }
 
@@ -1529,8 +1598,8 @@ export function preflightProfile(
       id: "geoip-without-proxy",
       category: "network",
       severity: "pass",
-      title: "GeoIP 联动",
-      detail: "GeoIP 已启用且未配置代理；CloakBrowser 会按当前机器公网出口推断时区和语言。",
+      title: localizedText("preflightItem.geoipWithoutProxy.title"),
+      detail: localizedText("preflightItem.geoipWithoutProxy.detail"),
     });
   }
 
@@ -1540,9 +1609,9 @@ export function preflightProfile(
         id: "geoip-explicit-overrides",
         category: "network",
         severity: "warn",
-        title: "GeoIP 显式覆盖",
-        detail: "已启用 GeoIP，但显式 timezone/locale 会优先生效；如需跟随代理或当前公网出口，请清空这两个字段。",
-        actions: [openTabAction("fingerprint", "清空时区/语言")],
+        title: localizedText("preflightItem.geoipExplicitOverrides.title"),
+        detail: localizedText("preflightItem.geoipExplicitOverrides.detail"),
+        actions: [openTabAction("fingerprint", "preflightItem.action.clearTimezoneLocale")],
       });
     }
   }
@@ -1552,9 +1621,9 @@ export function preflightProfile(
       id: "webrtc-auto-without-network-anchor",
       category: "network",
       severity: "warn",
-      title: "WebRTC Auto",
-      detail: "WebRTC auto 没有代理，也不会从 GeoIP 解析到可注入的出口 IP；CloakBrowser 会移除 auto 参数。",
-      actions: [openTabAction("proxy", "配置代理"), openTabAction("fingerprint", "调整 WebRTC")],
+      title: localizedText("preflightItem.webrtcAutoWithoutAnchor.title"),
+      detail: localizedText("preflightItem.webrtcAutoWithoutAnchor.detail"),
+      actions: [openTabAction("proxy", "preflightItem.action.configureProxy"), openTabAction("fingerprint", "preflightItem.action.adjustWebrtc")],
     });
   }
 
@@ -1563,10 +1632,12 @@ export function preflightProfile(
       id: "webrtc-geoip-effective",
       category: "network",
       severity: "pass",
-      title: "WebRTC GeoIP",
-      detail: proxyUrl
-        ? "GeoIP 已启用且代理有效；CloakBrowser 解析到代理出口后会自动注入 WebRTC 出口 IP。"
-        : "GeoIP 已启用；CloakBrowser 会按当前机器公网出口解析并保持 WebRTC 出口一致。",
+      title: localizedText("preflightItem.webrtcGeoipEffective.title"),
+      detail: localizedText(
+        proxyUrl
+          ? "preflightItem.webrtcGeoipEffective.detail.proxy"
+          : "preflightItem.webrtcGeoipEffective.detail.local",
+      ),
     });
   }
 
@@ -1575,9 +1646,9 @@ export function preflightProfile(
       id: "webrtc-custom-empty",
       category: "network",
       severity: "fail",
-      title: "WebRTC 指定 IP",
-      detail: "WebRTC 模式为 custom，但没有填写 IP 值。",
-      actions: [openTabAction("fingerprint", "填写 IP")],
+      title: localizedText("preflightItem.webrtcCustomEmpty.title"),
+      detail: localizedText("preflightItem.webrtcCustomEmpty.detail"),
+      actions: [openTabAction("fingerprint", "preflightItem.action.fillIp")],
     });
   }
 
@@ -1590,9 +1661,9 @@ export function preflightProfile(
         id: `extension-warning-${index}`,
         category: "runtime",
         severity: "warn",
-        title: "扩展加载",
-        detail: `${extension.name}: ${extension.detail}`,
-        actions: [openTabAction("advanced", "检查扩展")],
+        title: localizedText("preflightItem.extensionWarning.title"),
+        detail: localizedText("preflightItem.extensionWarning.detail", { name: extension.name, detail: extension.detail }),
+        actions: [openTabAction("advanced", "preflightItem.action.checkExtensions")],
       });
     }
   }
@@ -1603,9 +1674,9 @@ export function preflightProfile(
         id: `extension-error-${index}`,
         category: "runtime",
         severity: "fail",
-        title: "扩展安装",
-        detail: `${extension.name}: ${extension.detail}`,
-        actions: [openTabAction("advanced", "检查扩展")],
+        title: localizedText("preflightItem.extensionError.title"),
+        detail: localizedText("preflightItem.extensionError.detail", { name: extension.name, detail: extension.detail }),
+        actions: [openTabAction("advanced", "preflightItem.action.checkExtensions")],
       });
     }
   } else if (profile.runtime.extensionPaths.length === 0) {
@@ -1614,8 +1685,8 @@ export function preflightProfile(
         id: "extensions",
         category: "runtime",
         severity: "info",
-        title: "扩展路径",
-        detail: "未配置扩展。",
+        title: localizedText("preflightItem.extensions.title"),
+        detail: localizedText("preflightItem.extensions.detail.none"),
       });
     }
   } else if (environment.extensionChecks?.length) {
@@ -1624,9 +1695,13 @@ export function preflightProfile(
         id: `extension-${extension.path}`,
         category: "runtime",
         severity: extension.exists ? "pass" : "fail",
-        title: "扩展路径",
-        detail: extension.exists ? `存在：${extension.path}` : extension.detail ?? `路径不存在：${extension.path}`,
-        actions: extension.exists ? undefined : [openTabAction("advanced", "检查路径")],
+        title: localizedText("preflightItem.extensions.title"),
+        detail: extension.exists
+          ? localizedText("preflightItem.extensions.detail.exists", { path: extension.path })
+          : extension.detail
+            ? externalText(extension.detail)
+            : localizedText("preflightItem.extensions.detail.missing", { path: extension.path }),
+        actions: extension.exists ? undefined : [openTabAction("advanced", "preflightItem.action.checkPaths")],
       });
     }
   } else {
@@ -1634,8 +1709,8 @@ export function preflightProfile(
       id: "extensions",
       category: "runtime",
       severity: "warn",
-      title: "扩展路径",
-      detail: "已配置扩展路径，但当前报告未验证这些路径是否存在。",
+      title: localizedText("preflightItem.extensions.title"),
+      detail: localizedText("preflightItem.extensions.detail.unverified"),
     });
   }
 
@@ -1647,11 +1722,13 @@ export function preflightProfile(
       id: "extension-persistence",
       category: "runtime",
       severity: "warn",
-      title: "扩展持久化",
-      detail: profile.runtime.launcher === "playwright-browser"
-        ? "Playwright Browser 启动器把扩展加载到一次性上下文中：扩展数据不会在会话之间保留，扩展本身也可能根本不会加载。"
-        : "临时模式把扩展加载到一次性上下文中：扩展数据不会在会话之间保留。",
-      actions: [openTabAction("runtime", "调整运行器")],
+      title: localizedText("preflightItem.extensionPersistence.title"),
+      detail: localizedText(
+        profile.runtime.launcher === "playwright-browser"
+          ? "preflightItem.extensionPersistence.detail.browser"
+          : "preflightItem.extensionPersistence.detail.ephemeral",
+      ),
+      actions: [openTabAction("runtime", "preflightItem.action.adjustLauncher")],
     });
   }
 
@@ -1696,19 +1773,19 @@ export function generateLaunchSnippets(profile: BrowserProfile): LaunchSnippet[]
   return [
     {
       id: "current-launch",
-      title: "当前启动代码",
+      title: localizedText("launchSnippet.currentLaunch.title"),
       language: "ts",
       code: generateLaunchCodeFromPreview(profile, preview),
     },
     {
       id: "launch-preview-json",
-      title: "启动预览 JSON",
+      title: localizedText("launchSnippet.launchPreviewJson.title"),
       language: "json",
       code: `${JSON.stringify(preview, null, 2)}\n`,
     },
     {
       id: "binary-tools",
-      title: "Binary 工具",
+      title: localizedText("launchSnippet.binaryTools.title"),
       language: "ts",
       code: `import { binaryInfo, ensureBinary, clearCache } from 'cloakbrowser';
 
@@ -1800,9 +1877,15 @@ const page = pages[0] ?? await browser.newPage();${setupLines.length ? `\n${setu
 // await browser.close();`;
 }
 
-export function createProfileSnapshot(profile: BrowserProfile, exportedAt = nowIso()): ProfileSnapshot {
+export function createProfileSnapshot(
+  profile: BrowserProfile,
+  t: Translator,
+  locale: Locale,
+  exportedAt = nowIso(),
+): ProfileSnapshot {
   const proxy = buildProxyUrl(profile.proxy);
   const launchPreview = maskLaunchPreview(buildLaunchPreview(profile));
+  const audit = auditProfile(profile);
   return {
     exportedAt,
     profile: {
@@ -1819,42 +1902,61 @@ export function createProfileSnapshot(profile: BrowserProfile, exportedAt = nowI
       viewport:
         profile.viewport.mode === "native" ? "native" : `${profile.viewport.width}x${profile.viewport.height}`,
     },
-    audit: auditProfile(profile),
+    // A snapshot freezes the language it was exported in: the items are resolved to strings here, so
+    // the JSON export carries text rather than dictionary keys.
+    audit: {
+      score: audit.score,
+      summary: audit.summary,
+      items: audit.items.map((item) => ({
+        id: item.id,
+        category: item.category,
+        severity: item.severity,
+        title: resolveLocalizedText(item.title, t, locale),
+        detail: resolveLocalizedText(item.detail, t, locale),
+      })),
+    },
     launchPreview,
     launchCode: generateLaunchCodeFromPreview(profile, launchPreview),
   };
 }
 
-export function snapshotToMarkdown(snapshot: ProfileSnapshot): string {
+export function snapshotToMarkdown(snapshot: ProfileSnapshot, t: Translator): string {
   const lines = [
-    `# ${snapshot.profile.name} 体检快照`,
+    `# ${t("snapshot.heading.title", { name: snapshot.profile.name })}`,
     "",
-    `- 导出时间：${snapshot.exportedAt}`,
-    `- 配置 ID：${snapshot.profile.id}`,
-    `- 分组：${snapshot.profile.group}`,
-    `- 标签：${snapshot.profile.tags.length ? snapshot.profile.tags.join(", ") : "-"}`,
-    `- 模式：${snapshot.profile.mode}`,
-    `- SDK：${snapshot.profile.launcher}`,
-    `- 代理：${snapshot.profile.proxy}`,
-    `- 时区：${snapshot.profile.timezone || "-"}`,
-    `- 语言：${snapshot.profile.locale || "-"}`,
-    `- 视口：${snapshot.profile.viewport}`,
+    `- ${t("snapshot.field.exportedAt", { value: snapshot.exportedAt })}`,
+    `- ${t("snapshot.field.profileId", { value: snapshot.profile.id })}`,
+    `- ${t("snapshot.field.group", { value: snapshot.profile.group })}`,
+    `- ${t("snapshot.field.tags", { value: snapshot.profile.tags.length ? snapshot.profile.tags.join(", ") : "-" })}`,
+    `- ${t("snapshot.field.mode", { value: snapshot.profile.mode })}`,
+    `- ${t("snapshot.field.launcher", { value: snapshot.profile.launcher })}`,
+    `- ${t("snapshot.field.proxy", { value: snapshot.profile.proxy })}`,
+    `- ${t("snapshot.field.timezone", { value: snapshot.profile.timezone || "-" })}`,
+    `- ${t("snapshot.field.locale", { value: snapshot.profile.locale || "-" })}`,
+    `- ${t("snapshot.field.viewport", { value: snapshot.profile.viewport })}`,
     "",
-    `## 体检分：${snapshot.audit.score}`,
+    `## ${t("snapshot.heading.score", { score: snapshot.audit.score })}`,
     "",
-    `通过 ${snapshot.audit.summary.pass} · 警告 ${snapshot.audit.summary.warn} · 失败 ${snapshot.audit.summary.fail} · 信息 ${snapshot.audit.summary.info}`,
+    t("snapshot.summary", {
+      pass: snapshot.audit.summary.pass,
+      warn: snapshot.audit.summary.warn,
+      fail: snapshot.audit.summary.fail,
+      info: snapshot.audit.summary.info,
+    }),
     "",
-    "## 体检项",
+    `## ${t("snapshot.heading.items")}`,
     "",
-    ...snapshot.audit.items.map((item) => `- [${item.severity}] ${item.title}：${item.detail}`),
+    ...snapshot.audit.items.map((item) =>
+      t("snapshot.item", { severity: item.severity, title: item.title, detail: item.detail }),
+    ),
     "",
-    "## 启动预览",
+    `## ${t("snapshot.heading.launchPreview")}`,
     "",
     "```json",
     JSON.stringify(snapshot.launchPreview, null, 2),
     "```",
     "",
-    "## 启动代码",
+    `## ${t("snapshot.heading.launchCode")}`,
     "",
     "```ts",
     snapshot.launchCode,
@@ -1865,28 +1967,40 @@ export function snapshotToMarkdown(snapshot: ProfileSnapshot): string {
   return lines.join("\n");
 }
 
-export function profileScore(profile: BrowserProfile): Array<{ label: string; ok: boolean; detail: string }> {
+export function profileScore(profile: BrowserProfile): Array<{ label: LocalizedText; ok: boolean; detail: LocalizedText }> {
   const proxy = buildProxyUrl(profile.proxy);
   return [
     {
-      label: "持久化",
+      label: localizedText("profileScore.persistence.label"),
       ok: profile.mode === "persistent",
-      detail: profile.mode === "persistent" ? "保存 Cookie 和本地状态" : "临时上下文更容易像无痕会话",
+      detail: localizedText(
+        profile.mode === "persistent"
+          ? "profileScore.persistence.detail.persistent"
+          : "profileScore.persistence.detail.ephemeral",
+      ),
     },
     {
-      label: "代理",
+      label: localizedText("profileScore.proxy.label"),
       ok: Boolean(proxy),
-      detail: proxy ? maskProxyUrl(proxy) : "未配置代理",
+      detail: proxy
+        ? localizedText("profileScore.proxy.detail.configured", { proxy: maskProxyUrl(proxy) })
+        : localizedText("profileScore.proxy.detail.missing"),
     },
     {
-      label: "时区/语言",
+      label: localizedText("profileScore.geoip.label"),
       ok: profile.runtime.geoip || Boolean(profile.fingerprint.timezone && profile.fingerprint.locale),
-      detail: profile.runtime.geoip ? "由代理或当前公网出口自动解析" : "建议显式设置或启用 GeoIP",
+      detail: localizedText(
+        profile.runtime.geoip ? "profileScore.geoip.detail.auto" : "profileScore.geoip.detail.manual",
+      ),
     },
     {
-      label: "人类化",
+      label: localizedText("profileScore.humanize.label"),
       ok: profile.runtime.humanize,
-      detail: profile.runtime.humanize ? profile.runtime.humanPreset : "未启用",
+      detail: profile.runtime.humanize
+        ? localizedText("profileScore.humanize.detail.on", {
+            preset: localizedText(profile.runtime.humanPreset === "careful" ? "form.careful" : "form.default"),
+          })
+        : localizedText("profileScore.humanize.detail.off"),
     },
   ];
 }
@@ -1901,85 +2015,94 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
     id: "persistent-profile",
     category: "persistence",
     severity: profile.mode === "persistent" ? "pass" : "warn",
-    title: "持久化 Profile",
-    detail:
+    title: localizedText("profileAudit.persistentProfile.title"),
+    detail: localizedText(
       profile.mode === "persistent"
-        ? "使用真实用户数据目录，Cookie、缓存和本地状态会跨会话保留。"
-        : "临时上下文更像无痕会话；需要长期账号状态时应使用持久模式。",
+        ? "profileAudit.persistentProfile.detail.persistent"
+        : "profileAudit.persistentProfile.detail.ephemeral",
+    ),
   });
 
   pushAudit(items, {
     id: "launcher-kind",
     category: "runtime",
     severity: profile.runtime.launcher === "puppeteer-browser" ? "warn" : "pass",
-    title: "SDK 运行器",
-    detail:
+    title: localizedText("profileAudit.launcherKind.title"),
+    detail: localizedText(
       profile.runtime.launcher === "puppeteer-browser"
-        ? "Puppeteer 可用，但官方更推荐 Playwright 处理高对抗检测场景。"
+        ? "profileAudit.launcherKind.detail.puppeteer"
         : profile.runtime.launcher === "playwright-browser"
-          ? "使用 Playwright 裸 Browser 模式，适合需要手动管理多个 context 的集成。"
-          : "使用 Playwright Context 包装器，适合面板管理单个 profile 会话。",
+          ? "profileAudit.launcherKind.detail.playwrightBrowser"
+          : "profileAudit.launcherKind.detail.playwrightContext",
+    ),
   });
 
   pushAudit(items, {
     id: "proxy",
     category: "network",
     severity: proxy ? "pass" : "warn",
-    title: "代理出口",
-    detail: proxy ? `已配置 ${maskProxyUrl(proxy)}。` : "未配置代理；公网出口会直接暴露当前机器网络。",
+    title: localizedText("profileAudit.proxy.title"),
+    detail: proxy
+      ? localizedText("profileAudit.proxy.detail.configured", { proxy: maskProxyUrl(proxy) })
+      : localizedText("profileAudit.proxy.detail.missing"),
   });
 
   pushAudit(items, {
     id: "geoip-alignment",
     category: "network",
     severity: profile.runtime.geoip || Boolean(profile.fingerprint.timezone && profile.fingerprint.locale) ? "pass" : "warn",
-    title: "时区/语言联动",
-    detail: profile.runtime.geoip
-      ? proxy
-        ? "GeoIP 已启用，会尝试让时区和语言跟代理出口一致。"
-        : "GeoIP 已启用，会尝试让时区和语言跟当前机器公网出口一致。"
-      : profile.fingerprint.timezone && profile.fingerprint.locale
-        ? "已显式设置时区和语言。"
-        : "建议启用 GeoIP，或显式填写 timezone 和 locale。",
+    title: localizedText("profileAudit.geoipAlignment.title"),
+    detail: localizedText(
+      profile.runtime.geoip
+        ? proxy
+          ? "profileAudit.geoipAlignment.detail.geoipProxy"
+          : "profileAudit.geoipAlignment.detail.geoipLocal"
+        : profile.fingerprint.timezone && profile.fingerprint.locale
+          ? "profileAudit.geoipAlignment.detail.explicit"
+          : "profileAudit.geoipAlignment.detail.missing",
+    ),
   });
 
   pushAudit(items, {
     id: "webrtc",
     category: "network",
     severity: webrtcMode === "off" || (webrtcMode === "auto" && !webrtcAutoAnchored) ? "warn" : "pass",
-    title: "WebRTC 出口",
-    detail:
+    title: localizedText("profileAudit.webrtc.title"),
+    detail: localizedText(
       webrtcMode === "geoip"
         ? proxy
-          ? "GeoIP 已启用且代理有效；CloakBrowser 解析到代理出口后会自动注入 WebRTC 出口 IP。"
-          : "GeoIP 已启用；CloakBrowser 会按当前机器公网出口保持 WebRTC 出口一致。"
+          ? "profileAudit.webrtc.detail.geoipProxy"
+          : "profileAudit.webrtc.detail.geoipLocal"
         : webrtcMode === "auto"
         ? proxy
-          ? "WebRTC IP 会自动跟随代理出口。"
+          ? "profileAudit.webrtc.detail.autoProxy"
           : webrtcAutoAnchored
-            ? "WebRTC IP 会通过 GeoIP 解析当前机器公网出口。"
-            : "WebRTC auto 没有代理，也不会从 GeoIP 解析到可注入的出口 IP。"
+            ? "profileAudit.webrtc.detail.autoAnchored"
+            : "profileAudit.webrtc.detail.autoUnanchored"
         : webrtcMode === "custom"
-          ? "WebRTC IP 使用手动指定值，确认它与代理出口一致。"
-          : "WebRTC IP 未配置；目标站点可能看到本机或不一致的候选地址。",
+          ? "profileAudit.webrtc.detail.custom"
+          : "profileAudit.webrtc.detail.off",
+    ),
   });
 
   pushAudit(items, {
     id: "humanize",
     category: "runtime",
     severity: profile.runtime.humanize ? "pass" : "warn",
-    title: "人类化输入",
+    title: localizedText("profileAudit.humanize.title"),
     detail: profile.runtime.humanize
-      ? `已启用 ${profile.runtime.humanPreset} preset。`
-      : "未启用 humanize，自动化输入/鼠标/滚动会更机械。",
+      ? localizedText("profileAudit.humanize.detail.on", { preset: profile.runtime.humanPreset })
+      : localizedText("profileAudit.humanize.detail.off"),
   });
 
   pushAudit(items, {
     id: "headless",
     category: "runtime",
     severity: profile.runtime.headless ? "warn" : "pass",
-    title: "窗口模式",
-    detail: profile.runtime.headless ? "无头模式更省资源，但部分站点仍会提高风险分。" : "可见窗口更接近人工调试场景。",
+    title: localizedText("profileAudit.headless.title"),
+    detail: localizedText(
+      profile.runtime.headless ? "profileAudit.headless.detail.headless" : "profileAudit.headless.detail.headed",
+    ),
   });
 
   if (profile.runtime.watermark !== "off") {
@@ -1987,8 +2110,8 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
       id: "watermark",
       category: "runtime",
       severity: "warn",
-      title: "环境水印",
-      detail: `已启用 ${profile.runtime.watermark} 水印：每个页面都会注入一个可检测的 DOM 节点，可能成为跨环境关联信号。`,
+      title: localizedText("profileAudit.watermark.title"),
+      detail: localizedText("profileAudit.watermark.detail.enabled", { watermark: profile.runtime.watermark }),
     });
   }
 
@@ -1996,33 +2119,51 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
     id: "fingerprint-seed",
     category: "identity",
     severity: profile.fingerprint.seed.trim() ? "pass" : "info",
-    title: "指纹 Seed",
-    detail: profile.fingerprint.seed.trim()
-      ? "固定 seed 会让同一 profile 复用稳定身份。"
-      : "未填写 seed 时 CloakBrowser 会生成随机身份；适合一次性会话，不适合长期回访。",
+    title: localizedText("profileAudit.fingerprintSeed.title"),
+    detail: localizedText(
+      profile.fingerprint.seed.trim()
+        ? "profileAudit.fingerprintSeed.detail.set"
+        : "profileAudit.fingerprintSeed.detail.random",
+    ),
   });
 
   pushAudit(items, {
     id: "viewport",
     category: "identity",
     severity: profile.viewport.mode === "native" ? "info" : "pass",
-    title: "视口",
-    detail:
+    title: localizedText("preflightItem.viewport.title"),
+    detail: localizedText(
       profile.viewport.mode === "native"
-        ? "使用原生视口，不向 Playwright 注入 viewport。"
-        : `${profile.viewport.width}x${profile.viewport.height} 固定视口会进入 context 配置。`,
+        ? "profileAudit.viewport.detail.native"
+        : "profileAudit.viewport.detail.fixed",
+      profile.viewport.mode === "native"
+        ? undefined
+        : { width: profile.viewport.width, height: profile.viewport.height },
+    ),
   });
 
-  pushAudit(items, validateJsonAudit("launch-json", "advanced", "launchOptions JSON", profile.advanced.launchOptionsJson));
-  pushAudit(items, validateJsonAudit("context-json", "advanced", "contextOptions JSON", profile.advanced.contextOptionsJson));
-  pushAudit(items, validateJsonAudit("human-json", "advanced", "humanConfig JSON", profile.advanced.humanConfigJson));
+  pushAudit(items, validateJsonAudit("launch-json", "advanced", {
+    title: "preflightItem.launchJson.title",
+    empty: "preflightItem.launchJson.detail.empty",
+    valid: "preflightItem.launchJson.detail.valid",
+  }, "launchOptions JSON", profile.advanced.launchOptionsJson));
+  pushAudit(items, validateJsonAudit("context-json", "advanced", {
+    title: "preflightItem.contextJson.title",
+    empty: "preflightItem.contextJson.detail.empty",
+    valid: "preflightItem.contextJson.detail.valid",
+  }, "contextOptions JSON", profile.advanced.contextOptionsJson));
+  pushAudit(items, validateJsonAudit("human-json", "advanced", {
+    title: "preflightItem.humanJson.title",
+    empty: "preflightItem.humanJson.detail.empty",
+    valid: "preflightItem.humanJson.detail.valid",
+  }, "humanConfig JSON", profile.advanced.humanConfigJson));
 
   if (hasUnsupportedChromiumSandboxOverride(profile)) {
     pushAudit(items, {
       id: "chromium-sandbox",
       category: "runtime",
       severity: "warn",
-      title: "Chromium 沙箱",
+      title: localizedText("preflightItem.chromiumSandbox.title"),
       detail: chromiumSandboxOverrideDetail(profile),
     });
   }
@@ -2032,8 +2173,8 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
       id: "puppeteer-context-options",
       category: "advanced",
       severity: "info",
-      title: "Puppeteer contextOptions",
-      detail: "Puppeteer 模式不会使用 Playwright contextOptions；这些设置只影响 Playwright Browser/Context。",
+      title: localizedText("profileAudit.puppeteerContextOptions.title"),
+      detail: localizedText("profileAudit.puppeteerContextOptions.detail"),
     });
   }
 
@@ -2042,8 +2183,8 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
       id: "stealth-args-disabled",
       category: "runtime",
       severity: "fail",
-      title: "Stealth Args 已关闭",
-      detail: "关闭默认 stealth args 且未提供自定义 args，会削弱 CloakBrowser 默认保护。",
+      title: localizedText("profileAudit.stealthArgsDisabled.title"),
+      detail: localizedText("profileAudit.stealthArgsDisabled.detail"),
     });
   }
 
@@ -2144,15 +2285,15 @@ function preflightFromAudit(item: AuditItem): ProfilePreflightItem {
     severity: item.severity,
     title: item.title,
     detail: item.detail,
-    actions: item.severity === "fail" ? [openTabAction("advanced", "检查 JSON")] : undefined,
+    actions: item.severity === "fail" ? [openTabAction("advanced", "preflightItem.action.checkJson")] : undefined,
   };
 }
 
-function openTabAction(target: PreflightActionTarget, label: string): ProfilePreflightAction {
+function openTabAction(target: PreflightActionTarget, labelKey: string): ProfilePreflightAction {
   return {
     id: `open-${target}`,
     kind: "open-tab",
-    label,
+    label: localizedText(labelKey),
     target,
   };
 }
@@ -2166,6 +2307,17 @@ function xrayShareLinkProblem(shareLink: string): string {
   }
 }
 
+/** Which role the engine plays for this proxy: the phrase is a dictionary entry of its own. */
+function xrayEngineRole(profile: BrowserProfile): LocalizedText {
+  return localizedText(
+    profile.proxy.preProxyId.trim()
+      ? "preflightItem.xrayEngine.role.chained"
+      : profile.proxy.scheme === "xray"
+        ? "preflightItem.xrayEngine.role.node"
+        : "preflightItem.xrayEngine.role.native",
+  );
+}
+
 // The engine is a second binary next to the browser core, and a proxy that needs it cannot launch
 // without it — so its absence is a failure with an install action, exactly like the core's.
 function pushXrayEnginePreflight(
@@ -2174,14 +2326,14 @@ function pushXrayEnginePreflight(
   engine: ProfilePreflightXrayEngine | undefined,
 ): void {
   const chained = Boolean(profile.proxy.preProxyId.trim());
-  const role = chained ? "链式代理（前置代理 → 目标代理）" : profile.proxy.scheme === "xray" ? "分享链接节点" : "原生代理经引擎中转";
+  const role = xrayEngineRole(profile);
   if (!engine) {
     pushPreflight(items, {
       id: "xray-engine",
       category: "environment",
       severity: "info",
-      title: "Xray 引擎",
-      detail: `该代理需要 Xray 引擎中转（${role}）；当前报告未包含引擎状态。`,
+      title: localizedText("preflightItem.xrayEngine.title"),
+      detail: localizedText("preflightItem.xrayEngine.detail.unknown", { role }),
     });
     return;
   }
@@ -2189,11 +2341,20 @@ function pushXrayEnginePreflight(
     id: "xray-engine",
     category: "environment",
     severity: engine.installed ? "pass" : "fail",
-    title: "Xray 引擎",
+    title: localizedText("preflightItem.xrayEngine.title"),
     detail: engine.installed
-      ? `已安装${engine.version ? ` ${engine.version}` : ""}${engine.binaryPath ? `：${engine.binaryPath}` : "。"}`
-      : engine.detail ?? `该代理需要 Xray 引擎中转（${role}），但 Xray-core 尚未安装。`,
-    actions: engine.installed ? undefined : [{ id: "install-xray", kind: "install-xray", label: "安装 Xray 引擎" }],
+      ? engine.binaryPath
+        ? localizedText("preflightItem.xrayEngine.detail.installed", {
+            version: engine.version ? ` ${engine.version}` : "",
+            path: engine.binaryPath,
+          })
+        : localizedText("preflightItem.xrayEngine.detail.installedNoPath", {
+            version: engine.version ? ` ${engine.version}` : "",
+          })
+      : engine.detail
+        ? externalText(engine.detail)
+        : localizedText("preflightItem.xrayEngine.detail.missing", { role }),
+    actions: engine.installed ? undefined : [{ id: "install-xray", kind: "install-xray", label: localizedText("preflightItem.action.installXray") }],
   });
   if (chained) {
     const preProxy = engine.preProxy;
@@ -2201,13 +2362,15 @@ function pushXrayEnginePreflight(
       id: "xray-pre-proxy",
       category: "network",
       severity: preProxy ? (preProxy.ok ? "pass" : "fail") : "info",
-      title: "前置代理",
+      title: localizedText("preflightItem.xrayPreProxy.title"),
       detail: preProxy
         ? preProxy.ok
-          ? `链路：本机 → ${preProxy.name ?? preProxy.id} → 目标代理 → 网站。`
-          : preProxy.detail ?? "前置代理不可用。"
-        : "当前报告未解析前置代理。",
-      actions: preProxy && !preProxy.ok ? [openTabAction("proxy", "调整前置代理")] : undefined,
+          ? localizedText("preflightItem.xrayPreProxy.detail.linked", { name: preProxy.name ?? preProxy.id })
+          : preProxy.detail
+            ? externalText(preProxy.detail)
+            : localizedText("preflightItem.xrayPreProxy.detail.unavailable")
+        : localizedText("preflightItem.xrayPreProxy.detail.unknown"),
+      actions: preProxy && !preProxy.ok ? [openTabAction("proxy", "preflightItem.action.adjustPreProxy")] : undefined,
     });
   }
 }
@@ -2219,8 +2382,8 @@ function validateStartUrlPreflight(startUrl: string): ProfilePreflightItem {
       id: "start-url",
       category: "runtime",
       severity: "info",
-      title: "起始网址",
-      detail: "未配置起始网址，启动后只创建空白页。",
+      title: localizedText("preflightItem.startUrl.title"),
+      detail: localizedText("preflightItem.startUrl.detail.empty"),
     };
   }
 
@@ -2229,8 +2392,11 @@ function validateStartUrlPreflight(startUrl: string): ProfilePreflightItem {
       id: "start-url",
       category: "runtime",
       severity: "pass",
-      title: "起始网址",
-      detail: result.kind === "system" ? `系统页面：${result.value}` : `有效：${result.value}`,
+      title: localizedText("preflightItem.startUrl.title"),
+      detail: localizedText(
+        result.kind === "system" ? "preflightItem.startUrl.detail.system" : "preflightItem.startUrl.detail.web",
+        { value: result.value },
+      ),
     };
   }
 
@@ -2238,9 +2404,16 @@ function validateStartUrlPreflight(startUrl: string): ProfilePreflightItem {
     id: "start-url",
     category: "runtime",
     severity: "fail",
-    title: "起始网址",
-    detail: result.message,
-    actions: [openTabAction("runtime", "修正网址")],
+    title: localizedText("preflightItem.startUrl.title"),
+    // The validator words its message for the editor form; the report re-keys the reason so the
+    // failure reads in the panel's language.
+    detail: localizedText(
+      result.reason === "unsupported-protocol"
+        ? "preflightItem.startUrl.detail.unsupportedProtocol"
+        : "preflightItem.startUrl.detail.invalid",
+      result.reason === "unsupported-protocol" ? { protocol: result.protocol ?? "" } : undefined,
+    ),
+    actions: [openTabAction("runtime", "preflightItem.action.fixStartUrl")],
   };
 }
 
@@ -2250,8 +2423,8 @@ function validateViewportPreflight(profile: BrowserProfile): ProfilePreflightIte
       id: "viewport",
       category: "identity",
       severity: "info",
-      title: "视口",
-      detail: "使用原生视口，启动参数会传入 viewport: null。",
+      title: localizedText("preflightItem.viewport.title"),
+      detail: localizedText("preflightItem.viewport.detail.native"),
     };
   }
 
@@ -2261,13 +2434,39 @@ function validateViewportPreflight(profile: BrowserProfile): ProfilePreflightIte
     id: "viewport",
     category: "identity",
     severity: widthOk && heightOk ? "pass" : "fail",
-    title: "视口",
+    title: localizedText("preflightItem.viewport.title"),
     detail:
       widthOk && heightOk
-        ? `${profile.viewport.width}x${profile.viewport.height}。`
-        : "固定视口宽高必须是大于等于 320 的有效数字。",
-    actions: widthOk && heightOk ? undefined : [openTabAction("runtime", "修正视口")],
+        ? localizedText("preflightItem.viewport.detail.fixed", {
+            width: profile.viewport.width,
+            height: profile.viewport.height,
+          })
+        : localizedText("preflightItem.viewport.detail.invalid"),
+    actions: widthOk && heightOk ? undefined : [openTabAction("runtime", "preflightItem.action.fixViewport")],
   };
+}
+
+/**
+ * The exit check joins an IP, a region, a colo and a latency. Only the region has a display name that
+ * depends on the reader's language, so the builder keeps it as its own template slot with the region
+ * code as the value (`{ region }`) and joins the parts around it; the renderer formats the code.
+ */
+function networkCheckSummaryDetail(check: NetworkCheckResult): LocalizedText {
+  const ip = check.ip?.trim() ?? "";
+  // The name and the raw trace value are only fallbacks for a probe that reported no usable code, so
+  // an empty (or whitespace-only) entry falls through instead of ending the chain.
+  const region =
+    networkCheckCountryCode(check) ?? (check.geo?.countryName?.trim() || check.trace?.loc?.trim() || "");
+  const tailParts = [check.trace?.colo?.trim(), ...(typeof check.latencyMs === "number" && Number.isFinite(check.latencyMs) ? [`${check.latencyMs}ms`] : [])].filter(
+    (part): part is string => Boolean(part),
+  );
+  if (!ip && !region && tailParts.length === 0) return localizedText("preflightItem.networkCheck.detail.passEmpty");
+
+  return localizedText("preflightItem.networkCheck.detail.pass", {
+    head: ip ? `${ip}${region ? " · " : ""}` : "",
+    region: region ? { region } : "",
+    tail: tailParts.length ? `${ip || region ? " · " : ""}${tailParts.join(" · ")}` : "",
+  });
 }
 
 function networkCheckPreflight(check: NetworkCheckResult | undefined): ProfilePreflightItem {
@@ -2276,9 +2475,9 @@ function networkCheckPreflight(check: NetworkCheckResult | undefined): ProfilePr
       id: "network-check",
       category: "network",
       severity: "warn",
-      title: "出口检查",
-      detail: "尚未记录代理出口检查；建议先检查代理，确认出口 IP、地区代码和延迟。",
-      actions: [openTabAction("proxy", "检查代理")],
+      title: localizedText("preflightItem.networkCheck.title"),
+      detail: localizedText("preflightItem.networkCheck.detail.missing"),
+      actions: [openTabAction("proxy", "preflightItem.action.checkProxy")],
     };
   }
 
@@ -2287,9 +2486,11 @@ function networkCheckPreflight(check: NetworkCheckResult | undefined): ProfilePr
       id: "network-check",
       category: "network",
       severity: "warn",
-      title: "出口检查",
-      detail: check.error ? `最近一次检查失败：${check.error}` : "最近一次出口检查失败。",
-      actions: [openTabAction("proxy", "重新检查")],
+      title: localizedText("preflightItem.networkCheck.title"),
+      detail: check.error
+        ? localizedText("preflightItem.networkCheck.detail.failed", { error: check.error })
+        : localizedText("preflightItem.networkCheck.detail.failedUnknown"),
+      actions: [openTabAction("proxy", "preflightItem.action.recheckProxy")],
     };
   }
 
@@ -2297,33 +2498,43 @@ function networkCheckPreflight(check: NetworkCheckResult | undefined): ProfilePr
     id: "network-check",
     category: "network",
     severity: "pass",
-    title: "出口检查",
-    detail: networkCheckSummaryText(check, {
-      emptyText: "出口检查通过",
-      locale: "zh-CN",
-    }),
+    title: localizedText("preflightItem.networkCheck.title"),
+    detail: networkCheckSummaryDetail(check),
   };
 }
 
-function validateJsonAudit(id: string, category: AuditCategory, title: string, value: string): AuditItem {
+interface JsonAuditKeys {
+  title: string;
+  empty: string;
+  valid: string;
+}
+
+function validateJsonAudit(
+  id: string,
+  category: AuditCategory,
+  keys: JsonAuditKeys,
+  jsonLabel: string,
+  value: string,
+): AuditItem {
+  const title = localizedText(keys.title);
   if (!value.trim()) {
     return {
       id,
       category,
       severity: "info",
       title,
-      detail: "未配置。",
+      detail: localizedText(keys.empty),
     };
   }
 
   try {
-    parseOptionalJsonObject(title, value);
+    parseOptionalJsonObject(jsonLabel, value);
     return {
       id,
       category,
       severity: "pass",
       title,
-      detail: "JSON 对象有效，会进入启动配置。",
+      detail: localizedText(keys.valid),
     };
   } catch (error) {
     return {
@@ -2331,7 +2542,7 @@ function validateJsonAudit(id: string, category: AuditCategory, title: string, v
       category,
       severity: "fail",
       title,
-      detail: (error as Error).message,
+      detail: externalText((error as Error).message),
     };
   }
 }

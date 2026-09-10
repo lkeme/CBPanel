@@ -22,6 +22,16 @@ import {
 } from "./profile";
 import { mergeSettings, normalizeSettings } from "./settings";
 import { rewriteGithubDownloadUrl } from "./githubMirror";
+import type { LocalizedText } from "./profile";
+
+/** The dictionary key an item's text resolves to, or undefined for the external-message arm. */
+function textKey(text: LocalizedText | undefined): string | undefined {
+  return text && "key" in text ? text.key : undefined;
+}
+
+function textParams(text: LocalizedText | undefined): Record<string, unknown> | undefined {
+  return text && "key" in text ? text.params : undefined;
+}
 
 const UUID = "b831381d-6324-4d53-ad4f-8cda48b30811";
 const VLESS_LINK = `vless://${UUID}@node.example.com:443?security=reality&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&sni=www.microsoft.com&type=tcp#Node`;
@@ -120,7 +130,11 @@ test("preflight reports the engine for a plain proxy when the environment says i
   const routed = preflightProfile(plain, { binaryInstalled: true, xrayEngine: { installed: false, binaryPath: "/x/xray" } });
   const engine = routed.items.find((item) => item.id === "xray-engine");
   assert.equal(engine?.severity, "fail");
-  assert.match(engine?.detail ?? "", /原生代理经引擎中转/);
+  // The role is a localized phrase of its own, so the template embeds it as a nested key.
+  assert.deepEqual(engine?.detail, {
+    key: "preflightItem.xrayEngine.detail.missing",
+    params: { role: { key: "preflightItem.xrayEngine.role.native" } },
+  });
 });
 
 test("withLocalXrayProxy points the profile at the engine's inbound and keeps the bypass list", () => {
@@ -160,20 +174,33 @@ test("launch preview and preflight explain an unparsable node instead of a gener
   const report = preflightProfile(broken, { binaryInstalled: true });
   const item = report.items.find((candidate) => candidate.id === "proxy-config");
   assert.equal(item?.severity, "fail");
-  assert.match(item?.detail ?? "", /Xray 分享链接无法解析/);
+  assert.equal(textKey(item?.detail), "preflightItem.proxyConfig.detail.unparsable");
+  // The reason stays whatever the parser said: it is a subsystem message this panel does not localize.
+  assert.notEqual(String(textParams(item?.detail)?.message ?? "").trim(), "");
 
   const healthy = defaultProfile({ proxy: xrayProxy() });
   const plan = buildSessionLaunchPlan(healthy);
   assert.equal(plan.proxy, "xray://node.example.com:443");
   const healthyReport = preflightProfile(healthy, { binaryInstalled: true, xrayEngine: { installed: true, version: "25.9.1", binaryPath: "/x/xray" } });
   assert.equal(healthyReport.items.find((candidate) => candidate.id === "proxy-config")?.severity, "pass");
-  assert.match(healthyReport.items.find((candidate) => candidate.id === "proxy-config")?.detail ?? "", /vless · tcp\+reality/);
+  assert.equal(
+    textParams(healthyReport.items.find((candidate) => candidate.id === "proxy-config")?.detail)?.node,
+    "vless · tcp+reality · reality www.microsoft.com",
+  );
   const engine = healthyReport.items.find((candidate) => candidate.id === "xray-engine");
   assert.equal(engine?.severity, "pass");
-  assert.match(engine?.detail ?? "", /25\.9\.1/);
+  assert.deepEqual(engine?.detail, {
+    key: "preflightItem.xrayEngine.detail.installed",
+    params: { version: " 25.9.1", path: "/x/xray" },
+  });
   // Without engine information the item is informational, never a failure the operator cannot act on.
   const unknown = preflightProfile(healthy, { binaryInstalled: true });
   assert.equal(unknown.items.find((candidate) => candidate.id === "xray-engine")?.severity, "info");
+  const unknownEngine = unknown.items.find((candidate) => candidate.id === "xray-engine");
+  assert.deepEqual(unknownEngine?.detail, {
+    key: "preflightItem.xrayEngine.detail.unknown",
+    params: { role: { key: "preflightItem.xrayEngine.role.node" } },
+  });
 });
 
 test("settings normalize and merge the Xray section", () => {

@@ -257,7 +257,8 @@ test("preflight reports the engine and the front proxy for profiles that need th
   assert.deepEqual(engine?.actions?.map((action) => action.kind), ["install-xray"]);
   const preProxy = report.items.find((item) => item.id === "xray-pre-proxy");
   assert.equal(preProxy?.severity, "fail");
-  assert.match(preProxy?.detail ?? "", /前置代理不存在/);
+  // The reason is the service's own message, carried through as external text.
+  assert.match(preProxy?.detail && "text" in preProxy.detail ? preProxy.detail.text : "", /前置代理不存在/);
   assert.equal(report.ok, false);
 
   const installed = bridgeStub();
@@ -269,7 +270,10 @@ test("preflight reports the engine and the front proxy for profiles that need th
   const readyReport = await readyService.preflight(xrayProfile("xray-preflight-ready-test"));
   const readyEngine = readyReport.items.find((item) => item.id === "xray-engine");
   assert.equal(readyEngine?.severity, "pass");
-  assert.match(readyEngine?.detail ?? "", /25\.9\.1/);
+  assert.equal(
+    readyEngine?.detail && "key" in readyEngine.detail ? readyEngine.detail.params?.version : undefined,
+    " 25.9.1",
+  );
   assert.equal(readyReport.items.some((item) => item.id === "xray-pre-proxy"), false);
 
   const plainReport = await readyService.preflight(defaultProfile({ id: "plain-preflight-test" }));
