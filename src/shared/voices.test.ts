@@ -79,16 +79,17 @@ test("different seeds shape different lists", () => {
   assert.ok(distinct.size >= 6, `expected several distinct lists, got ${distinct.size}`);
 });
 
-test("voices matching the requested language are mandatory keeps", () => {
+test("voices matching the requested language are mandatory keeps, case-insensitively", () => {
   const zhVoices = HOST_VOICES.filter((voice) => voice.lang === "zh-CN");
-  for (const seed of [0, 3, 4242, 4294967295]) {
-    const kept = selectStableVoices(HOST_VOICES, seed, "zh-CN");
+  // A full seed scan with a mixed-case target, not a 4-seed sample: "Microsoft Huihui" is ranked high
+  // enough to survive on score alone for most seeds, so only the whole range plus mixed case forces the
+  // rule and both toLowerCase calls to be load-bearing.
+  for (let seed = 0; seed < 200; seed += 1) {
+    const kept = selectStableVoices(HOST_VOICES, seed, "ZH-cn");
     for (const voice of zhVoices) {
-      assert.ok(kept.includes(voice), `seed=${seed} dropped ${voice.name}`);
+      assert.ok(kept.includes(voice), `seed=${seed} dropped ${voice.name} although its lang matches`);
     }
   }
-  // The comparison is case-insensitive on both sides.
-  assert.ok(names(selectStableVoices(HOST_VOICES, 17, "ZH-cn")).includes(zhVoices[0].name));
 });
 
 test("an empty language keeps no language preference", () => {
@@ -98,11 +99,26 @@ test("an empty language keeps no language preference", () => {
     return zhVoices.some((voice) => !kept.includes(voice));
   });
   assert.ok(droppedSomewhere, "with no locale the shaping must be free to drop foreign-language voices");
+
+  // The empty target must not equal a voice's empty lang either: without the `target.length > 0` guard
+  // every lang-less voice would become a mandatory keep, which this fixture is the only one to expose.
+  const languageLess = HOST_VOICES.map((voice) => ({ ...voice, lang: "" }));
+  const anyDropped = Array.from({ length: 200 }, (_, seed) => seed).some(
+    (seed) => selectStableVoices(languageLess, seed, "").length < languageLess.length,
+  );
+  assert.ok(anyDropped, "an empty language must not turn lang-less voices into mandatory keeps");
 });
 
 test("the engine default voice is always kept", () => {
-  for (const seed of [0, 5, 4242, 4294967290]) {
-    assert.ok(selectStableVoices(HOST_VOICES, seed, "").includes(HOST_VOICES[0]), `seed=${seed}`);
+  const engineDefault = HOST_VOICES[0];
+  assert.equal(engineDefault.default, true, "the fixture must carry the engine default voice");
+  // The whole 0..199 range, not a sample: ranking alone keeps the engine default for most seeds, so a
+  // handful of seeds cannot distinguish the rule from a lucky score.
+  for (let seed = 0; seed < 200; seed += 1) {
+    assert.ok(
+      selectStableVoices(HOST_VOICES, seed, "").includes(engineDefault),
+      `seed=${seed} dropped the engine default ${engineDefault.name}`,
+    );
   }
 });
 
@@ -113,9 +129,11 @@ test("lists of three voices or fewer pass through unchanged", () => {
   }
 });
 
-test("retention stays inside the seeded 70-85% band", () => {
-  for (const seed of [0, 5, 424242, 4294967294]) {
+test("retention floats with the seed inside the 70-85% band", () => {
+  const counts = new Set<number>();
+  for (let seed = 0; seed < 200; seed += 1) {
     const kept = selectStableVoices(HOST_VOICES, seed, "");
+    counts.add(kept.length);
     assert.ok(
       kept.length >= Math.floor((HOST_VOICES.length * 70) / 100),
       `seed=${seed} kept only ${kept.length}`,
@@ -125,6 +143,9 @@ test("retention stays inside the seeded 70-85% band", () => {
       `seed=${seed} kept ${kept.length} of ${HOST_VOICES.length}`,
     );
   }
+  // A constant ratio (78% for every seed, say) satisfies the band yet does not float, so the band alone
+  // cannot guard the seeded ratio. The counts have to differ between at least two seeds.
+  assert.ok(counts.size >= 2, `the kept count never floated across seeds: ${[...counts].join(",")}`);
 });
 
 test("voicesSeed derives a stable instance seed, fingerprint seed first", () => {
@@ -218,6 +239,35 @@ test("the replaced method still reports itself as native", () => {
   assert.equal(page.evaluate("Function.prototype.toString.name"), "toString");
   assert.equal(page.evaluate("new SpeechSynthesis().getVoices.length"), 0);
   assert.equal(page.evaluate("new SpeechSynthesis().getVoices.name"), "getVoices");
+});
+
+test("the replaced method is not constructible, like a native WebIDL operation", () => {
+  const page = runVoicesScript(buildVoicesScript(7, ""));
+
+  // A native operation has exactly length and name; a plain function expression also carries an own
+  // "prototype" and can be invoked with new. Either tell is a single line for a page to probe, and it
+  // would look the same in every environment because shaping defaults on.
+  assert.equal(
+    page.evaluate("Object.getOwnPropertyNames(new SpeechSynthesis().getVoices).join(',')"),
+    "length,name",
+  );
+  assert.equal(
+    page.evaluate("Object.prototype.hasOwnProperty.call(new SpeechSynthesis().getVoices, 'prototype')"),
+    false,
+  );
+  assert.equal(
+    page.evaluate(
+      "var constructible = true; try { new (new SpeechSynthesis().getVoices)(); } catch (error) { constructible = false; } constructible",
+    ),
+    false,
+  );
+  // The thrown value is a TypeError, not some incidental failure.
+  assert.equal(
+    page.evaluate(
+      "var wrongError = true; try { new (new SpeechSynthesis().getVoices)(); } catch (error) { wrongError = !(error instanceof TypeError); } wrongError",
+    ),
+    false,
+  );
 });
 
 test("every other function keeps its real source and behavior", () => {

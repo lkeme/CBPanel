@@ -148,6 +148,11 @@ function voicesAlgorithmSource(): string {
  * replaced method reports itself as native while every other function keeps its real source. It bails
  * out when the page has no `SpeechSynthesis`, and swallows every failure: shaping must never break the
  * page it runs in.
+ *
+ * Not idempotent, deliberately without a guard: injected twice it shapes the already-shaped list again
+ * and the retention keeps shrinking. That is unreachable on the shipped launcher paths — each document
+ * gets the script exactly once — and a page-visible marker would add the very kind of tell this feature
+ * exists to remove, so the trade is rejected.
  */
 export function buildVoicesScript(seed: number, language: string, enabled = true): string {
   if (!enabled) return "";
@@ -169,14 +174,20 @@ ${voicesAlgorithmSource()}
 
     var SEED = ${seedLiteral};
     var LANGUAGE = ${languageLiteral};
-    var hookedGetVoices = function getVoices() {
-      var voices = originalGetVoices.call(this);
-      try {
-        return ${coreCall};
-      } catch (error) {
-        return voices;
+    // Taken from an object-literal method shorthand, not written as a function expression: a method
+    // definition is not a constructor and has no own "prototype" property, exactly like a native WebIDL
+    // operation. A function expression would be constructible and expose ["length","name","prototype"] —
+    // a one-line tell that every shaping-enabled environment would share.
+    var hookedGetVoices = {
+      getVoices() {
+        var voices = originalGetVoices.call(this);
+        try {
+          return ${coreCall};
+        } catch (error) {
+          return voices;
+        }
       }
-    };
+    }.getVoices;
 
     // The page must not be able to tell the method was replaced: register the hooked method's native
     // text, proxy the real Function.prototype.toString so every unregistered call still forwards to it,
