@@ -21,6 +21,7 @@ const smokeDataDir = path.join(smokePortableDir, "portable-data");
 const port = process.env.CBPANEL_RELEASE_SMOKE_PORT ? Number(process.env.CBPANEL_RELEASE_SMOKE_PORT) : await findFreePort();
 const token = process.env.CBPANEL_RELEASE_SMOKE_TOKEN ?? `smoke-${Date.now()}`;
 const tauriOrigin = "https://tauri.localhost";
+const requireInstaller = process.argv.includes("--require-installer");
 
 if (!Number.isInteger(port) || port <= 0) {
   throw new Error(`Invalid release smoke port: ${process.env.CBPANEL_RELEASE_SMOKE_PORT}`);
@@ -32,7 +33,9 @@ await assertExists(path.join(portableDir, "WebView2Loader.dll"), "Portable WebVi
 await assertExists(portableSidecarPath, "Portable sidecar is missing.");
 await assertExists(path.join(portableDir, "portable-data"), "Portable data directory is missing.");
 await assertExists(portableZip, "Portable ZIP is missing.");
-await assertExists(installerPath, "Windows installer is missing.");
+if (requireInstaller) {
+  await assertExists(installerPath, "Windows installer is missing. Run npm run release:windows to produce it.");
+}
 
 await prepareSmokePortableDir();
 
@@ -93,7 +96,7 @@ try {
   const dependencies = await fetchJson(`http://127.0.0.1:${port}/api/release-smoke/dependencies`, token);
   assertPackagedDependencies(dependencies);
 
-  console.log("Release smoke passed: portable app starts the sidecar, sidecar auth, Tauri WebView CORS, runtime API, binary API, packaged runtime dependencies, SQLite state, installer, and portable layout are present.");
+  console.log(`Release smoke passed: portable app starts the sidecar, sidecar auth, Tauri WebView CORS, runtime API, binary API, packaged runtime dependencies, SQLite state${requireInstaller ? ", installer" : ""}, and portable layout are present.`);
 } finally {
   await stopProcessTree(child);
   await fs.rm(smokePortableDir, { recursive: true, force: true });

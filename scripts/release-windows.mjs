@@ -34,7 +34,7 @@ execFileSync("node", ["scripts/package-windows-portable.mjs", "--require-sidecar
   stdio: "inherit",
 });
 execFileSync("node", ["scripts/generate-update-manifest.mjs", "--platform=windows"], { cwd: root, stdio: "inherit" });
-execFileSync("node", ["scripts/smoke-release.mjs"], { cwd: root, stdio: "inherit" });
+execFileSync("node", ["scripts/smoke-release.mjs", "--require-installer"], { cwd: root, stdio: "inherit" });
 
 console.log("Windows release artifacts are ready under release/ and src-tauri/target/release/bundle/nsis/.");
 
