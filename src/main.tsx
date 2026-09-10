@@ -1783,6 +1783,7 @@ function App() {
           installXray={installXrayEngine}
           globalUtlsFingerprint={normalizedSettings.xray.utlsFingerprint}
           nativeProxyRouting={normalizedSettings.xray.nativeProxyRouting}
+          hostPlatform={runtime?.platform}
           xrayStatus={xrayStatus}
           t={t}
         />

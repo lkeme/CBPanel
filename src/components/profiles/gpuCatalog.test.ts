@@ -10,11 +10,14 @@ import {
   gpuCatalogOptions,
   gpuEntryId,
   gpuSelectionValue,
+  spoofedPlatformFor,
 } from "./gpuCatalog";
 
 const WINDOWS_ENTRIES = GPU_PROFILE_CATALOG.filter((entry) => entry.platform === "windows");
+const MACOS_ENTRIES = GPU_PROFILE_CATALOG.filter((entry) => entry.platform === "macos");
+const LINUX_ENTRIES = GPU_PROFILE_CATALOG.filter((entry) => entry.platform === "linux");
 const FIRST_WINDOWS_ENTRY = WINDOWS_ENTRIES[0];
-const MACOS_ENTRY = GPU_PROFILE_CATALOG.find((entry) => entry.platform === "macos")!;
+const MACOS_ENTRY = MACOS_ENTRIES[0];
 
 test("every catalog entry can be emitted verbatim by the binary", () => {
   // CloakBrowser only emits --fingerprint-gpu-renderer verbatim when it starts with "ANGLE (";
@@ -78,34 +81,90 @@ test("the chosen pair reaches the launch arguments unmodified", () => {
   }
 });
 
-test("auto offers every entry in catalog order", () => {
+test("the spoofed platform under auto follows the host, Linux included", () => {
+  // cloakbrowser/config.js getDefaultStealthArgs: darwin spoofs macos; "Linux/Windows: spoof as
+  // Windows desktop".
+  assert.equal(spoofedPlatformFor("macos"), "macos");
+  assert.equal(spoofedPlatformFor("windows"), "windows");
+  assert.equal(spoofedPlatformFor("linux"), "windows");
+  assert.equal(spoofedPlatformFor("unknown"), undefined);
+  assert.equal(spoofedPlatformFor(undefined), undefined);
+});
+
+test("auto narrows the catalog to the platform CloakBrowser will spoof on the host", () => {
   assert.deepEqual(
-    gpuCatalogOptions("auto", "", "").map((entry) => entry.id),
-    GPU_PROFILE_CATALOG.map((entry) => entry.id),
+    gpuCatalogOptions("auto", "windows", "", "").map((entry) => entry.id),
+    WINDOWS_ENTRIES.map((entry) => entry.id),
   );
+  assert.deepEqual(
+    gpuCatalogOptions("auto", "macos", "", "").map((entry) => entry.id),
+    MACOS_ENTRIES.map((entry) => entry.id),
+  );
+  // A Linux host is spoofed as Windows, so the Windows entries are the coherent ones.
+  assert.deepEqual(
+    gpuCatalogOptions("auto", "linux", "", "").map((entry) => entry.id),
+    WINDOWS_ENTRIES.map((entry) => entry.id),
+  );
+});
+
+test("auto with an unknown or absent host keeps offering every entry", () => {
+  for (const host of [undefined, "unknown"] as const) {
+    assert.deepEqual(
+      gpuCatalogOptions("auto", host, "", "").map((entry) => entry.id),
+      GPU_PROFILE_CATALOG.map((entry) => entry.id),
+      `a ${host} host must not empty the menu`,
+    );
+  }
 });
 
 test("a concrete platform narrows the list to its own entries", () => {
   assert.deepEqual(
-    gpuCatalogOptions("windows", "", "").map((entry) => entry.id),
+    gpuCatalogOptions("windows", undefined, "", "").map((entry) => entry.id),
     WINDOWS_ENTRIES.map((entry) => entry.id),
   );
-  assert.ok(gpuCatalogOptions("macos", "", "").every((entry) => entry.platform === "macos"));
-  assert.ok(gpuCatalogOptions("linux", "", "").every((entry) => entry.platform === "linux"));
+  assert.deepEqual(
+    gpuCatalogOptions("macos", undefined, "", "").map((entry) => entry.id),
+    MACOS_ENTRIES.map((entry) => entry.id),
+  );
+  assert.deepEqual(
+    gpuCatalogOptions("linux", undefined, "", "").map((entry) => entry.id),
+    LINUX_ENTRIES.map((entry) => entry.id),
+  );
 });
 
-test("the selected entry survives a platform filter that excludes it", () => {
+test("a concrete platform wins over the host rule", () => {
+  // The user asked the browser to spoof this platform, so its entries are offered even when the host
+  // would spoof something else under auto.
+  for (const host of [undefined, "windows", "macos", "linux", "unknown"] as const) {
+    assert.deepEqual(
+      gpuCatalogOptions("linux", host, "", "").map((entry) => entry.id),
+      LINUX_ENTRIES.map((entry) => entry.id),
+      `linux on a ${host} host`,
+    );
+    assert.deepEqual(
+      gpuCatalogOptions("macos", host, "", "").map((entry) => entry.id),
+      MACOS_ENTRIES.map((entry) => entry.id),
+      `macos on a ${host} host`,
+    );
+  }
+});
+
+test("the selected entry survives a filter that excludes it", () => {
   // The profile is pinned to windows but its stored pair is a mac entry: dropping it would leave the
   // picker on the placeholder and the user one click away from silently losing the selection.
-  const options = gpuCatalogOptions("windows", MACOS_ENTRY.vendor, MACOS_ENTRY.renderer);
+  const explicit = gpuCatalogOptions("windows", undefined, MACOS_ENTRY.vendor, MACOS_ENTRY.renderer);
+  assert.deepEqual(explicit.map((entry) => entry.id), [...WINDOWS_ENTRIES.map((entry) => entry.id), MACOS_ENTRY.id]);
+  assert.ok(explicit.includes(MACOS_ENTRY));
 
-  assert.deepEqual(options.map((entry) => entry.id), [...WINDOWS_ENTRIES.map((entry) => entry.id), MACOS_ENTRY.id]);
-  assert.ok(options.includes(MACOS_ENTRY));
+  // Same rule under the auto host narrowing: a Windows host offers Windows rows, yet the stored mac
+  // pair keeps its own row.
+  const narrowed = gpuCatalogOptions("auto", "windows", MACOS_ENTRY.vendor, MACOS_ENTRY.renderer);
+  assert.deepEqual(narrowed.map((entry) => entry.id), [...WINDOWS_ENTRIES.map((entry) => entry.id), MACOS_ENTRY.id]);
 });
 
 test("an orphaned custom pair adds no row", () => {
   assert.deepEqual(
-    gpuCatalogOptions("windows", "NVIDIA Corporation", "NVIDIA GeForce RTX 3060").map((entry) => entry.id),
+    gpuCatalogOptions("windows", undefined, "NVIDIA Corporation", "NVIDIA GeForce RTX 3060").map((entry) => entry.id),
     WINDOWS_ENTRIES.map((entry) => entry.id),
   );
 });
@@ -115,12 +174,12 @@ test("an unknown platform offers every entry instead of emptying the menu", () =
   const unknown = "win" as FingerprintPlatform;
 
   assert.deepEqual(
-    gpuCatalogOptions(unknown, "", "").map((entry) => entry.id),
+    gpuCatalogOptions(unknown, "windows", "", "").map((entry) => entry.id),
     GPU_PROFILE_CATALOG.map((entry) => entry.id),
   );
   // The pair already selected still resolves to its own entry under the fallback.
   assert.deepEqual(
-    gpuCatalogOptions(unknown, MACOS_ENTRY.vendor, MACOS_ENTRY.renderer).map((entry) => entry.id),
+    gpuCatalogOptions(unknown, "windows", MACOS_ENTRY.vendor, MACOS_ENTRY.renderer).map((entry) => entry.id),
     GPU_PROFILE_CATALOG.map((entry) => entry.id),
   );
 });
@@ -129,18 +188,20 @@ test("the picker value always resolves inside the offered options", () => {
   // SelectMenu falls back to its placeholder whenever the value is not an option, so a dropped row
   // would silently show "Custom" while the profile still holds the catalog pair.
   for (const platform of ["auto", "windows", "macos", "linux"] as const) {
-    for (const entry of GPU_PROFILE_CATALOG) {
-      const value = gpuSelectionValue(entry.vendor, entry.renderer);
-      assert.ok(
-        gpuCatalogOptions(platform, entry.vendor, entry.renderer).some((option) => option.id === value),
-        `${entry.id} under ${platform} must keep its own row`,
+    for (const host of [undefined, "windows", "macos", "linux", "unknown"] as const) {
+      for (const entry of GPU_PROFILE_CATALOG) {
+        const value = gpuSelectionValue(entry.vendor, entry.renderer);
+        assert.ok(
+          gpuCatalogOptions(platform, host, entry.vendor, entry.renderer).some((option) => option.id === value),
+          `${entry.id} under ${platform} on a ${host} host must keep its own row`,
+        );
+      }
+      // The custom marker is a placeholder signal, never a selectable row.
+      assert.equal(
+        gpuCatalogOptions(platform, host, "NVIDIA Corporation", "NVIDIA GeForce RTX 3060").some((option) => option.id === GPU_CUSTOM_VALUE),
+        false,
+        `${platform} on a ${host} host must not offer the custom marker as an option`,
       );
     }
-    // The custom marker is a placeholder signal, never a selectable row.
-    assert.equal(
-      gpuCatalogOptions(platform, "NVIDIA Corporation", "NVIDIA GeForce RTX 3060").some((option) => option.id === GPU_CUSTOM_VALUE),
-      false,
-      `${platform} must not offer the custom marker as an option`,
-    );
   }
 });

@@ -1,4 +1,5 @@
 import type { FingerprintPlatform } from "../../shared/profile";
+import type { RuntimePlatform } from "../../shared/settings";
 
 export type GpuCatalogPlatform = "windows" | "macos" | "linux";
 
@@ -188,24 +189,39 @@ export function applyGpuEntry(entry: GpuProfileEntry): { gpuVendor: string; gpuR
   return { gpuVendor: entry.vendor, gpuRenderer: entry.renderer };
 }
 
-const GPU_CATALOG_PLATFORMS: ReadonlySet<string> = new Set<GpuCatalogPlatform>(["windows", "macos", "linux"]);
+/**
+ * The platform CloakBrowser spoofs when `fingerprint.platform` is `auto`, or `undefined` when the host
+ * is unknown. `auto` is not "no spoofing": `getDefaultStealthArgs` spoofs the host, using macos on
+ * darwin and windows everywhere else — its own comment reads "Linux/Windows: spoof as Windows
+ * desktop". Offering the Linux entries to a Linux host under `auto` would therefore pair a Windows
+ * platform with a Mesa renderer.
+ */
+export function spoofedPlatformFor(hostPlatform: RuntimePlatform | undefined): GpuCatalogPlatform | undefined {
+  if (hostPlatform === "macos") return "macos";
+  if (hostPlatform === "windows" || hostPlatform === "linux") return "windows";
+  return undefined;
+}
 
 /**
- * The rows the picker offers. A concrete platform narrows the list to its own entries; `auto` shows
- * every entry in catalog order. A hand-edited share string can carry a platform the catalog does not
- * know (`"win"`); rather than silently emptying the menu, that value is treated like `auto`. The entry
- * the current pair already names is kept even when the platform filter excludes it, so switching
- * platform cannot silently drop the selection.
+ * The rows the picker offers.
+ *
+ * A concrete platform narrows the list to its own entries and wins over the host — the user asked for
+ * that platform, so its entries are the coherent choice even on another host. `auto` follows what
+ * CloakBrowser will actually spoof on the host, so the menu cannot offer a pair the browser would
+ * contradict. An unknown host (`unknown` / absent) falls back to every entry rather than silently
+ * emptying the menu, as does a hand-edited share string carrying a platform the catalog does not know
+ * (`"win"`). The entry the current pair already names is kept even when the filter excludes it, so
+ * switching platform cannot silently drop the selection.
  */
 export function gpuCatalogOptions(
   platform: FingerprintPlatform,
+  hostPlatform: RuntimePlatform | undefined,
   currentVendor: string,
   currentRenderer: string,
 ): GpuProfileEntry[] {
-  const filtered =
-    platform === "auto" || !GPU_CATALOG_PLATFORMS.has(platform)
-      ? GPU_PROFILE_CATALOG
-      : GPU_PROFILE_CATALOG.filter((entry) => entry.platform === platform);
+  const explicit = platform === "windows" || platform === "macos" || platform === "linux" ? platform : undefined;
+  const target = explicit ?? (platform === "auto" ? spoofedPlatformFor(hostPlatform) : undefined);
+  const filtered = target === undefined ? GPU_PROFILE_CATALOG : GPU_PROFILE_CATALOG.filter((entry) => entry.platform === target);
   const current = GPU_PROFILE_CATALOG.find((entry) => entry.id === gpuEntryId(currentVendor, currentRenderer));
   if (!current || filtered.includes(current)) return filtered;
   return [...filtered, current];

@@ -4,6 +4,7 @@ import {
   textFromLines,
 } from "../../shared/profile";
 import type { ExtensionEntity } from "../../shared/entities";
+import type { RuntimePlatform } from "../../shared/settings";
 import { Field } from "../ui/form-controls";
 import { SelectMenu } from "../ui/SelectMenu";
 import { applyGpuEntry, gpuCatalogOptions, gpuSelectionValue } from "./gpuCatalog";
@@ -18,6 +19,7 @@ export function ProfileEditorAdvancedTab({
   setDraftExtensionBinding,
   t,
   draftIsNew,
+  hostPlatform,
 }: {
   draft: BrowserProfile;
   setDraft: (draft: BrowserProfile) => void;
@@ -27,13 +29,14 @@ export function ProfileEditorAdvancedTab({
   setDraftExtensionBinding: (extension: ExtensionEntity, bound: boolean) => Promise<void>;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
   draftIsNew: boolean;
+  hostPlatform?: RuntimePlatform;
 }) {
   const fp = draft.fingerprint;
   const hasBoundExtensions = boundExtensionIds.length > 0;
   // The picker has no state of its own: a pair that matches no entry simply has no selected option,
   // so the menu falls back to its placeholder. That keeps it correct across profile switches, which
   // do not remount the tab.
-  const gpuOptions = gpuCatalogOptions(fp.platform, fp.gpuVendor, fp.gpuRenderer);
+  const gpuOptions = gpuCatalogOptions(fp.platform, hostPlatform, fp.gpuVendor, fp.gpuRenderer);
   return (
     <div className="form-grid two">
       <Field label="User Agent" wide>
