@@ -52,7 +52,9 @@ function selectPluralForm(template: string, params: Record<string, string | numb
 export function translate(locale: Locale, key: TranslationKey, params: Record<string, string | number> = {}): string {
   const template: string = loadedDictionaries.get(locale)?.[key] ?? zhCN[key] ?? key;
   const resolved = selectPluralForm(template, params);
-  return Object.entries(params).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, String(value)), resolved);
+  // A function replacement is literal: the string form would interpret `$&`, `$'`, `$1` and `$$`
+  // inside parameter values, mangling the paths, URLs and server messages that reach users verbatim.
+  return Object.entries(params).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, () => String(value)), resolved);
 }
 
 export function isSupportedLocale(value: string): value is Locale {

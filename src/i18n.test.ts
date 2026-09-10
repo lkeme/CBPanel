@@ -30,6 +30,38 @@ test("translate interpolates named parameters", async () => {
   assert.equal(translate("zh-CN", "table.selectProfile", { name: "QA" }), "选择 QA");
 });
 
+// The string form of replaceAll interprets `$&`, `$'`, `$1` and `$$` in the replacement; a function
+// replacement is literal. Before the fix, `a$&b` rendered as `a{name}b` — the placeholder name itself
+// leaked into the UI — and the other sequences duplicated or dropped content.
+test("translate keeps dollar sequences in parameter values verbatim", async () => {
+  await ensureLocaleReady("en-US");
+
+  for (const value of ["a$&b", "a$`b", "a$'b", "a$1b", "a$$b"]) {
+    assert.equal(translate("en-US", "table.selectProfile", { name: value }), `Select ${value}`, value);
+    assert.equal(translate("zh-CN", "table.selectProfile", { name: value }), `选择 ${value}`, value);
+  }
+});
+
+// Paths and URLs are the values that actually carry `$` in the field, which is how the defect reaches
+// users: a Windows path with `$&` rendered `Exists: a{path}b`.
+test("translate keeps dollar signs in real paths and URLs verbatim", async () => {
+  await ensureLocaleReady("en-US");
+
+  const windowsPath = "C:\\tools\\$&legacy\\ext";
+  assert.equal(
+    translate("en-US", "preflightItem.extensions.detail.exists", { path: windowsPath }),
+    `Exists: ${windowsPath}`,
+  );
+  assert.equal(
+    translate("zh-CN", "preflightItem.extensions.detail.exists", { path: windowsPath }),
+    `存在：${windowsPath}`,
+  );
+
+  const url = "https://host.test/ext?filter=$1&sig=$'raw";
+  assert.equal(translate("en-US", "preflightItem.extensions.detail.exists", { path: url }), `Exists: ${url}`);
+  assert.equal(translate("zh-CN", "preflightItem.extensions.detail.exists", { path: url }), `存在：${url}`);
+});
+
 test("translate picks the English singular form when the quantity is one", async () => {
   await ensureLocaleReady("en-US");
 
