@@ -22,6 +22,7 @@ import {
 import type { BrowserEnvironment, NetworkCheckResult } from "../../src/shared/entities";
 import { networkCheckSummaryText } from "../../src/shared/networkCheckDisplay";
 import { buildWatermarkScript } from "../../src/shared/watermark";
+import { buildVoicesScript, voicesSeed } from "../../src/shared/voices";
 import type { BrowserCoreTier } from "../../src/shared/browserCore";
 import { normalizeSettings, type AppSettings } from "../../src/shared/settings";
 import type { ExtensionLaunchRegistration, ExtensionService } from "./extensionService";
@@ -1294,9 +1295,7 @@ export class SessionService {
 
     if (!context) throw new Error("CloakBrowser 未返回 BrowserContext");
     this.watchExternalClose(session, context, "close");
-    // Empty for `off`: an empty addInitScript would still be an observable surface, so skip the call.
-    const watermark = buildWatermarkScript(profile.name, profile.runtime.watermark);
-    if (watermark) await context.addInitScript(watermark);
+    for (const script of initScriptsForProfile(profile)) await context.addInitScript(script);
     let page: ReturnType<BrowserContext["pages"]>[number] | undefined;
     const ready = (async (): Promise<RuntimeReady> => {
       const registrationBrowser = playwrightRegistrationMigrationBrowser(context);
@@ -1345,8 +1344,7 @@ export class SessionService {
     const ready = (async (): Promise<RuntimeReady> => {
       context = await browser.newContext(buildPlaywrightContextOptions(profile));
       // Covers every page this context creates, including later tabs and popups.
-      const watermark = buildWatermarkScript(profile.name, profile.runtime.watermark);
-      if (watermark) await context.addInitScript(watermark);
+      for (const script of initScriptsForProfile(profile)) await context.addInitScript(script);
       // This launcher owns a Browser process, not a persistent context. A child context may close while
       // the browser remains connected, so only Browser.disconnected can confirm process exit and release
       // the generation hold. Failed initialization still flows through the browser-level close owner.
@@ -1402,10 +1400,9 @@ export class SessionService {
       page = await getOrCreatePuppeteerPage(browser);
       let warning: string | undefined;
       if (page) {
-        const watermark = buildWatermarkScript(profile.name, profile.runtime.watermark);
-        if (watermark) {
-          await page.evaluateOnNewDocument?.(watermark);
-          attachPuppeteerWatermark(browser, watermark);
+        for (const script of initScriptsForProfile(profile)) {
+          await page.evaluateOnNewDocument?.(script);
+          attachPuppeteerInitScript(browser, script);
         }
         const setup = buildPuppeteerPageSetup(profile);
         if (setup.userAgent) await page.setUserAgent?.(setup.userAgent);
@@ -2965,11 +2962,28 @@ export async function getOrCreatePuppeteerPage(
 }
 
 /**
- * Puppeteer has no context-level init script, so later tabs and popups only get the watermark through
- * a `targetcreated` hook. The first document of a popup can still race the hook — the label then
- * appears on its next navigation, not before. Best-effort: nothing here may fail the launch.
+ * Every caller-side init script the panel installs after a launch: the watermark and the voices
+ * shaping. An empty entry means its feature is off, and the caller must then not touch the injection
+ * API at all — even an empty init script is an observable surface. The order matches the generated
+ * launch snippet, which mirrors these calls one for one.
  */
-function attachPuppeteerWatermark(browser: PuppeteerBrowser, script: string): void {
+function initScriptsForProfile(profile: BrowserProfile): string[] {
+  return [
+    buildWatermarkScript(profile.name, profile.runtime.watermark),
+    buildVoicesScript(
+      voicesSeed(profile.fingerprint.seed, profile.id),
+      profile.fingerprint.locale,
+      profile.runtime.voices,
+    ),
+  ].filter(Boolean);
+}
+
+/**
+ * Puppeteer has no context-level init script, so later tabs and popups only get these scripts through
+ * a `targetcreated` hook. The first document of a popup can still race the hook — the page then gets
+ * the script on its next navigation, not before. Best-effort: nothing here may fail the launch.
+ */
+function attachPuppeteerInitScript(browser: PuppeteerBrowser, script: string): void {
   if (typeof browser.on !== "function") return;
   browser.on("targetcreated", (target) => {
     void (async () => {

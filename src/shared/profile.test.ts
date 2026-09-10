@@ -36,6 +36,7 @@ import {
 } from "./profile";
 import type { BrowserProfile } from "./profile";
 import { buildWatermarkScript } from "./watermark";
+import { buildVoicesScript, voicesSeed } from "./voices";
 
 test("defaultProfile starts on CreepJS for first-run fingerprint inspection", () => {
   assert.equal(defaultProfile().startUrl, DEFAULT_START_URL);
@@ -1187,7 +1188,11 @@ test("launch code injects the watermark init script for every launcher shape", (
 
 test("launch code omits the watermark injection when the style is off", () => {
   for (const launcher of ["playwright-context", "playwright-browser", "puppeteer-browser"] as const) {
-    const profile = defaultProfile({ runtime: { ...defaultProfile().runtime, launcher, watermark: "off" } });
+    // Voices shaping is on by default and is an injection of its own, so it is turned off here to
+    // keep this test about the watermark: no script at all means no injection call at all.
+    const profile = defaultProfile({
+      runtime: { ...defaultProfile().runtime, launcher, watermark: "off", voices: false },
+    });
     const code = generateLaunchCode(profile);
 
     assert.equal(code.includes("addInitScript"), false, `${launcher} must not inject`);
@@ -1263,7 +1268,9 @@ test("a hostile profile name round-trips into the generated watermark script", a
         const profile = defaultProfile({
           name,
           mode,
-          runtime: { ...defaultProfile().runtime, launcher, watermark: "banner" },
+          // Voices shaping off: this test is about the watermark literal, and captureInjectedScripts
+          // compares the whole list of injected scripts.
+          runtime: { ...defaultProfile().runtime, launcher, watermark: "banner", voices: false },
         });
         const scripts = await captureInjectedScripts(generateLaunchCode(profile));
 
@@ -1273,6 +1280,63 @@ test("a hostile profile name round-trips into the generated watermark script", a
           `${launcher}/${mode} with name ${JSON.stringify(name)}`,
         );
       }
+    }
+  }
+});
+
+test("launch code mirrors the voices shaping injection for every launcher shape", () => {
+  const expectedCall = {
+    "playwright-context": "await context.addInitScript(",
+    "playwright-browser": "await context.addInitScript(",
+    "puppeteer-browser": "await page.evaluateOnNewDocument(",
+  } as const;
+
+  for (const launcher of ["playwright-context", "playwright-browser", "puppeteer-browser"] as const) {
+    for (const mode of ["persistent", "ephemeral"] as const) {
+      const profile = defaultProfile({
+        mode,
+        fingerprint: { ...defaultProfile().fingerprint, seed: "42069", locale: "zh-CN" },
+        runtime: { ...defaultProfile().runtime, launcher, voices: true },
+      });
+      const code = generateLaunchCode(profile);
+      const label = `${launcher}/${mode}`;
+
+      assert.ok(code.includes(expectedCall[launcher]), `${label} must inject the voices script`);
+      assert.ok(code.includes("SpeechSynthesis"), `${label} must carry the script body`);
+      // Ahead of the first navigation, or the start page is read before the shaping runs.
+      const callIndex = code.indexOf(expectedCall[launcher]);
+      const gotoIndex = code.indexOf("page.goto(");
+      assert.ok(gotoIndex === -1 || callIndex < gotoIndex, `${label} must inject before goto`);
+    }
+  }
+});
+
+test("launch code omits the voices injection when the profile turns it off", () => {
+  for (const launcher of ["playwright-context", "playwright-browser", "puppeteer-browser"] as const) {
+    const profile = defaultProfile({
+      fingerprint: { ...defaultProfile().fingerprint, seed: "42069", locale: "zh-CN" },
+      runtime: { ...defaultProfile().runtime, launcher, voices: false },
+    });
+    const code = generateLaunchCode(profile);
+
+    assert.equal(code.includes("SpeechSynthesis"), false, `${launcher} must not carry the script`);
+    assert.equal(code.includes("addInitScript"), false, `${launcher} must not inject`);
+    assert.equal(code.includes("evaluateOnNewDocument"), false, `${launcher} must not inject`);
+  }
+});
+
+test("the generated launch code round-trips the voices script exactly", async () => {
+  const base = defaultProfile({
+    fingerprint: { ...defaultProfile().fingerprint, seed: "42069", locale: "zh-CN" },
+  });
+  const expected = buildVoicesScript(voicesSeed("42069", base.id), "zh-CN", true);
+
+  for (const launcher of ["playwright-context", "playwright-browser", "puppeteer-browser"] as const) {
+    for (const mode of ["persistent", "ephemeral"] as const) {
+      const profile: BrowserProfile = { ...base, mode, runtime: { ...base.runtime, launcher } };
+      const scripts = await captureInjectedScripts(generateLaunchCode(profile));
+
+      assert.deepEqual(scripts, [expected], `${launcher}/${mode}`);
     }
   }
 });

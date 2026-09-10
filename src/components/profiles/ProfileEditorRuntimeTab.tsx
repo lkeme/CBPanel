@@ -191,6 +191,13 @@ export function ProfileEditorRuntimeTab({
             onChange={(humanPreset) => setDraft({ ...draft, runtime: { ...draft.runtime, humanPreset } })}
           />
         </OptionControl>
+        <OptionControl label={t("form.voices")} help={t("tips.voices")}>
+          <Switch
+            checked={draft.runtime.voices}
+            className="toggle-switch"
+            onCheckedChange={(voices) => setDraft({ ...draft, runtime: { ...draft.runtime, voices } })}
+          />
+        </OptionControl>
         <Field label={t("form.watermark")} help={t("tips.watermark")}>
           <Segmented<WatermarkStyle>
             value={draft.runtime.watermark}

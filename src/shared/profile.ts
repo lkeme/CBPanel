@@ -11,6 +11,7 @@ import type {
 } from "./entities";
 import { networkCheckSummaryText } from "./networkCheckDisplay";
 import { WATERMARK_STYLES, buildWatermarkScript, type WatermarkStyle } from "./watermark";
+import { buildVoicesScript, voicesSeed } from "./voices";
 import {
   XRAY_IP_STRATEGIES,
   XRAY_UTLS_PREFERENCES,
@@ -107,6 +108,12 @@ export interface RuntimeSettings {
   humanPreset: HumanPreset;
   /** Page overlay that identifies this environment. `off` injects nothing at all. */
   watermark: WatermarkStyle;
+  /**
+   * Shapes `speechSynthesis.getVoices()` into a stable per-environment subset. On by default like
+   * `geoip`, not off like `watermark`: the raw host list is identical in every environment, so
+   * leaving it alone is an anti-leak gap rather than a visible feature.
+   */
+  voices: boolean;
   extensionPaths: string[];
   extraArgs: string[];
 }
@@ -567,6 +574,11 @@ export function defaultProfile(input: Partial<BrowserProfile> = {}): BrowserProf
       humanize: true,
       humanPreset: "default",
       watermark: "off",
+      // On for the same reason as geoip: the host reports one identical voice list to every
+      // environment, which is a correlation signal and a platform mismatch for macos/linux profiles.
+      // A stored row that predates the field lands here too: mergeProfile drops undefined input and
+      // keeps this base value.
+      voices: true,
       extensionPaths: [],
       extraArgs: [],
     },
@@ -598,6 +610,13 @@ function normalizeWatermarkStyle(value: unknown): WatermarkStyle {
   return typeof value === "string" && WATERMARK_STYLE_VALUES.has(value) ? (value as WatermarkStyle) : "off";
 }
 
+// A non-boolean `voices` from a hand-edited file or a share string must never reach the launcher: only
+// a real boolean is accepted, everything else falls back to the profile's own value (`true` unless the
+// stored row explicitly turned shaping off).
+function normalizeVoicesToggle(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
 export function mergeProfile(base: BrowserProfile, input: Partial<BrowserProfile>): BrowserProfile {
   const cleanInput = omitUndefined(input);
   return {
@@ -610,6 +629,7 @@ export function mergeProfile(base: BrowserProfile, input: Partial<BrowserProfile
       ...base.runtime,
       ...omitUndefined(cleanInput.runtime ?? {}),
       watermark: normalizeWatermarkStyle(cleanInput.runtime?.watermark ?? base.runtime.watermark),
+      voices: normalizeVoicesToggle(cleanInput.runtime?.voices, base.runtime.voices),
       extensionPaths: Array.isArray(cleanInput.runtime?.extensionPaths)
         ? cleanInput.runtime.extensionPaths
         : base.runtime.extensionPaths,
@@ -1705,11 +1725,11 @@ export function generateLaunchCode(profile: BrowserProfile): string {
 }
 
 /**
- * The watermark script as a template literal: the generated snippet keeps the script's own line
- * breaks, while backslashes, backticks and `${` are escaped so a profile name can neither terminate
- * the literal nor interpolate into it when the snippet is copied and run.
+ * An init script as a template literal: the generated snippet keeps the script's own line breaks,
+ * while backslashes, backticks and `${` are escaped so profile data can neither terminate the literal
+ * nor interpolate into it when the snippet is copied and run.
  */
-function watermarkScriptLiteral(script: string): string {
+function initScriptLiteral(script: string): string {
   const escaped = script.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${");
   return `\`${escaped}\``;
 }
@@ -1717,9 +1737,21 @@ function watermarkScriptLiteral(script: string): string {
 function generateLaunchCodeFromPreview(profile: BrowserProfile, preview: LaunchPreview): string {
   const optionsJson = JSON.stringify(preview.options, null, 2);
   const startUrl = profile.startUrl.trim();
-  // Empty for `off`, exactly like the launcher: the snippet then shows no injection call at all.
-  const watermark = buildWatermarkScript(profile.name, profile.runtime.watermark);
-  const watermarkLine = watermark ? `\nawait context.addInitScript(${watermarkScriptLiteral(watermark)});` : "";
+  // Every caller-side init script the launcher installs after the launch call, so the snippet cannot
+  // claim the panel does less than it does. Each entry is empty when its feature is off, exactly like
+  // the launcher: the snippet then shows no injection call at all, and a profile with both off stays
+  // byte-identical to the pre-shaping output.
+  const initScripts = [
+    buildWatermarkScript(profile.name, profile.runtime.watermark),
+    buildVoicesScript(
+      voicesSeed(profile.fingerprint.seed, profile.id),
+      profile.fingerprint.locale,
+      profile.runtime.voices,
+    ),
+  ].filter(Boolean);
+  const contextInjections = initScripts
+    .map((script) => `\nawait context.addInitScript(${initScriptLiteral(script)});`)
+    .join("");
 
   if (preview.resultType === "context") {
     const firstPage =
@@ -1731,7 +1763,7 @@ function generateLaunchCodeFromPreview(profile: BrowserProfile, preview: LaunchP
 
     return `import { ${preview.importName} } from '${preview.importPath}';
 
-const context = await ${preview.importName}(${optionsJson});${watermarkLine}${firstPage}
+const context = await ${preview.importName}(${optionsJson});${contextInjections}${firstPage}
 
 // await context.close();`;
   }
@@ -1745,7 +1777,7 @@ const context = await ${preview.importName}(${optionsJson});${watermarkLine}${fi
     return `import { launch } from 'cloakbrowser';
 
 const browser = await launch(${optionsJson});
-const context = await browser.newContext(${contextOptionsJson});${watermarkLine}
+const context = await browser.newContext(${contextOptionsJson});${contextInjections}
 const page = await context.newPage();${gotoLine}
 
 // await browser.close();`;
@@ -1753,7 +1785,7 @@ const page = await context.newPage();${gotoLine}
 
   const setup = buildPuppeteerPageSetup(profile);
   const setupLines = [
-    watermark ? `await page.evaluateOnNewDocument(${watermarkScriptLiteral(watermark)});` : "",
+    ...initScripts.map((script) => `await page.evaluateOnNewDocument(${initScriptLiteral(script)});`),
     setup.userAgent ? `await page.setUserAgent(${JSON.stringify(setup.userAgent)});` : "",
     setup.viewport ? `await page.setViewport(${JSON.stringify(setup.viewport)});` : "",
     startUrl ? `await page.goto(${JSON.stringify(startUrl)}, { waitUntil: 'domcontentloaded' });` : "",
