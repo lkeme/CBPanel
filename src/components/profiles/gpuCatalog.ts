@@ -203,24 +203,42 @@ export function spoofedPlatformFor(hostPlatform: RuntimePlatform | undefined): G
 }
 
 /**
+ * The platform CloakBrowser will actually report on this host.
+ *
+ * `spoofsPlatform` is whether the launcher lets CloakBrowser's stealth args run (`stealthArgs !== false`):
+ * that layer is what spoofs the host platform, so with it off the browser reports the host's own platform
+ * and the host itself is the coherent target. An unknown or absent host stays `undefined` either way, so
+ * the caller falls back to the whole catalog instead of emptying the menu. `auto` with spoofing on goes
+ * through `spoofedPlatformFor` unchanged.
+ */
+export function effectiveGpuPlatform(
+  hostPlatform: RuntimePlatform | undefined,
+  spoofsPlatform: boolean,
+): GpuCatalogPlatform | undefined {
+  if (!spoofsPlatform) return hostPlatform === "unknown" ? undefined : hostPlatform;
+  return spoofedPlatformFor(hostPlatform);
+}
+
+/**
  * The rows the picker offers.
  *
  * A concrete platform narrows the list to its own entries and wins over the host — the user asked for
- * that platform, so its entries are the coherent choice even on another host. `auto` follows what
- * CloakBrowser will actually spoof on the host, so the menu cannot offer a pair the browser would
- * contradict. An unknown host (`unknown` / absent) falls back to every entry rather than silently
- * emptying the menu, as does a hand-edited share string carrying a platform the catalog does not know
- * (`"win"`). The entry the current pair already names is kept even when the filter excludes it, so
- * switching platform cannot silently drop the selection.
+ * that platform, so its entries are the coherent choice even on another host, and `spoofsPlatform` plays
+ * no part. `auto` follows what CloakBrowser will actually report on the host (`effectiveGpuPlatform`), so
+ * the menu cannot offer a pair the browser would contradict. An unknown host (`unknown` / absent) falls
+ * back to every entry rather than silently emptying the menu, as does a hand-edited share string carrying
+ * a platform the catalog does not know (`"win"`). The entry the current pair already names is kept even
+ * when the filter excludes it, so switching platform cannot silently drop the selection.
  */
 export function gpuCatalogOptions(
   platform: FingerprintPlatform,
   hostPlatform: RuntimePlatform | undefined,
+  spoofsPlatform: boolean,
   currentVendor: string,
   currentRenderer: string,
 ): GpuProfileEntry[] {
   const explicit = platform === "windows" || platform === "macos" || platform === "linux" ? platform : undefined;
-  const target = explicit ?? (platform === "auto" ? spoofedPlatformFor(hostPlatform) : undefined);
+  const target = explicit ?? (platform === "auto" ? effectiveGpuPlatform(hostPlatform, spoofsPlatform) : undefined);
   const filtered = target === undefined ? GPU_PROFILE_CATALOG : GPU_PROFILE_CATALOG.filter((entry) => entry.platform === target);
   const current = GPU_PROFILE_CATALOG.find((entry) => entry.id === gpuEntryId(currentVendor, currentRenderer));
   if (!current || filtered.includes(current)) return filtered;

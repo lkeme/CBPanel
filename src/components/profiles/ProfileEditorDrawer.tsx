@@ -74,6 +74,7 @@ export function ProfileEditorDrawer(props: {
   globalUtlsFingerprint?: XrayUtlsFingerprint;
   nativeProxyRouting?: XrayNativeProxyRouting;
   hostPlatform?: RuntimePlatform;
+  stealthArgs: boolean;
   xrayStatus?: XrayEngineStatus | null;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }) {
@@ -190,6 +191,7 @@ export function ProfileEditorDrawer(props: {
                 t={t}
                 draftIsNew={draftIsNew}
                 hostPlatform={props.hostPlatform}
+                stealthArgs={props.stealthArgs}
               />
             )}
           </div>

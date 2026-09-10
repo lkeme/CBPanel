@@ -61,6 +61,7 @@ function renderDrawer(lifecycle: { canStop: boolean; stopPending: boolean }): st
     shareConfigToClipboard: async () => undefined,
     stopPending: lifecycle.stopPending,
     stopProfile: async () => undefined,
+    stealthArgs: true,
     t,
     tags: [],
   };

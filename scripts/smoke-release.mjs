@@ -21,7 +21,10 @@ const smokeDataDir = path.join(smokePortableDir, "portable-data");
 const port = process.env.CBPANEL_RELEASE_SMOKE_PORT ? Number(process.env.CBPANEL_RELEASE_SMOKE_PORT) : await findFreePort();
 const token = process.env.CBPANEL_RELEASE_SMOKE_TOKEN ?? `smoke-${Date.now()}`;
 const tauriOrigin = "https://tauri.localhost";
-const requireInstaller = process.argv.includes("--require-installer");
+// Accepts `--require-installer` and the valued form `--require-installer=true` alike. The value is
+// deliberately not read: the flag states the caller's intent, not a setting, and treating `=false` as
+// "off" would turn "I asked for the gate" into "I thought I asked for the gate".
+const requireInstaller = process.argv.some((arg) => arg === "--require-installer" || arg.startsWith("--require-installer="));
 
 if (!Number.isInteger(port) || port <= 0) {
   throw new Error(`Invalid release smoke port: ${process.env.CBPANEL_RELEASE_SMOKE_PORT}`);

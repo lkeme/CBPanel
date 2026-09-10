@@ -324,6 +324,85 @@ test("an interface without a getVoices method is left alone", () => {
   assert.equal(vm.runInContext("typeof SpeechSynthesis.prototype.getVoices", sandbox), "undefined");
 });
 
+test("a prototype patch that cannot be installed leaves the realm untouched", () => {
+  const sandbox: Record<string, unknown> = { window: {} };
+  vm.createContext(sandbox);
+  // A non-writable, non-configurable getVoices is what makes the install fail (stock Blink methods are
+  // configurable, so the path is latent): Object.defineProperty cannot change its value.
+  vm.runInContext(
+    `function SpeechSynthesis() {}
+     var HOST_VOICES = ${JSON.stringify(HOST_VOICES)};
+     Object.defineProperty(SpeechSynthesis.prototype, "getVoices", {
+       value: function getVoices() { return HOST_VOICES; },
+       writable: false,
+       enumerable: false,
+       configurable: false
+     });
+     window.SpeechSynthesis = SpeechSynthesis;`,
+    sandbox,
+  );
+  const beforeToString = vm.runInContext("Function.prototype.toString", sandbox);
+  const beforeGetVoices = vm.runInContext("SpeechSynthesis.prototype.getVoices", sandbox);
+  const beforeNames = vm.runInContext("Object.getOwnPropertyNames(Function.prototype).join(',')", sandbox);
+
+  vm.runInContext(buildVoicesScript(7, ""), sandbox);
+
+  // Same function objects, not merely equivalent ones: a failed install must leave neither the hook nor
+  // the toString proxy behind, and a proxy left over is exactly the tell the masking exists to remove.
+  assert.equal(vm.runInContext("Function.prototype.toString", sandbox), beforeToString);
+  assert.equal(vm.runInContext("SpeechSynthesis.prototype.getVoices", sandbox), beforeGetVoices);
+  assert.equal(vm.runInContext("Object.getOwnPropertyNames(Function.prototype).join(',')", sandbox), beforeNames);
+  // No masking survived either: the untouched method still reports its real source.
+  assert.notEqual(vm.runInContext("SpeechSynthesis.prototype.getVoices.toString()", sandbox), "function getVoices() { [native code] }");
+  assert.deepEqual(names(vm.runInContext("new SpeechSynthesis().getVoices()", sandbox)), names(HOST_VOICES));
+});
+
+test("a failed toString patch takes the already-installed hook back out", () => {
+  const page = createVoicesPage(HOST_VOICES);
+  // A frozen Function.prototype.toString makes the masking proxy impossible after the hook is in place.
+  page.evaluate(
+    `Object.defineProperty(Function.prototype, "toString", { value: Function.prototype.toString, writable: false, enumerable: false, configurable: false })`,
+  );
+  const beforeToString = page.evaluate("Function.prototype.toString");
+  const beforeGetVoices = page.evaluate("SpeechSynthesis.prototype.getVoices");
+
+  page.evaluate(buildVoicesScript(7, ""));
+
+  assert.equal(page.evaluate("Function.prototype.toString"), beforeToString);
+  // The hook must not survive without its masking: an unfaked toString on the replaced method is a
+  // one-line probe.
+  assert.equal(page.evaluate("SpeechSynthesis.prototype.getVoices"), beforeGetVoices);
+  assert.deepEqual(names(page.voices()), names(HOST_VOICES));
+});
+
+test("a rolled-back hook leaves no own property on an interface that inherited getVoices", () => {
+  const sandbox: Record<string, unknown> = { window: {} };
+  vm.createContext(sandbox);
+  // The interface inherits getVoices rather than owning it, so the failed install is what creates the own
+  // property. Rolling it back must delete that property, not merely reset its value: the interface has to
+  // end up with the same own-property set it started with. Stock Blink owns the method on the interface
+  // itself, so the path is latent.
+  vm.runInContext(
+    `function SpeechSynthesisBase() {}
+     SpeechSynthesisBase.prototype.getVoices = function getVoices() { return []; };
+     function SpeechSynthesis() {}
+     SpeechSynthesis.prototype = Object.create(SpeechSynthesisBase.prototype);
+     Object.defineProperty(Function.prototype, "toString", { value: Function.prototype.toString, writable: false, enumerable: false, configurable: false });
+     window.SpeechSynthesis = SpeechSynthesis;`,
+    sandbox,
+  );
+  const beforeNames = vm.runInContext("Object.getOwnPropertyNames(SpeechSynthesis.prototype).join(',')", sandbox);
+
+  vm.runInContext(buildVoicesScript(7, ""), sandbox);
+
+  assert.equal(
+    vm.runInContext("Object.prototype.hasOwnProperty.call(SpeechSynthesis.prototype, 'getVoices')", sandbox),
+    false,
+  );
+  assert.equal(vm.runInContext("Object.getOwnPropertyNames(SpeechSynthesis.prototype).join(',')", sandbox), beforeNames);
+  assert.equal(vm.runInContext("SpeechSynthesis.prototype.getVoices === SpeechSynthesisBase.prototype.getVoices", sandbox), true);
+});
+
 test("profiles default to voices shaping on, and a stored row without the field lands on the default", () => {
   assert.equal(defaultProfile().runtime.voices, true);
 

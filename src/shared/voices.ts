@@ -145,9 +145,10 @@ function voicesAlgorithmSource(): string {
  *
  * The script embeds the very functions `selectStableVoices` runs (through `toString()`), installs the
  * replacement with the original property descriptor, and proxies `Function.prototype.toString` so the
- * replaced method reports itself as native while every other function keeps its real source. It bails
- * out when the page has no `SpeechSynthesis`, and swallows every failure: shaping must never break the
- * page it runs in.
+ * replaced method reports itself as native while every other function keeps its real source. Both
+ * modifications are installed as one unit and rolled back with the captured descriptors when either
+ * fails, so a partial install leaves no trace. It bails out when the page has no `SpeechSynthesis`,
+ * and swallows every failure: shaping must never break the page it runs in.
  *
  * Not idempotent, deliberately without a guard: injected twice it shapes the already-shaped list again
  * and the retention keeps shrinking. That is unreachable on the shipped launcher paths — each document
@@ -192,6 +193,7 @@ ${voicesAlgorithmSource()}
     // The page must not be able to tell the method was replaced: register the hooked method's native
     // text, proxy the real Function.prototype.toString so every unregistered call still forwards to it,
     // and register the proxy itself so it reports as native too.
+    var descriptor = Object.getOwnPropertyDescriptor(prototype, "getVoices");
     var originalToString = Function.prototype.toString;
     var toStringDescriptor = Object.getOwnPropertyDescriptor(Function.prototype, "toString");
     var fakeToStrings = new WeakMap();
@@ -203,20 +205,54 @@ ${voicesAlgorithmSource()}
     });
     fakeToStrings.set(hookedGetVoices, "function getVoices() { [native code] }");
     fakeToStrings.set(hookedToString, originalToString.call(originalToString));
-    Object.defineProperty(Function.prototype, "toString", {
-      value: hookedToString,
-      writable: toStringDescriptor ? toStringDescriptor.writable === true : true,
-      enumerable: toStringDescriptor ? toStringDescriptor.enumerable === true : false,
-      configurable: toStringDescriptor ? toStringDescriptor.configurable === true : true
-    });
 
-    var descriptor = Object.getOwnPropertyDescriptor(prototype, "getVoices");
-    Object.defineProperty(prototype, "getVoices", {
-      value: hookedGetVoices,
-      writable: descriptor ? descriptor.writable === true : true,
-      enumerable: descriptor ? descriptor.enumerable === true : false,
-      configurable: descriptor ? descriptor.configurable === true : true
-    });
+    // The two global modifications are installed as one unit and rolled back together: an install that
+    // stops halfway would leave the realm with the hook but no masking (or the masking proxy over every
+    // function with nothing to hide), and either half is a one-line tell. Restoring puts back the very
+    // values and attributes captured before installing, so a failed install changes nothing.
+    var installed = false;
+    try {
+      Object.defineProperty(prototype, "getVoices", {
+        value: hookedGetVoices,
+        writable: descriptor ? descriptor.writable === true : true,
+        enumerable: descriptor ? descriptor.enumerable === true : false,
+        configurable: descriptor ? descriptor.configurable === true : true
+      });
+      Object.defineProperty(Function.prototype, "toString", {
+        value: hookedToString,
+        writable: toStringDescriptor ? toStringDescriptor.writable === true : true,
+        enumerable: toStringDescriptor ? toStringDescriptor.enumerable === true : false,
+        configurable: toStringDescriptor ? toStringDescriptor.configurable === true : true
+      });
+      installed = true;
+    } finally {
+      if (!installed) {
+        // Restoring can fail too (a frozen or non-configurable property); shaping must never break the
+        // page, so each attempt is independent and swallowed.
+        try {
+          Object.defineProperty(Function.prototype, "toString", {
+            value: originalToString,
+            writable: toStringDescriptor ? toStringDescriptor.writable === true : true,
+            enumerable: toStringDescriptor ? toStringDescriptor.enumerable === true : false,
+            configurable: toStringDescriptor ? toStringDescriptor.configurable === true : true
+          });
+        } catch (error) {}
+        try {
+          if (descriptor) {
+            Object.defineProperty(prototype, "getVoices", {
+              value: originalGetVoices,
+              writable: descriptor.writable === true,
+              enumerable: descriptor.enumerable === true,
+              configurable: descriptor.configurable === true
+            });
+          } else {
+            // The interface used to inherit getVoices and the failed install made it own; removing the
+            // own property restores that shape instead of leaving a page-visible leftover.
+            delete prototype.getVoices;
+          }
+        } catch (error) {}
+      }
+    }
   } catch (error) {
     /* Voices shaping must never break the page it is injected into. */
   }

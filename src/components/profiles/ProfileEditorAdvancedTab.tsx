@@ -20,6 +20,7 @@ export function ProfileEditorAdvancedTab({
   t,
   draftIsNew,
   hostPlatform,
+  stealthArgs,
 }: {
   draft: BrowserProfile;
   setDraft: (draft: BrowserProfile) => void;
@@ -30,13 +31,16 @@ export function ProfileEditorAdvancedTab({
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
   draftIsNew: boolean;
   hostPlatform?: RuntimePlatform;
+  stealthArgs: boolean;
 }) {
   const fp = draft.fingerprint;
   const hasBoundExtensions = boundExtensionIds.length > 0;
   // The picker has no state of its own: a pair that matches no entry simply has no selected option,
   // so the menu falls back to its placeholder. That keeps it correct across profile switches, which
   // do not remount the tab.
-  const gpuOptions = gpuCatalogOptions(fp.platform, hostPlatform, fp.gpuVendor, fp.gpuRenderer);
+  // `stealthArgs` reaches the host rule: with stealth args off nothing spoofs the platform, so `auto`
+  // must offer the host's own entries instead of the ones CloakBrowser would otherwise spoof.
+  const gpuOptions = gpuCatalogOptions(fp.platform, hostPlatform, stealthArgs, fp.gpuVendor, fp.gpuRenderer);
   return (
     <div className="form-grid two">
       <Field label="User Agent" wide>

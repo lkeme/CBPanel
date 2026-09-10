@@ -1786,6 +1786,7 @@ function App() {
           globalUtlsFingerprint={normalizedSettings.xray.utlsFingerprint}
           nativeProxyRouting={normalizedSettings.xray.nativeProxyRouting}
           hostPlatform={runtime?.platform}
+          stealthArgs={draft.runtime.stealthArgs}
           xrayStatus={xrayStatus}
           t={t}
         />
