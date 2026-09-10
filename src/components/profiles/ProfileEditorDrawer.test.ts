@@ -43,6 +43,8 @@ function renderDrawer(lifecycle: { canStop: boolean; stopPending: boolean }): st
     environments: [],
     extensions: [],
     groups: [],
+    // Required but possibly `undefined`: the host is unknown until the desktop bridge answers.
+    hostPlatform: undefined,
     importConfigFromClipboard: async () => undefined,
     launchProfile: async () => undefined,
     localProxyDraftIds: new Set(),

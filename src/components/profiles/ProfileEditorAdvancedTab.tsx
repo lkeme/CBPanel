@@ -30,7 +30,9 @@ export function ProfileEditorAdvancedTab({
   setDraftExtensionBinding: (extension: ExtensionEntity, bound: boolean) => Promise<void>;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
   draftIsNew: boolean;
-  hostPlatform?: RuntimePlatform;
+  // Required so the prop chain cannot be severed silently; `undefined` still means "host unknown",
+  // which is what main.tsx passes before the runtime bridge answers.
+  hostPlatform: RuntimePlatform | undefined;
   stealthArgs: boolean;
 }) {
   const fp = draft.fingerprint;

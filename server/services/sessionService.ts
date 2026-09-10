@@ -1295,7 +1295,7 @@ export class SessionService {
 
     if (!context) throw new Error("CloakBrowser 未返回 BrowserContext");
     this.watchExternalClose(session, context, "close");
-    for (const script of initScriptsForProfile(profile)) await context.addInitScript(script);
+    await applyPlaywrightInitScripts(context, profile);
     let page: ReturnType<BrowserContext["pages"]>[number] | undefined;
     const ready = (async (): Promise<RuntimeReady> => {
       const registrationBrowser = playwrightRegistrationMigrationBrowser(context);
@@ -1344,7 +1344,7 @@ export class SessionService {
     const ready = (async (): Promise<RuntimeReady> => {
       context = await browser.newContext(buildPlaywrightContextOptions(profile));
       // Covers every page this context creates, including later tabs and popups.
-      for (const script of initScriptsForProfile(profile)) await context.addInitScript(script);
+      await applyPlaywrightInitScripts(context, profile);
       // This launcher owns a Browser process, not a persistent context. A child context may close while
       // the browser remains connected, so only Browser.disconnected can confirm process exit and release
       // the generation hold. Failed initialization still flows through the browser-level close owner.
@@ -1400,10 +1400,7 @@ export class SessionService {
       page = await getOrCreatePuppeteerPage(browser);
       let warning: string | undefined;
       if (page) {
-        for (const script of initScriptsForProfile(profile)) {
-          await page.evaluateOnNewDocument?.(script);
-          attachPuppeteerInitScript(browser, script);
-        }
+        await applyPuppeteerInitScripts(page, browser, profile);
         const setup = buildPuppeteerPageSetup(profile);
         if (setup.userAgent) await page.setUserAgent?.(setup.userAgent);
         if (setup.viewport) await page.setViewport?.(setup.viewport);
@@ -2966,8 +2963,11 @@ export async function getOrCreatePuppeteerPage(
  * shaping. An empty entry means its feature is off, and the caller must then not touch the injection
  * API at all — even an empty init script is an observable surface. The order matches the generated
  * launch snippet, which mirrors these calls one for one.
+ *
+ * Exported for tests: the injection decision is asserted without a CloakBrowser binary, which the
+ * three launcher methods themselves need (see `applyPlaywrightInitScripts`).
  */
-function initScriptsForProfile(profile: BrowserProfile): string[] {
+export function initScriptsForProfile(profile: BrowserProfile): string[] {
   return [
     buildWatermarkScript(profile.name, profile.runtime.watermark),
     buildVoicesScript(
@@ -2979,11 +2979,45 @@ function initScriptsForProfile(profile: BrowserProfile): string[] {
 }
 
 /**
+ * Installs this profile's init scripts on a Playwright context, which covers every page the context
+ * creates, including later tabs and popups.
+ *
+ * Exported for tests: each launcher method calls this once, but driving a launcher method needs the
+ * real cloakbrowser module and a Chromium binary, so the injected scripts and the zero-injection case
+ * are asserted on this unit instead. What remains uncovered is each call site itself — that the
+ * launcher still calls this function — which `tsc` narrows to a signature check, not a call check.
+ */
+export async function applyPlaywrightInitScripts(
+  context: Pick<BrowserContext, "addInitScript">,
+  profile: BrowserProfile,
+): Promise<void> {
+  for (const script of initScriptsForProfile(profile)) await context.addInitScript(script);
+}
+
+/**
+ * The Puppeteer window has no context-level init script: the start page gets the scripts through
+ * `evaluateOnNewDocument` and later tabs and popups through the `targetcreated` hook below. The
+ * launcher calls this only once it has a start page; the function itself tolerates an absent `page`
+ * (it still hooks later targets and must not fail the launch). Exported for tests, for the same
+ * reason as its Playwright twin.
+ */
+export async function applyPuppeteerInitScripts(
+  page: Pick<PuppeteerPage, "evaluateOnNewDocument"> | undefined,
+  browser: Pick<PuppeteerBrowser, "on">,
+  profile: BrowserProfile,
+): Promise<void> {
+  for (const script of initScriptsForProfile(profile)) {
+    await page?.evaluateOnNewDocument?.(script);
+    attachPuppeteerInitScript(browser, script);
+  }
+}
+
+/**
  * Puppeteer has no context-level init script, so later tabs and popups only get these scripts through
  * a `targetcreated` hook. The first document of a popup can still race the hook — the page then gets
  * the script on its next navigation, not before. Best-effort: nothing here may fail the launch.
  */
-function attachPuppeteerInitScript(browser: PuppeteerBrowser, script: string): void {
+function attachPuppeteerInitScript(browser: Pick<PuppeteerBrowser, "on">, script: string): void {
   if (typeof browser.on !== "function") return;
   browser.on("targetcreated", (target) => {
     void (async () => {

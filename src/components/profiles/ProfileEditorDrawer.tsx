@@ -73,7 +73,10 @@ export function ProfileEditorDrawer(props: {
   installXray?: () => Promise<unknown>;
   globalUtlsFingerprint?: XrayUtlsFingerprint;
   nativeProxyRouting?: XrayNativeProxyRouting;
-  hostPlatform?: RuntimePlatform;
+  // Required (though possibly `undefined`: the runtime is unknown until the desktop bridge answers).
+  // The GPU picker's host rule is only correct while the platform is threaded from main.tsx, and an
+  // optional prop would let a caller drop the thread without a type error.
+  hostPlatform: RuntimePlatform | undefined;
   stealthArgs: boolean;
   xrayStatus?: XrayEngineStatus | null;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;

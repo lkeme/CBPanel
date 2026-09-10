@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { SMOKE_RELEASE_ARGV } from "./release-gates.mjs";
 import { isWindowsRustTarget, sidecarFileName } from "./release-target.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -34,7 +35,7 @@ execFileSync("node", ["scripts/package-windows-portable.mjs", "--require-sidecar
   stdio: "inherit",
 });
 execFileSync("node", ["scripts/generate-update-manifest.mjs", "--platform=windows"], { cwd: root, stdio: "inherit" });
-execFileSync("node", ["scripts/smoke-release.mjs", "--require-installer"], { cwd: root, stdio: "inherit" });
+execFileSync("node", ["scripts/smoke-release.mjs", ...SMOKE_RELEASE_ARGV], { cwd: root, stdio: "inherit" });
 
 console.log("Windows release artifacts are ready under release/ and src-tauri/target/release/bundle/nsis/.");
 

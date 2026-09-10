@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { parseRequireInstaller, requiredReleaseArtifacts } from "./release-gates.mjs";
 import { currentRustTarget, sidecarFileName } from "./release-target.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -12,7 +13,6 @@ const execFileAsync = promisify(execFile);
 const rustTarget = process.env.CBPANEL_RUST_TARGET ?? currentRustTarget();
 const sidecarPath = path.join(root, "sidecars", sidecarFileName(rustTarget));
 const portableDir = path.join(root, "release", "CBPanel-win-portable");
-const portableSidecarPath = path.join(portableDir, "sidecars", path.basename(sidecarPath));
 const portableZip = path.join(root, "release", "CBPanel-win-portable.zip");
 const packageMetadata = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
 const installerPath = path.join(root, "src-tauri", "target", "release", "bundle", "nsis", `CBPanel_${packageMetadata.version}_x64-setup.exe`);
@@ -21,23 +21,14 @@ const smokeDataDir = path.join(smokePortableDir, "portable-data");
 const port = process.env.CBPANEL_RELEASE_SMOKE_PORT ? Number(process.env.CBPANEL_RELEASE_SMOKE_PORT) : await findFreePort();
 const token = process.env.CBPANEL_RELEASE_SMOKE_TOKEN ?? `smoke-${Date.now()}`;
 const tauriOrigin = "https://tauri.localhost";
-// Accepts `--require-installer` and the valued form `--require-installer=true` alike. The value is
-// deliberately not read: the flag states the caller's intent, not a setting, and treating `=false` as
-// "off" would turn "I asked for the gate" into "I thought I asked for the gate".
-const requireInstaller = process.argv.some((arg) => arg === "--require-installer" || arg.startsWith("--require-installer="));
+const requireInstaller = parseRequireInstaller(process.argv);
 
 if (!Number.isInteger(port) || port <= 0) {
   throw new Error(`Invalid release smoke port: ${process.env.CBPANEL_RELEASE_SMOKE_PORT}`);
 }
 
-await assertExists(sidecarPath, "Missing generated sidecar executable.");
-await assertExists(path.join(portableDir, "CBPanel.exe"), "Portable CBPanel.exe is missing.");
-await assertExists(path.join(portableDir, "WebView2Loader.dll"), "Portable WebView2Loader.dll is missing.");
-await assertExists(portableSidecarPath, "Portable sidecar is missing.");
-await assertExists(path.join(portableDir, "portable-data"), "Portable data directory is missing.");
-await assertExists(portableZip, "Portable ZIP is missing.");
-if (requireInstaller) {
-  await assertExists(installerPath, "Windows installer is missing. Run npm run release:windows to produce it.");
+for (const artifact of requiredReleaseArtifacts({ portableDir, portableZip, sidecarPath, installerPath, requireInstaller })) {
+  await assertExists(artifact.path, artifact.message);
 }
 
 await prepareSmokePortableDir();
