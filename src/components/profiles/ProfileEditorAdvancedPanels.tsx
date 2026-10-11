@@ -25,7 +25,7 @@ export function QuickArgsPanel({
       </div>
       <div className="quick-arg-grid">
         {RUNTIME_QUICK_ARGS.map((item) => (
-          <ToggleField key={item.id} label={item.label} checked={isRuntimeQuickArgEnabled(draft, item.id)} onChange={(enabled) => setDraft(setRuntimeQuickArg(draft, item.id, enabled))} />
+          <ToggleField key={item.id} label={item.label} help={item.helpKey ? t(item.helpKey as TranslationKey) : undefined} checked={isRuntimeQuickArgEnabled(draft, item.id)} onChange={(enabled) => setDraft(setRuntimeQuickArg(draft, item.id, enabled))} />
         ))}
       </div>
     </section>

@@ -50,7 +50,7 @@ import { ExtensionAcquisitionService } from "./services/extensionAcquisitionServ
 import { ExtensionAcquisitionSessionService } from "./services/extensionAcquisitionSessionService";
 import { createExtensionProviderRegistry } from "./services/extensionProviders/providerRegistry";
 import { GithubMirrorProbeService } from "./services/githubMirrorProbeService";
-import { installPackagedInspectorShim } from "./services/packagedRuntime";
+import { assertPackagedHumanizeBrowser, assertPackagedHumanizeSource, installPackagedInspectorShim } from "./services/packagedRuntime";
 import { ProxyService } from "./services/proxyService";
 import { ProxySubscriptionService } from "./services/proxySubscriptionService";
 import { ProviderHttpClient } from "./services/providerHttpClient";
@@ -512,7 +512,11 @@ async function releaseSmokeDependencyHealth(): Promise<ReleaseSmokeDependencyHea
     inspectReleaseSmokeDependency("puppeteer-core", () => import("puppeteer-core")),
     inspectReleaseSmokeDependency("socks-proxy-agent", () => import("socks-proxy-agent")),
     inspectReleaseSmokeDependency("undici", () => import("undici")),
+    inspectReleaseSmokeDependency("humanize-playwright-source", assertPackagedHumanizeSource),
   ]);
+  if (process.env.CBPANEL_RELEASE_SMOKE_HUMANIZE === "1") {
+    dependencies.push(await inspectReleaseSmokeDependency("humanize-browser", assertPackagedHumanizeBrowser));
+  }
   const callbackHealth = browserEvaluateCallbackSerializationHealth();
   const failedCallbacks = callbackHealth.filter((callback) => !callback.ok);
   dependencies.push({

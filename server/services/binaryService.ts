@@ -1645,6 +1645,14 @@ export class BinaryService {
       this.setOperationProgress("extracting", normalized);
     } else if (/Binary ready/i.test(normalized)) {
       this.setOperationProgress("finalizing", normalized, 100, 100);
+    } else if (/^\[cloakbrowser\] Preview channel requested, but no preview build is available for .+; using the stable build\.$/.test(normalized)) {
+      this.log("warn", normalized);
+    } else if (/^(?:CloakBrowser - stealth Chromium for automation|https:\/\/github\.com\/CloakHQ\/CloakBrowser|CloakBrowser Pro active \(v\d+\) - latest binary, newest patches\.|Pro support -> support@cloakbrowser\.dev|CloakBrowser free \(v\d+\): the latest binary, 1 concurrent session\.|Running the free binary \(v\d+\)\. The latest binary \(v\d+\) is free too, with 1 concurrent session\.|Get your key: run  cloakbrowser login  or visit https:\/\/cloakbrowser\.dev\/free|For more than one concurrent session -> https:\/\/cloakbrowser\.dev|Star us if CloakBrowser helps your project!)$/.test(normalized)) {
+      this.log("info", normalized);
+    } else if (/^\[cloakbrowser\] (?:SHA256SUMS signature verified:|Using local binary override:|Cache cleared:|Downloading (?:Pro )?Chromium |Stealth Chromium .* not found\. Downloading|Downloading GeoIP database|GeoIP database ready:|Newer Chromium available:|Background update complete:)/.test(normalized)) {
+      // Since 0.6, status output uses stderr to leave stdout clean for JSON/IPC.
+      // The stream is not a severity: only known status messages are downgraded.
+      this.log("info", normalized);
     } else {
       this.log(level, normalized);
     }
@@ -1956,7 +1964,9 @@ function normalizeCloakBrowserDiagnostics(input: unknown, checkedAt: string): Cl
       : undefined,
     fonts: fonts
       ? {
-          windowsFonts: stringValue(fonts.windows_fonts),
+          windows: diagnosticsFontCount(fonts.windows),
+          office: diagnosticsFontCount(fonts.office),
+          macos: diagnosticsFontCount(fonts.macos),
         }
       : undefined,
     modules: modules
@@ -1967,6 +1977,15 @@ function normalizeCloakBrowserDiagnostics(input: unknown, checkedAt: string): Cl
         )
       : undefined,
   };
+}
+
+function diagnosticsFontCount(value: unknown): [number, number] | null | undefined {
+  if (value === null) return null;
+  if (!Array.isArray(value) || value.length !== 2) return undefined;
+  const [present, total] = value;
+  if (!Number.isSafeInteger(present) || !Number.isSafeInteger(total)
+    || present < 0 || total <= 0 || present > total) return undefined;
+  return [present, total];
 }
 
 function diagnosticsErrorMessage(error: unknown): string {
@@ -2442,7 +2461,10 @@ async function listManagedCacheCandidates(
   const candidates: Array<{ directory: string; version: string; binaryPath: string; pro: boolean }> = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const match = entry.name.match(/^chromium-(.+?)(-pro)?$/i);
+    // 0.6 extracts alongside the destination in .partial-UUID / .stale-UUID
+    // directories. They can already contain chrome.exe while another process
+    // is still working; never repair, select or prune them as completed builds.
+    const match = entry.name.match(/^chromium-([0-9]+(?:\.[0-9]+){2,})(-pro)?$/i);
     if (!match?.[1]) continue;
     const version = match[1];
     const pro = Boolean(match[2]);

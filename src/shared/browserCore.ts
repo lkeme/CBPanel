@@ -194,7 +194,10 @@ export interface CloakBrowserDiagnosticsGeoIp {
 }
 
 export interface CloakBrowserDiagnosticsFonts {
-  windowsFonts?: "ok" | "missing" | "unknown" | string;
+  /** Linux-only persona font probes: null means the probe could not run. */
+  windows?: [present: number, total: number] | null;
+  office?: [present: number, total: number] | null;
+  macos?: [present: number, total: number] | null;
 }
 
 export interface CloakBrowserDiagnostics {

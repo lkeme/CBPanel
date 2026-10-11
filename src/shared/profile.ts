@@ -43,6 +43,8 @@ export type RuntimeQuickArgId =
   | "fingerprint-off"
   | "allow-3p-cookies"
   | "windows-font-metrics"
+  | "transparent-proxy"
+  | "portable-cookies"
   | "license-through-proxy";
 export type DetectionCheckStatus = "untested" | "pass" | "warn" | "fail";
 
@@ -378,6 +380,7 @@ export interface RuntimeQuickArg {
   id: RuntimeQuickArgId;
   label: string;
   flag: string;
+  helpKey?: string;
 }
 
 export interface LaunchSnippet {
@@ -497,9 +500,22 @@ export const RUNTIME_QUICK_ARGS: RuntimeQuickArg[] = [
     flag: "--fingerprint-windows-font-metrics",
   },
   {
+    id: "transparent-proxy",
+    label: "Transparent Proxy",
+    flag: "--fingerprint-transparent-proxy",
+    helpKey: "tips.transparentProxy",
+  },
+  {
+    id: "portable-cookies",
+    label: "Portable Cookies",
+    flag: "--fingerprint-portable-cookies",
+    helpKey: "tips.portableCookies",
+  },
+  {
     id: "license-through-proxy",
     label: "License via Proxy",
     flag: "--license-through-proxy",
+    helpKey: "tips.licenseThroughProxy",
   },
 ];
 
@@ -2115,15 +2131,21 @@ export function auditProfile(profile: BrowserProfile): ProfileAuditReport {
     });
   }
 
+  const seedArg = buildFingerprintArgs(profile).reverse().find((arg) => arg.split("=")[0] === "--fingerprint");
+  const seedDisabled = seedArg === "--fingerprint=off" || (!seedArg && !profile.runtime.stealthArgs);
   pushAudit(items, {
     id: "fingerprint-seed",
     category: "identity",
-    severity: profile.fingerprint.seed.trim() ? "pass" : "info",
+    severity: seedArg && !seedDisabled ? "pass" : "info",
     title: localizedText("profileAudit.fingerprintSeed.title"),
     detail: localizedText(
-      profile.fingerprint.seed.trim()
-        ? "profileAudit.fingerprintSeed.detail.set"
-        : "profileAudit.fingerprintSeed.detail.random",
+      seedDisabled
+        ? "profileAudit.fingerprintSeed.detail.disabled"
+        : seedArg
+          ? "profileAudit.fingerprintSeed.detail.set"
+          : profile.mode === "persistent" && profile.runtime.launcher !== "playwright-browser"
+            ? "profileAudit.fingerprintSeed.detail.persisted"
+            : "profileAudit.fingerprintSeed.detail.random",
     ),
   });
 

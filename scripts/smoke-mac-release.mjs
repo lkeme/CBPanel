@@ -128,6 +128,8 @@ function assertPackagedDependencies(payload) {
     "socks-proxy-agent",
     "undici",
     "browser-evaluate-serialization",
+    "humanize-playwright-source",
+    ...(process.env.CBPANEL_RELEASE_SMOKE_HUMANIZE === "1" ? ["humanize-browser"] : []),
   ];
   const missing = expected.filter((name) => !payload.dependencies.some((dependency) => dependency.name === name && dependency.ok));
   if (missing.length > 0) {

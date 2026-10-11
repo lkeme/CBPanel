@@ -3,8 +3,8 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { translate, type TranslationKey } from "../../i18n";
-import type { CloakBrowserDiagnosticsGeoIpResolved, CloakBrowserDiagnosticsLicense } from "../../shared/browserCore";
+import { ensureLocaleReady, translate, type Locale, type TranslationKey } from "../../i18n";
+import type { CloakBrowserDiagnosticsFonts, CloakBrowserDiagnosticsGeoIpResolved, CloakBrowserDiagnosticsLicense } from "../../shared/browserCore";
 import type { ProxyEntity, SystemDiagnostics } from "../../shared/entities";
 import type { StorageInfo } from "../../shared/settings";
 import { TooltipProvider } from "../ui/tooltip";
@@ -50,6 +50,22 @@ test("wrapper seat diagnostics preserve a bounded count and limit", () => {
   const html = renderPanel(undefined, [proxy()], undefined, { tier: "team", sessions: { active: 2, limit: 5, state: "ok" } });
 
   assert.ok(html.includes("2/5"));
+});
+
+test("persona fonts display complete, partial, unknown and absent results in both locales", async () => {
+  await ensureLocaleReady("en-US");
+  for (const locale of ["zh-CN", "en-US"] as const) {
+    const html = renderPanel(undefined, [], undefined, undefined, { windows: [15, 15], office: null, macos: [12, 20] }, locale);
+    assert.ok(hasRow(html, translate(locale, "system.windowsFonts")));
+    assert.ok(hasRow(html, translate(locale, "system.officeFonts")));
+    assert.ok(hasRow(html, translate(locale, "system.macosFonts")));
+    assert.ok(html.includes(translate(locale, "system.fontCompleteness", { present: 15, total: 15 })));
+    assert.ok(html.includes(translate(locale, "system.fontCompleteness", { present: 12, total: 20 })));
+    assert.ok(html.includes(translate(locale, "system.fontProbeUnavailable")));
+    const absent = renderPanel(undefined, [], undefined, undefined, undefined, locale);
+    assert.ok(absent.includes(translate(locale, "settings.notApplicable")));
+    assert.equal(absent.includes(translate(locale, "system.fontProbeUnavailable")), false);
+  }
 });
 
 // An empty library leaves the picker with nothing to pick, so the action must not look available.
@@ -116,6 +132,8 @@ function renderPanel(
   proxies: ProxyEntity[] = [proxy()],
   storage?: StorageInfo,
   license?: CloakBrowserDiagnosticsLicense,
+  fonts?: CloakBrowserDiagnosticsFonts,
+  locale: Locale = "zh-CN",
 ): string {
   return renderToStaticMarkup(
     React.createElement(
@@ -125,7 +143,7 @@ function renderPanel(
         binaryInfo: null,
         busy: "",
         copyDiagnostics: async () => {},
-        diagnostics: diagnostics(resolved, license),
+        diagnostics: diagnostics(resolved, license, fonts),
         exportDiagnostics: () => {},
         proxies,
         pruneBrowserData: async () => {},
@@ -134,13 +152,13 @@ function renderPanel(
         runtime: null,
         state: null,
         storage,
-        t,
+        t: (key, params) => translate(locale, key, params),
       }),
     ),
   );
 }
 
-function diagnostics(resolved: CloakBrowserDiagnosticsGeoIpResolved | undefined, license?: CloakBrowserDiagnosticsLicense): SystemDiagnostics {
+function diagnostics(resolved: CloakBrowserDiagnosticsGeoIpResolved | undefined, license?: CloakBrowserDiagnosticsLicense, fonts?: CloakBrowserDiagnosticsFonts): SystemDiagnostics {
   const base: SystemDiagnostics = {
     checkedAt: "2026-08-06T00:00:00.000Z",
     schemaVersion: 3,
@@ -155,6 +173,7 @@ function diagnostics(resolved: CloakBrowserDiagnosticsGeoIpResolved | undefined,
       checkedAt: "2026-08-06T00:00:00.000Z",
       available: true,
       license,
+      fonts,
       geoip: { dbPresent: false, path: "D:/data/cloakbrowser-cache/geoip/GeoLite2-City.mmdb", resolved },
     },
     recentErrors: [],

@@ -272,7 +272,9 @@ export function SystemStatusContent({
               { label: t("system.launchCheck"), value: formatWrapperLaunch(diagnostics?.browserCoreDiagnostics, t) },
               { label: t("system.licenseStatus"), value: formatWrapperLicense(diagnostics?.browserCoreDiagnostics, t) },
               { label: t("system.geoip"), value: formatWrapperGeoIp(diagnostics?.browserCoreDiagnostics, t) },
-              { label: t("system.windowsFonts"), value: diagnostics?.browserCoreDiagnostics?.fonts?.windowsFonts ?? t("settings.notApplicable") },
+              { label: t("system.windowsFonts"), value: formatWrapperFonts(diagnostics?.browserCoreDiagnostics?.fonts?.windows, t) },
+              { label: t("system.officeFonts"), value: formatWrapperFonts(diagnostics?.browserCoreDiagnostics?.fonts?.office, t) },
+              { label: t("system.macosFonts"), value: formatWrapperFonts(diagnostics?.browserCoreDiagnostics?.fonts?.macos, t) },
               { label: t("system.modules"), value: formatWrapperModules(diagnostics?.browserCoreDiagnostics) },
             ]}
           />
@@ -391,6 +393,15 @@ function formatWrapperGeoIp(
   const geoip = diagnostics?.geoip;
   if (!geoip) return "-";
   return geoip.dbPresent ? t("system.available") : t("settings.no");
+}
+
+function formatWrapperFonts(
+  count: [number, number] | null | undefined,
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+): string {
+  if (count === undefined) return t("settings.notApplicable");
+  if (count === null) return t("system.fontProbeUnavailable");
+  return t("system.fontCompleteness", { present: count[0], total: count[1] });
 }
 
 function formatWrapperModules(diagnostics: SystemDiagnostics["browserCoreDiagnostics"] | undefined): string {

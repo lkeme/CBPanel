@@ -189,6 +189,7 @@ test("environment package import creates new environments and restores browser d
   assert.ok(sourceLifecycleRevision);
   await fs.mkdir(path.join(sourceDir, "browser-data", sourceProfile.id), { recursive: true });
   await fs.writeFile(path.join(sourceDir, "browser-data", sourceProfile.id, "Preferences"), "prefs", "utf8");
+  await fs.writeFile(path.join(sourceDir, "browser-data", sourceProfile.id, ".cloakbrowser-seed"), "42069\n", "utf8");
   const packagePath = path.join(sourceDir, "portable.cbpe");
   await sourceService.exportToPackage({ outputPath: packagePath });
   const legacyEntries = unzipSync(await fs.readFile(packagePath));
@@ -232,6 +233,7 @@ test("environment package import creates new environments and restores browser d
   assert.notEqual(newEnvironmentId, sourceProfile.id);
   assert.notEqual(newExtensionId, extension.id);
   assert.equal(await fileExists(path.join(targetDir, "browser-data", newEnvironmentId, "Preferences")), true);
+  assert.equal(await fs.readFile(path.join(targetDir, "browser-data", newEnvironmentId, ".cloakbrowser-seed"), "utf8"), "42069\n");
   assert.equal(await fileExists(path.join(targetDir, "extensions", newExtensionId, "manifest.json")), true);
 
   const imported = await targetRepository.getEnvironment(newEnvironmentId);

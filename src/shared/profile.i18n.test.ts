@@ -72,6 +72,11 @@ function scenarios(): Scenario[] {
       environment: { binaryInstalled: true },
     },
     {
+      label: "automatic seed disabled",
+      profile: base({ runtime: { ...base().runtime, stealthArgs: false } }),
+      environment: { binaryInstalled: true },
+    },
+    {
       label: "ephemeral puppeteer with explicit identity",
       profile: base({
         mode: "ephemeral",

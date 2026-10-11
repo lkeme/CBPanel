@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { installPackagedInspectorShim } from "./packagedRuntime";
+import { assertPackagedHumanizeBrowser, assertPackagedHumanizeSource, installPackagedInspectorShim } from "./packagedRuntime";
 
 type ModuleLoader = {
   _load: (request: string, parent: unknown, isMain: boolean) => unknown;
 };
+
+test("installed Playwright includes the readable source required by humanize", assertPackagedHumanizeSource);
+
+test("humanize operates on the persistent first page and preserves selector errors", {
+  skip: process.env.CBPANEL_RELEASE_SMOKE_HUMANIZE !== "1",
+  timeout: 45_000,
+}, assertPackagedHumanizeBrowser);
 
 function loaderWithoutInspector(): { loader: ModuleLoader; requests: string[] } {
   const requests: string[] = [];

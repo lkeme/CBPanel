@@ -738,6 +738,36 @@ test("BinaryService preserves null wrapper diagnostics active session counts", a
   }
 });
 
+test("BinaryService preserves Linux persona font counts and distinguishes unavailable probes", async () => {
+  const originalEnv = captureEnv();
+  const directory = await makeTempDir();
+  let fonts: unknown = { windows: [15, 15], office: [0, 8], macos: [12, 20] };
+  const service = new BinaryService({
+    dataDir: directory,
+    portable: false,
+    readSettings: async () => settings({}),
+    loadCloakBrowserDiagnostics: async () => ({
+      collectDiagnostics: async () => ({ fonts, binary: { version: "154.0.8037.57.2", installed: true } }),
+    }),
+  });
+  try {
+    assert.deepEqual((await service.readWrapperDiagnostics()).fonts, fonts);
+    fonts = { windows: null, office: null, macos: null };
+    assert.deepEqual((await service.readWrapperDiagnostics()).fonts, fonts);
+    for (const invalid of [[-1, 20], [21, 20], [1.5, 20], [0, 0], [1], [1, 2, 3], ["1", 20], "ok"]) {
+      fonts = { macos: invalid };
+      const diagnostics = await service.readWrapperDiagnostics();
+      assert.equal(diagnostics.fonts?.macos, undefined);
+      assert.equal(diagnostics.binary?.version, "154.0.8037.57.2");
+      assert.equal(diagnostics.binary?.installed, true);
+    }
+    fonts = undefined;
+    assert.equal((await service.readWrapperDiagnostics()).fonts, undefined);
+  } finally {
+    restoreEnv(originalEnv);
+  }
+});
+
 test("BinaryService returns a stable error payload when wrapper diagnostics fail", async () => {
   const originalEnv = captureEnv();
   const directory = await makeTempDir();
@@ -2083,7 +2113,12 @@ test("BinaryService never prunes a staging directory as if it were an installed 
   // follows must not match it either — the staging prefix is deliberately outside the
   // `chromium-<version>[-pro]` shape the enumeration accepts.
   const liveStaging = path.join(cacheRoot, "import-staging-123");
-  for (const dir of [wrapperCacheDir, liveStaging]) {
+  const upstreamStaging = [
+    path.join(cacheRoot, "chromium-154.0.8037.57.2.partial-123"),
+    path.join(cacheRoot, "chromium-154.0.8037.57.2-pro.partial-456"),
+    path.join(cacheRoot, "chromium-154.0.8037.57.2-pro.stale-789"),
+  ];
+  for (const dir of [wrapperCacheDir, liveStaging, ...upstreamStaging]) {
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, "chrome.exe"), "x");
   }
@@ -2107,6 +2142,7 @@ test("BinaryService never prunes a staging directory as if it were an installed 
     await service.installImportZip(zipPath);
 
     assert.equal(await exists(path.join(liveStaging, "chrome.exe")), true);
+    for (const dir of upstreamStaging) assert.equal(await exists(path.join(dir, "chrome.exe")), true);
     assert.equal(await exists(path.join(wrapperCacheDir, "chrome.exe")), true);
   } finally {
     restoreEnv(originalEnv);
@@ -3292,19 +3328,26 @@ test("BinaryService captures CloakBrowser download progress logs during install"
     loadCloakBrowser: async () => ({
       ...fakeCloakBrowserModule({ binaryPath: "C:/cache/chrome.exe" }),
       ensureBinary: async () => {
-        console.log("[cloakbrowser] Downloading from https://example.test/chromium-v1/file.zip?token=secret");
-        console.log("[cloakbrowser] Download progress: 30% (30/100 MB)");
-        console.log("[cloakbrowser] Download progress: 100% (100/100 MB)");
-        console.log("[cloakbrowser] Binary ready: C:/cache/chrome.exe");
+        console.error("[cloakbrowser] Downloading from https://example.test/chromium-v1/file.zip?token=secret");
+        console.error("[cloakbrowser] Download progress: 30% (30/100 MB)");
+        console.error("[cloakbrowser] Download progress: 100% (100/100 MB)");
+        console.error("[cloakbrowser] SHA256SUMS signature verified: Ed25519 OK");
+        console.error("[cloakbrowser] Binary ready: C:/cache/chrome.exe");
+        console.error("  CloakBrowser - stealth Chromium for automation");
+        console.error("  Running the free binary (v146). The latest binary (v154) is free too, with 1 concurrent session.");
+        console.error("  CloakBrowser Pro active (v154) - latest binary, newest patches.");
+        console.error("[cloakbrowser] Preview channel requested, but no preview build is available for windows-x64; using the stable build.");
+        console.error("[cloakbrowser] unrecognized failure");
+        console.error("CloakBrowser Pro active but license check failed");
         return "C:/cache/chrome.exe";
       },
     } as CloakBrowserModule),
   });
 
-  const originalLog = console.log;
+  const originalLog = console.error;
   const forwardedLogs: unknown[][] = [];
   try {
-    console.log = (...args: unknown[]) => {
+    console.error = (...args: unknown[]) => {
       forwardedLogs.push(args);
     };
     const result = await service.install();
@@ -3314,11 +3357,18 @@ test("BinaryService captures CloakBrowser download progress logs during install"
     assert.equal(operation?.progress?.current, 100);
     assert.equal(operation?.progress?.total, 100);
     assert.ok(operation?.logs.some((log) => log.message.includes("Download progress: 30%")));
+    assert.equal(operation?.logs.find((log) => log.message.includes("SHA256SUMS signature verified"))?.level, "info");
+    for (const message of ["CloakBrowser - stealth", "Running the free binary", "Pro active (v154)"]) {
+      assert.equal(operation?.logs.find((log) => log.message.includes(message))?.level, "info");
+    }
+    assert.equal(operation?.logs.find((log) => log.message.includes("Preview channel requested"))?.level, "warn");
+    assert.equal(operation?.logs.find((log) => log.message.includes("unrecognized failure"))?.level, "error");
+    assert.equal(operation?.logs.find((log) => log.message.includes("license check failed"))?.level, "error");
     assert.ok(operation?.logs.every((log) => !log.message.includes("token=secret")));
     assert.ok(forwardedLogs.every((args) => args.every((arg) => !String(arg).includes("token=secret"))));
     assert.ok(forwardedLogs.every((args) => !Array.isArray(args[0])));
   } finally {
-    console.log = originalLog;
+    console.error = originalLog;
     restoreEnv(originalEnv);
   }
 });

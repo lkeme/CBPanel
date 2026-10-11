@@ -345,6 +345,60 @@ test("fingerprint args carry the windows font metrics quick arg and none upstrea
   );
 });
 
+test("Chromium 151 opt-ins stay off by default and survive sharing, launch previews and generated code", () => {
+  const base = defaultProfile();
+  for (const id of ["transparent-proxy", "portable-cookies"] as const) {
+    assert.equal(isRuntimeQuickArgEnabled(base, id), false);
+  }
+  for (const launcher of ["playwright-context", "playwright-browser", "puppeteer-browser"] as const) {
+    for (const mode of ["persistent", "ephemeral"] as const) {
+      let profile = defaultProfile({ mode, runtime: { ...base.runtime, launcher } });
+      profile = setRuntimeQuickArg(setRuntimeQuickArg(profile, "transparent-proxy", true), "portable-cookies", true);
+      const shared = parseProfileConfigShareString(createProfileConfigShareString(profile));
+      assert.deepEqual(shared.profile.runtime.extraArgs, profile.runtime.extraArgs);
+      const preview = buildLaunchPreview(profile);
+      const code = generateLaunchCode(profile);
+      for (const flag of ["--fingerprint-transparent-proxy", "--fingerprint-portable-cookies"]) {
+        assert.ok((preview.options.args as string[]).includes(flag));
+        assert.ok(code.includes(flag));
+      }
+      const disabled = setRuntimeQuickArg(setRuntimeQuickArg(profile, "transparent-proxy", false), "portable-cookies", false);
+      assert.deepEqual(disabled.runtime.extraArgs, []);
+    }
+  }
+});
+
+test("empty persistent seeds are delegated to the wrapper only for actual persistent launches", () => {
+  const base = defaultProfile();
+  for (const launcher of ["playwright-context", "playwright-browser", "puppeteer-browser"] as const) {
+    for (const mode of ["persistent", "ephemeral"] as const) {
+      const profile = defaultProfile({ mode, runtime: { ...base.runtime, launcher } });
+      const args = buildLaunchPreview(profile).options.args as string[];
+      assert.equal(args.some((arg) => arg.startsWith("--fingerprint=")), false);
+      const persisted = mode === "persistent" && launcher !== "playwright-browser";
+      const seedAudit = auditProfile(profile).items.find((item) => item.id === "fingerprint-seed");
+      assert.equal(textKey(seedAudit?.detail), `profileAudit.fingerprintSeed.detail.${persisted ? "persisted" : "random"}`);
+      const explicit = defaultProfile({ ...profile, fingerprint: { ...profile.fingerprint, seed: "42069" } });
+      assert.ok((buildLaunchPreview(explicit).options.args as string[]).includes("--fingerprint=42069"));
+      assert.ok(generateLaunchCode(explicit).includes("--fingerprint=42069"));
+    }
+  }
+  for (const runtime of [
+    { ...base.runtime, stealthArgs: false },
+    { ...base.runtime, extraArgs: ["--fingerprint=off"] },
+  ]) {
+    const profile = defaultProfile({ runtime });
+    assert.equal(textKey(auditProfile(profile).items.find((item) => item.id === "fingerprint-seed")?.detail), "profileAudit.fingerprintSeed.detail.disabled");
+  }
+  const overridden = defaultProfile({
+    fingerprint: { ...base.fingerprint, seed: "42069" },
+    runtime: { ...base.runtime, extraArgs: ["--fingerprint=off"] },
+  });
+  assert.equal(textKey(auditProfile(overridden).items.find((item) => item.id === "fingerprint-seed")?.detail), "profileAudit.fingerprintSeed.detail.disabled");
+  const extraSeed = defaultProfile({ runtime: { ...base.runtime, stealthArgs: false, extraArgs: ["--fingerprint=12345"] } });
+  assert.equal(textKey(auditProfile(extraSeed).items.find((item) => item.id === "fingerprint-seed")?.detail), "profileAudit.fingerprintSeed.detail.set");
+});
+
 test("manual detection check updates status, notes, and timestamp", () => {
   const checkedAt = "2026-05-30T00:00:00.000Z";
   const profile = updateDetectionCheck(defaultProfile(), DETECTION_TARGETS[0], {

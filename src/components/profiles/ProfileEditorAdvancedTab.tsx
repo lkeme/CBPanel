@@ -100,7 +100,7 @@ export function ProfileEditorAdvancedTab({
         setDraftExtensionBinding={setDraftExtensionBinding}
         t={t}
       />
-      <Field label={t("form.chromiumArgs")} wide>
+      <Field label={t("form.chromiumArgs")} help={t("tips.licenseRoute")} wide>
         <textarea
           rows={6}
           placeholder={t("placeholder.chromiumArgs")}
