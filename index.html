@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CBPanel 指纹浏览器面板</title>
+    <script>
+      // The desktop window is revealed on the first painted frame, so the theme
+      // has to be correct before React mounts. Settings live in SQLite behind
+      // the sidecar, so the last resolved theme is mirrored here instead.
+      (() => {
+        try {
+          const stored = localStorage.getItem("cbpanel.resolvedTheme");
+          const dark =
+            stored === "dark" ||
+            (stored !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.dataset.theme = dark ? "dark" : "light";
+        } catch {
+          /* A blocked storage access only costs the correct initial colour. */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

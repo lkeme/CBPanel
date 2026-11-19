@@ -1,0 +1,249 @@
+import { useEffect, useRef, useState } from "react";
+
+import type { Locale, TranslationKey } from "../../i18n";
+import {
+  type BrowserProfile,
+  type ProxySettings,
+  buildProxyUrl,
+  parseProxyUrlInput,
+  proxyUrlFromParts,
+} from "../../shared/profile";
+import type { BrowserEnvironment, ProxyEntity, XrayEngineStatus } from "../../shared/entities";
+import type { XrayNativeProxyRouting } from "../../shared/settings";
+import { detectXrayShareLinkProtocol, type XrayUtlsFingerprint } from "../../shared/xray";
+import { Field, Segmented } from "../ui/form-controls";
+import { Switch } from "../ui/switch";
+import { EnhancedProxyRow } from "./ProfileEditorAdvancedPanels";
+import { ManagedProxyPicker, ManualProxyFields, ProxyCheckPanel, type ProxySourceMode } from "./ProfileEditorProxyFields";
+
+export function ProfileEditorProxyTab({
+  copyManagedProxyToLocal,
+  draft,
+  environments,
+  setDraft,
+  setDraftProxyLibraryId,
+  setDraftProxyLocal,
+  busy,
+  globalUtlsFingerprint,
+  localProxyDraftIds,
+  locale,
+  proxies,
+  proxyLibraryDraftIds,
+  proxyCheck,
+  checkProxy,
+  installXray,
+  nativeProxyRouting,
+  resolveProxyGeoip,
+  saveDraftProxyToLibrary,
+  t,
+  xrayStatus,
+}: {
+  copyManagedProxyToLocal: () => void;
+  draft: BrowserProfile;
+  environments: BrowserEnvironment[];
+  globalUtlsFingerprint?: XrayUtlsFingerprint;
+  installXray?: () => Promise<unknown>;
+  nativeProxyRouting?: XrayNativeProxyRouting;
+  xrayStatus?: XrayEngineStatus | null;
+  setDraft: (draft: BrowserProfile) => void;
+  setDraftProxyLibraryId: (draftId: string, proxyId: string) => void;
+  setDraftProxyLocal: (draftId: string) => void;
+  busy: string;
+  localProxyDraftIds: Set<string>;
+  /** The display locale, so a library check summary matches the proxy table's column. */
+  locale: Locale;
+  proxies: ProxyEntity[];
+  proxyLibraryDraftIds: Record<string, string>;
+  proxyCheck: string;
+  checkProxy: () => Promise<void>;
+  resolveProxyGeoip: () => Promise<void>;
+  saveDraftProxyToLibrary: () => Promise<void>;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  const environmentProxyId = environments.find((environment) => environment.id === draft.id)?.proxyId ?? "";
+  const forcedLocal = localProxyDraftIds.has(draft.id);
+  const selectedLibraryProxyId = forcedLocal ? "" : proxyLibraryDraftIds[draft.id] || environmentProxyId;
+  const proxyMode: ProxySourceMode = selectedLibraryProxyId ? "managed" : "local";
+  const [proxyUrlError, setProxyUrlError] = useState("");
+  // The raw URL field is typed text, not a projection of the proxy: `updateProxyRaw` already writes the
+  // parsed fields and the raw string back onto the draft, and syncing the input from `draft.proxy` on
+  // every change would overwrite anything the parser could not represent (a half-typed host, a scheme
+  // the parser rejects) and move the caret. Only a different profile or an external change to the
+  // stored proxy resets it.
+  const [proxyUrlText, setProxyUrlText] = useState(() => draft.proxy.raw || proxyUrlFromParts(draft.proxy));
+  const syncKey = `${draft.id}\u0000${draft.proxy.raw}\u0000${draft.proxy.scheme}\u0000${draft.proxy.host}\u0000${draft.proxy.port}`;
+  const lastSyncKey = useRef(syncKey);
+
+  useEffect(() => {
+    if (lastSyncKey.current === syncKey) return;
+    lastSyncKey.current = syncKey;
+    setProxyUrlError("");
+    setProxyUrlText(draft.proxy.raw || proxyUrlFromParts(draft.proxy));
+  }, [draft.proxy, syncKey]);
+
+  const applyManagedProxy = (proxyId: string) => {
+    const proxy = proxies.find((item) => item.id === proxyId);
+    if (!proxy) return;
+    setDraftProxyLibraryId(draft.id, proxyId);
+    setProxyUrlText("");
+    setProxyUrlError("");
+    setDraft({
+      ...draft,
+      proxy: {
+        ...draft.proxy,
+        enabled: true,
+        raw: "",
+        scheme: proxy.scheme,
+        host: proxy.host,
+        port: proxy.port,
+        username: proxy.username,
+        password: proxy.password,
+        bypass: proxy.bypass,
+        shareLink: proxy.shareLink,
+        preProxyId: proxy.preProxyId,
+        ipStrategy: proxy.ipStrategy,
+        utlsFingerprint: proxy.utlsFingerprint,
+      },
+    });
+  };
+  const proxyEnabled = draft.proxy.enabled;
+  const usingManagedProxy = proxyEnabled && proxyMode === "managed";
+  const currentProxyUrl = buildProxyUrl(draft.proxy) ?? "";
+  const canSaveProxyToLibrary = proxyEnabled && !usingManagedProxy && !proxyUrlError && Boolean(currentProxyUrl);
+  const updateProxyParts = (patch: Partial<ProxySettings>) => {
+    const nextProxy = { ...draft.proxy, ...patch, raw: "" };
+    const nextRaw = proxyUrlFromParts(nextProxy);
+    setProxyUrlError("");
+    setProxyUrlText(nextRaw);
+    setDraft({
+      ...draft,
+      proxy: {
+        ...nextProxy,
+        raw: nextRaw,
+      },
+    });
+  };
+  const updateProxyRaw = (value: string) => {
+    // A node link pasted into the URL field is the most natural way to reach for the engine: switch the
+    // scheme instead of rejecting it as an invalid proxy URL.
+    const shareProtocol = detectXrayShareLinkProtocol(value);
+    if (shareProtocol && shareProtocol !== "socks" && shareProtocol !== "http") {
+      setProxyUrlText("");
+      setProxyUrlError("");
+      setDraft({
+        ...draft,
+        proxy: { ...draft.proxy, scheme: "xray", shareLink: value.trim(), raw: "", host: "", port: "", username: "", password: "" },
+      });
+      return;
+    }
+    const parsed = parseProxyUrlInput(value);
+    setProxyUrlText(value);
+    setProxyUrlError(value.trim() && !parsed ? t("error.proxyUrlInvalid") : "");
+    if (!value.trim()) {
+      setDraft({
+        ...draft,
+        proxy: {
+          ...draft.proxy,
+          raw: "",
+          host: "",
+          port: "",
+          username: "",
+          password: "",
+        },
+      });
+      return;
+    }
+    if (!parsed) return;
+    setDraft({
+      ...draft,
+      proxy: {
+        ...draft.proxy,
+        ...parsed,
+        raw: value,
+      },
+    });
+  };
+
+  return (
+    <div className="editor-grid">
+      {/* The master switch sits at the right of the source row: one glance reads source plus state. */}
+      <div className="proxy-source-row wide">
+        <Field label={t("form.proxySource")} help={proxyMode === "managed" ? t("form.proxyManagedHint") : t("form.proxyLocalHint")}>
+          <Segmented<ProxySourceMode>
+            value={proxyMode}
+            options={[
+              { value: "local", label: t("form.proxyLocal") },
+              { value: "managed", label: t("form.proxyLibrary") },
+            ]}
+            onChange={(mode) => {
+              if (mode === "local") {
+                setDraftProxyLocal(draft.id);
+                return;
+              }
+              const nextProxyId = selectedLibraryProxyId || proxies[0]?.id;
+              if (nextProxyId) applyManagedProxy(nextProxyId);
+            }}
+          />
+        </Field>
+        <span className="proxy-source-toggle">
+          <Switch
+            aria-label={t("form.proxyEnabled")}
+            checked={proxyEnabled}
+            className="toggle-switch"
+            onCheckedChange={(enabled) => {
+              if (!enabled) setDraftProxyLocal(draft.id);
+              setDraft({ ...draft, proxy: { ...draft.proxy, enabled } });
+            }}
+          />
+        </span>
+      </div>
+      {proxyMode === "managed" && (
+        <ManagedProxyPicker
+          applyManagedProxy={applyManagedProxy}
+          locale={locale}
+          proxies={proxies}
+          proxyEnabled={proxyEnabled}
+          selectedLibraryProxyId={selectedLibraryProxyId}
+          t={t}
+        />
+      )}
+      <ManualProxyFields
+        draft={draft}
+        globalUtlsFingerprint={globalUtlsFingerprint}
+        locale={locale}
+        proxies={proxies}
+        proxyEnabled={proxyEnabled}
+        proxyUrlError={proxyUrlError}
+        proxyUrlText={proxyUrlText}
+        t={t}
+        updateProxyParts={updateProxyParts}
+        updateProxyRaw={updateProxyRaw}
+        usingManagedProxy={usingManagedProxy}
+      />
+      {/* Enhanced proxy and its follow-up checks are one action row: the mode switch leads, the
+          buttons trail on the same line. The grid cell's own padding keeps it clear of the
+          fieldset above, so no extra divider is drawn here. */}
+      <div className="proxy-action-row wide">
+        <EnhancedProxyRow draft={draft} setDraft={setDraft} t={t} />
+        <ProxyCheckPanel
+          busy={busy}
+          canSaveProxyToLibrary={canSaveProxyToLibrary}
+          checkProxy={checkProxy}
+          copyManagedProxyToLocal={copyManagedProxyToLocal}
+          currentProxyUrl={currentProxyUrl}
+          draft={draft}
+          installXray={installXray}
+          nativeProxyRouting={nativeProxyRouting}
+          proxyEnabled={proxyEnabled}
+          xrayStatus={xrayStatus}
+          proxyUrlError={proxyUrlError}
+          resolveProxyGeoip={resolveProxyGeoip}
+          saveDraftProxyToLibrary={saveDraftProxyToLibrary}
+          t={t}
+          usingManagedProxy={usingManagedProxy}
+        />
+      </div>
+      {proxyCheck && <div className="result-line wide">{proxyCheck}</div>}
+    </div>
+  );
+}

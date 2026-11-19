@@ -1,0 +1,1408 @@
+import React, { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { X } from "lucide-react";
+
+import type { Locale, TranslationKey } from "../../i18n";
+import type {
+  ExtensionDirectoryCandidate,
+  ExtensionDirectoryImportResult,
+  ExtensionDirectoryMode,
+  ExtensionDirectoryPreviewResult,
+  GroupEntity,
+  ProxyEntity,
+  ProxySubscriptionEntity,
+  TagEntity,
+} from "../../shared/entities";
+import { DEFAULT_PROXY_SUBSCRIPTION_INTERVAL_HOURS, PROXY_SUBSCRIPTION_INTERVAL_HOURS } from "../../shared/entities";
+import type { ProxyImportOutcome } from "../../hooks/useProxyActions";
+import { proxyImportErrorMessage } from "../../lib/apiClient";
+import { type ProxyScheme, nowIso, parseProxyUrlInput, proxyUrlFromParts } from "../../shared/profile";
+import { detectXrayShareLinkProtocol, type XrayUtlsFingerprint } from "../../shared/xray";
+import { DialogShell } from "../ui/DialogShell";
+import { Field, Segmented, ToggleField } from "../ui/form-controls";
+import { PasswordInput } from "../ui/PasswordInput";
+import { SelectMenu } from "../ui/SelectMenu";
+import { maskManagedProxyForDisplay } from "../profiles/proxyDisplay";
+import { IpStrategyField, PreProxyField, UtlsPreferenceField, XrayShareLinkField, analyzeXrayShareLink, xrayShareLinkError } from "../profiles/XrayProxyFields";
+import { useExtensionAcquisitionDialogFocus } from "./extensionAcquisitionDialogFocus";
+import type { ExtensionAcquisitionUiTranslator } from "./extensionAcquisitionUi";
+
+/** Acquisition dialogs share the registry modal surface while adding a trapped, returned focus lifecycle. */
+export function ExtensionAcquisitionDialog({
+  actions,
+  busy,
+  children,
+  closeDisabled = false,
+  closeLabel,
+  description,
+  onClose,
+  panelClassName = "registry-editor-panel",
+  showCloseButton = true,
+  title,
+}: {
+  actions?: React.ReactNode;
+  busy?: boolean;
+  children: React.ReactNode;
+  closeDisabled?: boolean;
+  closeLabel: string;
+  description?: React.ReactNode;
+  onClose: () => void;
+  panelClassName?: string;
+  showCloseButton?: boolean;
+  title: React.ReactNode;
+}) {
+  const titleId = React.useId();
+  const descriptionId = React.useId();
+  const { handleKeyDown, layerRef, panelRef } = useExtensionAcquisitionDialogFocus({ closeDisabled, onClose });
+
+  const dialog = (
+    <div
+      aria-describedby={description ? descriptionId : undefined}
+      aria-labelledby={titleId}
+      aria-modal="true"
+      className="modal-layer acquisition-modal-layer"
+      onKeyDown={handleKeyDown}
+      ref={layerRef}
+      role="dialog"
+    >
+      <div
+        aria-hidden="true"
+        className="modal-scrim"
+        onMouseDown={(event) => {
+          if (!closeDisabled && event.currentTarget === event.target) onClose();
+        }}
+      />
+      <section
+        aria-busy={(busy ?? closeDisabled) || undefined}
+        className={`modal-panel acquisition-modal-panel ${panelClassName}`.trim()}
+        ref={panelRef}
+        tabIndex={-1}
+      >
+        <header className={`modal-header ${showCloseButton ? "with-close" : ""}`}>
+          <div className="modal-title-block">
+            <h2 id={titleId}>{title}</h2>
+            {description && <p id={descriptionId}>{description}</p>}
+          </div>
+          {showCloseButton && (
+            <button
+              aria-label={closeLabel}
+              className="icon-button modal-close-button"
+              disabled={closeDisabled}
+              onClick={onClose}
+              title={closeLabel}
+              type="button"
+            >
+              <X aria-hidden="true" size={16} />
+            </button>
+          )}
+        </header>
+        <div className="modal-body">{children}</div>
+        {actions && <footer className="modal-footer">{actions}</footer>}
+      </section>
+    </div>
+  );
+  // Registry views enter through a transformed animation container. A fixed
+  // descendant of that container is fixed to the module body instead of the
+  // viewport, which leaves the workspace header/sidebar uncovered by the
+  // scrim. Portalling the modal to <body> restores a true viewport boundary.
+  // Keep the inline fallback for SSR component tests where `document` does not
+  // exist.
+  return typeof document === "undefined" ? dialog : createPortal(dialog, document.body);
+}
+
+export function ExtensionAcquisitionDialogLoading({
+  close,
+  t,
+  title,
+}: {
+  close: () => void;
+  t: ExtensionAcquisitionUiTranslator;
+  title: string;
+}) {
+  const titleId = React.useId();
+  const descriptionId = `${titleId}-loading`;
+  const { handleKeyDown, layerRef, panelRef } = useExtensionAcquisitionDialogFocus({
+    closeDisabled: false,
+    onClose: close,
+  });
+
+  const dialog = (
+    <div
+      aria-describedby={descriptionId}
+      aria-labelledby={titleId}
+      aria-modal="true"
+      className="modal-layer acquisition-modal-layer"
+      onKeyDown={handleKeyDown}
+      ref={layerRef}
+      role="dialog"
+    >
+      <div aria-hidden="true" className="modal-scrim" />
+      <section aria-busy="true" className="modal-panel acquisition-modal-panel registry-editor-panel" ref={panelRef} tabIndex={-1}>
+        <header className="modal-header with-close">
+          <h2 id={titleId}>{title}</h2>
+          <button data-acquisition-autofocus className="command subtle" onClick={close} type="button">
+            {t("actions.close")}
+          </button>
+        </header>
+        <div
+          aria-live="polite"
+          className="modal-body preflight-empty"
+          id={descriptionId}
+          role="status"
+        >
+          {t("extension.acquisition.loading")}
+        </div>
+      </section>
+    </div>
+  );
+  return typeof document === "undefined" ? dialog : createPortal(dialog, document.body);
+}
+
+export type TextInputDialogState = {
+  title: string;
+  body?: string;
+  bodyCode?: string;
+  label: string;
+  placeholder?: string;
+  confirmLabel: string;
+  defaultValue?: string;
+  secret?: boolean;
+  busyKey?: string;
+  validate?: (value: string) => string | null;
+  onConfirm: (value: string) => Promise<void>;
+} | null;
+
+export type ExtensionImportDialogState =
+  | { kind: "directory" | "zip" | "crx" }
+  | null;
+
+function proxyEditorInitialDraft(proxy?: ProxyEntity): ProxyEntity {
+  const timestamp = nowIso();
+  return {
+    id: proxy?.id ?? "",
+    name: proxy?.name ?? "",
+    scheme: proxy?.scheme ?? "http",
+    host: proxy?.host ?? "",
+    port: proxy?.port ?? "",
+    username: proxy?.username ?? "",
+    password: proxy?.password ?? "",
+    bypass: proxy?.bypass ?? "localhost,127.0.0.1",
+    notes: proxy?.notes ?? "",
+    status: proxy?.status ?? "enabled",
+    lastCheck: proxy?.lastCheck,
+    shareLink: proxy?.shareLink ?? "",
+    preProxyId: proxy?.preProxyId ?? "",
+    ipStrategy: proxy?.ipStrategy ?? "auto",
+    utlsFingerprint: proxy?.utlsFingerprint ?? "",
+    xrayNode: proxy?.xrayNode,
+    createdAt: proxy?.createdAt ?? timestamp,
+    updatedAt: proxy?.updatedAt ?? timestamp,
+  };
+}
+
+function registryEntityInitialDraft(kind: "group" | "tag", entity?: GroupEntity | TagEntity): GroupEntity | TagEntity {
+  const timestamp = nowIso();
+  const base = {
+    id: entity?.id ?? "",
+    name: entity?.name ?? "",
+    color: entity?.color ?? (kind === "group" ? "#0891b2" : "#7c3aed"),
+    description: entity?.description ?? "",
+    order: entity?.order ?? 0,
+    status: entity?.status ?? "enabled",
+    createdAt: entity?.createdAt ?? timestamp,
+    updatedAt: entity?.updatedAt ?? timestamp,
+  };
+  if (kind === "group") return { ...base, isDefault: "isDefault" in (entity ?? {}) ? Boolean((entity as GroupEntity).isDefault) : false } as GroupEntity;
+  return base as TagEntity;
+}
+
+export function TextInputDialog({
+  busy,
+  close,
+  state,
+  t,
+}: {
+  busy: string;
+  close: () => void;
+  state: NonNullable<TextInputDialogState>;
+  t: (key: TranslationKey) => string;
+}) {
+  const [value, setValue] = useState(state.defaultValue ?? "");
+  const [error, setError] = useState("");
+  const isBusy = Boolean(state.busyKey && busy === state.busyKey);
+
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const nextError = state.validate?.(value) ?? null;
+    if (nextError) {
+      setError(nextError);
+      return;
+    }
+    setError("");
+    void state.onConfirm(value);
+  }
+
+  return (
+    <DialogShell
+      actions={
+        <>
+          <button className="command subtle" disabled={isBusy} onClick={close} type="button">
+            {t("actions.cancel")}
+          </button>
+          <button className="command primary" disabled={isBusy} type="submit">
+            {state.confirmLabel}
+          </button>
+        </>
+      }
+      asForm
+      close={close}
+      closeDisabled={isBusy}
+      description={state.body ? renderDialogBody(state.body, state.bodyCode) : undefined}
+      labelledBy="text-input-dialog-title"
+      onSubmit={submit}
+      panelClassName="input-panel"
+      t={t}
+      title={state.title}
+    >
+      <label className="modal-input-field">
+        <span>{state.label}</span>
+        <input
+          autoFocus
+          disabled={isBusy}
+          placeholder={state.placeholder}
+          type={state.secret ? "password" : "text"}
+          value={value}
+          onChange={(event) => {
+            setValue(event.target.value);
+            if (error) setError("");
+          }}
+        />
+      </label>
+      {error && <div className="result-line danger">{error}</div>}
+    </DialogShell>
+  );
+}
+
+function renderDialogBody(body: string, code?: string): React.ReactNode {
+  if (!code || !body.includes(code)) return body;
+  const [before, after] = body.split(code);
+  return (
+    <>
+      {before}
+      <code className="inline-code">{code}</code>
+      {after}
+    </>
+  );
+}
+
+export function RegistryEntityDialog({
+  busy,
+  close,
+  entity,
+  kind,
+  mode,
+  saveGroup,
+  saveTag,
+  t,
+}: {
+  busy: string;
+  close: () => void;
+  entity?: GroupEntity | TagEntity;
+  kind: "group" | "tag";
+  mode: "create" | "edit";
+  saveGroup: (mode: "create" | "edit", input: Partial<GroupEntity>, group?: GroupEntity) => Promise<void>;
+  saveTag: (mode: "create" | "edit", input: Partial<TagEntity>, tag?: TagEntity) => Promise<void>;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  const [draft, setDraft] = useState(() => registryEntityInitialDraft(kind, entity));
+  const nameError = draft.name.trim() ? "" : t(kind === "group" ? "registry.editor.groupNameRequired" : "registry.editor.tagNameRequired");
+  const busyKey = mode === "create" ? `${kind}-create` : entity ? `${kind}-update:${entity.id}` : `${kind}-update`;
+  const isBusy = busy === busyKey;
+  const canSave = !nameError;
+  const title =
+    kind === "group"
+      ? t(mode === "create" ? "registry.editor.createGroupTitle" : "registry.editor.editGroupTitle")
+      : t(mode === "create" ? "registry.editor.createTagTitle" : "registry.editor.editTagTitle");
+
+  const updateDraft = (patch: Partial<GroupEntity & TagEntity>) => setDraft((current) => ({ ...current, ...patch }));
+
+  return (
+    <DialogShell
+      actions={
+        <>
+          <button className="command subtle" disabled={isBusy} onClick={close} type="button">
+            {t("actions.cancel")}
+          </button>
+          <button
+            className="command primary"
+            disabled={!canSave || isBusy}
+            onClick={() => {
+              if (kind === "group") void saveGroup(mode, draft as Partial<GroupEntity>, entity as GroupEntity | undefined);
+              else void saveTag(mode, draft as Partial<TagEntity>, entity as TagEntity | undefined);
+            }}
+            type="button"
+          >
+            {t("actions.save")}
+          </button>
+        </>
+      }
+      bodyClassName="modal-body registry-editor-body"
+      close={close}
+      closeDisabled={isBusy}
+      description={t(kind === "group" ? "registry.editor.groupDescription" : "registry.editor.tagDescription")}
+      labelledBy="registry-editor-title"
+      panelClassName="registry-editor-panel"
+      t={t}
+      title={title}
+    >
+      <div className="form-grid two compact-section">
+        <Field label={t(kind === "group" ? "registry.editor.groupName" : "registry.editor.tagName")} wide error={nameError}>
+          <input value={draft.name} onChange={(event) => updateDraft({ name: event.target.value })} placeholder={t(kind === "group" ? "registry.editor.groupPlaceholder" : "registry.editor.tagPlaceholder")} />
+        </Field>
+        <Field label={t("registry.editor.color")}>
+          <input className="color-input" value={draft.color} onChange={(event) => updateDraft({ color: event.target.value })} placeholder="#0891b2" />
+        </Field>
+        <Field label={t("registry.editor.order")}>
+          <input type="number" value={draft.order} onChange={(event) => updateDraft({ order: Number(event.target.value) })} />
+        </Field>
+        <Field label={t("form.notes")} wide>
+          <textarea value={draft.description} onChange={(event) => updateDraft({ description: event.target.value })} placeholder={t("registry.editor.descriptionPlaceholder")} />
+        </Field>
+        <ToggleField
+          checked={draft.status !== "disabled"}
+          disabled={kind === "group" && "isDefault" in draft && draft.isDefault}
+          label={t("proxy.editor.status")}
+          onChange={(enabled) => updateDraft({ status: enabled ? "enabled" : "disabled" })}
+        />
+      </div>
+      <div className="registry-editor-preview">
+        <span className="registry-color-dot" style={{ background: draft.color }} aria-hidden="true" />
+        <strong>{draft.name || t(kind === "group" ? "actions.newGroup" : "actions.newTag")}</strong>
+        <small>{draft.description || t("registry.editor.noDescription")}</small>
+      </div>
+    </DialogShell>
+  );
+}
+
+export function RegistryMergeDialog({
+  busy,
+  close,
+  entity,
+  groups,
+  kind,
+  mergeGroup,
+  mergeTag,
+  referenceCount,
+  showProfiles,
+  tags,
+  t,
+}: {
+  busy: string;
+  close: () => void;
+  entity: GroupEntity | TagEntity;
+  groups: GroupEntity[];
+  kind: "group" | "tag";
+  mergeGroup: (group: GroupEntity, targetId: string) => Promise<void>;
+  mergeTag: (tag: TagEntity, targetId: string) => Promise<void>;
+  referenceCount: number;
+  showProfiles: (entity: GroupEntity | TagEntity) => void;
+  tags: TagEntity[];
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  const candidates = (kind === "group" ? groups : tags).filter((item) => item.id !== entity.id);
+  const [targetId, setTargetId] = useState(candidates[0]?.id ?? "");
+  const isBusy = busy === `${kind}-merge:${entity.id}`;
+  const targetOptions = candidates.map((candidate) => ({
+    value: candidate.id,
+    label: candidate.name,
+    meta: candidate.description || t(candidate.status === "disabled" ? "status.disabled" : "status.enabled"),
+  }));
+
+  return (
+    <DialogShell
+      actions={
+        <>
+          <button className="command subtle" disabled={isBusy} onClick={close} type="button">
+            {t("actions.cancel")}
+          </button>
+          <button
+            className="command danger"
+            disabled={!targetId || isBusy}
+            onClick={() => {
+              if (kind === "group") void mergeGroup(entity as GroupEntity, targetId);
+              else void mergeTag(entity as TagEntity, targetId);
+            }}
+            type="button"
+          >
+            {t("actions.merge")}
+          </button>
+        </>
+      }
+      close={close}
+      closeDisabled={isBusy}
+      description={t(kind === "group" ? "registry.merge.groupBody" : "registry.merge.tagBody", { count: referenceCount })}
+      labelledBy="registry-merge-title"
+      panelClassName="reference-panel"
+      t={t}
+      title={t(kind === "group" ? "registry.merge.groupTitle" : "registry.merge.tagTitle", { name: entity.name })}
+    >
+      <div className="reference-summary">
+        <span>{t("registry.merge.source")}</span>
+        <strong>{entity.name}</strong>
+        <small>{entity.description || t("registry.editor.noDescription")}</small>
+      </div>
+      <Field label={t("registry.merge.target")}>
+        <SelectMenu
+          disabled={targetOptions.length === 0}
+          value={targetId}
+          placeholder={t("registry.merge.noTarget")}
+          options={targetOptions}
+          onChange={setTargetId}
+        />
+      </Field>
+      <div className="reference-action-grid">
+        <button
+          className="command"
+          onClick={() => {
+            showProfiles(entity);
+            close();
+          }}
+          type="button"
+        >
+          {t("registry.merge.viewProfiles")}
+        </button>
+      </div>
+    </DialogShell>
+  );
+}
+
+export function ExtensionImportDialog({
+  busy,
+  close,
+  importArchive,
+  importDirectories,
+  importDirectory,
+  previewDirectory,
+  state,
+  t,
+  uploadArchive,
+}: {
+  busy: string;
+  close: () => void;
+  importArchive: (kind: "zip" | "crx", filePath: string) => Promise<void>;
+  importDirectories: (paths: string[], mode: ExtensionDirectoryMode) => Promise<ExtensionDirectoryImportResult | null>;
+  importDirectory: (directory: string, mode: ExtensionDirectoryMode) => Promise<void>;
+  previewDirectory: (directory: string) => Promise<ExtensionDirectoryPreviewResult | null>;
+  state: NonNullable<ExtensionImportDialogState>;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  uploadArchive: (kind: "zip" | "crx", file: File) => Promise<void>;
+}) {
+  const [pathValue, setPathValue] = useState("");
+  const [pathError, setPathError] = useState("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [referenceMode, setReferenceMode] = useState(false);
+  const [directoryPreview, setDirectoryPreview] = useState<ExtensionDirectoryPreviewResult | null>(null);
+  const [directoryImportResult, setDirectoryImportResult] = useState<ExtensionDirectoryImportResult | null>(null);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string>>(() => new Set());
+  const title =
+    state.kind === "directory"
+      ? t("extension.import.directoryTitle")
+      : t(state.kind === "zip" ? "extension.import.zipTitle" : "extension.import.crxTitle");
+  const busyKey =
+    state.kind === "directory"
+      ? "extension-import-directory"
+      : `extension-import-${state.kind}`;
+  const isBusy = busy === busyKey;
+  const archiveKind = state.kind === "zip" || state.kind === "crx" ? state.kind : null;
+  const selectedCandidates = directoryPreview?.candidates.filter((candidate) => selectedCandidateIds.has(candidate.id)) ?? [];
+  const hasDirectoryPreview = state.kind === "directory" && Boolean(directoryPreview?.candidates.length);
+  const canSubmit =
+    hasDirectoryPreview
+      ? selectedCandidates.length > 0
+      : Boolean(pathValue.trim() || selectedFile);
+
+  async function pickDirectory() {
+    if (!isTauri()) return;
+    try {
+      const directory = await invoke<string | null>("cbpanel_select_extension_directory");
+      if (directory) {
+        setPathValue(directory);
+        setPathError("");
+        setDirectoryPreview(null);
+        setDirectoryImportResult(null);
+        setSelectedCandidateIds(new Set());
+      }
+    } catch (error) {
+      setPathError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function pickArchive(kind: "zip" | "crx") {
+    if (!isTauri()) return;
+    try {
+      const filePath = await invoke<string | null>("cbpanel_select_extension_archive_path", { kind });
+      if (filePath) {
+        setPathValue(filePath);
+        setPathError("");
+      }
+    } catch (error) {
+      setPathError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function submit() {
+    if (state.kind !== "directory") {
+      // A picked file is uploaded as bytes; the path box stays the advanced server-path channel.
+      if (selectedFile) await uploadArchive(state.kind, selectedFile);
+      else await importArchive(state.kind, pathValue);
+      return;
+    }
+    const directoryMode: ExtensionDirectoryMode = referenceMode ? "reference" : "copy";
+    if (hasDirectoryPreview) {
+      const result = await importDirectories(selectedCandidates.map((candidate) => candidate.path), directoryMode);
+      if (result && result.failed.length === 0) {
+        close();
+        return;
+      }
+      setDirectoryImportResult(result);
+      if (result?.failed.length) {
+        const failedPaths = new Set(result.failed.map((item) => item.path));
+        setSelectedCandidateIds(new Set(directoryPreview?.candidates.filter((candidate) => failedPaths.has(candidate.path)).map((candidate) => candidate.id)));
+      }
+      return;
+    }
+
+    setDirectoryImportResult(null);
+    const preview = await previewDirectory(pathValue);
+    if (!preview) return;
+    if (preview.direct) {
+      await importDirectory(preview.direct.path, directoryMode);
+      return;
+    }
+    setDirectoryPreview(preview);
+    setSelectedCandidateIds(new Set());
+  }
+
+  function toggleCandidate(candidateId: string, selected: boolean) {
+    setSelectedCandidateIds((current) => {
+      const next = new Set(current);
+      if (selected) next.add(candidateId);
+      else next.delete(candidateId);
+      return next;
+    });
+  }
+
+  function resetDirectoryPreview() {
+    setDirectoryPreview(null);
+    setDirectoryImportResult(null);
+    setSelectedCandidateIds(new Set());
+  }
+
+  return (
+    <DialogShell
+      actions={
+        <>
+          <button className="command subtle" disabled={isBusy} onClick={close} type="button">
+            {t("actions.cancel")}
+          </button>
+          <button
+            className="command primary"
+            disabled={!canSubmit || isBusy}
+            onClick={() => {
+              void submit();
+            }}
+            type="button"
+          >
+            {hasDirectoryPreview ? t("extension.import.importSelected") : t("actions.import")}
+          </button>
+        </>
+      }
+      close={close}
+      closeDisabled={isBusy}
+      description={t("extension.import.description")}
+      labelledBy="extension-import-title"
+      panelClassName="registry-editor-panel"
+      t={t}
+      title={title}
+    >
+      <div className="form-grid two compact-section">
+          <Field label={t("form.path")} wide>
+            <div className="path-picker-row">
+              <input
+                value={pathValue}
+                onChange={(event) => {
+                  setPathValue(event.target.value);
+                  if (pathError) setPathError("");
+                  if (directoryPreview) resetDirectoryPreview();
+                  else if (directoryImportResult) setDirectoryImportResult(null);
+                }}
+                placeholder={t(state.kind === "directory" ? "extension.import.directoryPlaceholder" : "extension.import.filePlaceholder")}
+              />
+              {state.kind === "directory" && isTauri() && (
+                <button className="command subtle" disabled={isBusy} onClick={() => void pickDirectory()} type="button">
+                  {t("extension.import.pickDirectory")}
+                </button>
+              )}
+            </div>
+            {pathError && <div className="result-line danger">{pathError}</div>}
+          </Field>
+          {archiveKind && (
+            <Field label={t("extension.import.pickFile")} wide>
+              {isTauri() ? (
+                <button className="command subtle" disabled={isBusy} onClick={() => void pickArchive(archiveKind)} type="button">
+                  {t("extension.import.pickFile")}
+                </button>
+              ) : (
+                <div className="path-picker-row">
+                  <input
+                    accept={archiveKind === "zip" ? ".zip,application/zip" : ".crx,application/x-chrome-extension"}
+                    onChange={(event) => setSelectedFile(event.currentTarget.files?.[0] ?? null)}
+                    type="file"
+                  />
+                  {selectedFile && (
+                    <button
+                      className="command subtle"
+                      disabled={isBusy}
+                      onClick={(event) => {
+                        const input = event.currentTarget.parentElement?.querySelector("input[type='file']");
+                        if (input instanceof HTMLInputElement) input.value = "";
+                        setSelectedFile(null);
+                      }}
+                      type="button"
+                    >
+                      {t("actions.clear")}
+                    </button>
+                  )}
+                </div>
+              )}
+            </Field>
+          )}
+          {state.kind === "directory" && (
+            <div className="wide">
+              <ToggleField
+                checked={referenceMode}
+                disabled={isBusy}
+                help={t("extension.import.referenceModeHint")}
+                label={t("extension.import.referenceMode")}
+                onChange={setReferenceMode}
+              />
+            </div>
+          )}
+      </div>
+      {state.kind === "directory" && directoryPreview && directoryPreview.candidates.length > 0 && (
+        <ExtensionDirectoryCandidatePreview
+          candidates={directoryPreview.candidates}
+          selectedIds={selectedCandidateIds}
+          t={t}
+          toggleCandidate={toggleCandidate}
+        />
+      )}
+      {state.kind === "directory" && directoryImportResult?.failed.length ? (
+        <ExtensionDirectoryImportFailures failed={directoryImportResult.failed} t={t} />
+      ) : null}
+      <div className="preflight-empty">
+        {t(archiveKind ? "extension.import.archiveNote" : "extension.import.webPathNote")}
+      </div>
+    </DialogShell>
+  );
+}
+
+function ExtensionDirectoryCandidatePreview({
+  candidates,
+  selectedIds,
+  t,
+  toggleCandidate,
+}: {
+  candidates: ExtensionDirectoryCandidate[];
+  selectedIds: Set<string>;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  toggleCandidate: (candidateId: string, selected: boolean) => void;
+}) {
+  const selectedCount = candidates.filter((candidate) => selectedIds.has(candidate.id)).length;
+
+  return (
+    <div className="extension-import-preview">
+      <div className="extension-import-preview-header">
+        <strong>{t("extension.import.previewTitle")}</strong>
+        <span>{t("extension.import.selectedCount", { selected: selectedCount, total: candidates.length })}</span>
+      </div>
+      <div className="extension-import-candidates">
+        {candidates.map((candidate) => {
+          const highRiskCount = candidate.permissionRisks.filter((risk) => risk.level === "high").length;
+          const mediumRiskCount = candidate.permissionRisks.filter((risk) => risk.level === "medium").length;
+          return (
+            <label className="extension-import-candidate" key={candidate.id}>
+              <input
+                checked={selectedIds.has(candidate.id)}
+                onChange={(event) => toggleCandidate(candidate.id, event.currentTarget.checked)}
+                type="checkbox"
+              />
+              <span className="extension-import-candidate-main">
+                <span className="extension-import-candidate-title">
+                  <strong>{candidate.name}</strong>
+                  {(highRiskCount > 0 || mediumRiskCount > 0) && (
+                    <span className="risk-badge-group">
+                      {highRiskCount > 0 && <span className="risk-badge risk-high">{t("module.extensionRisk", { count: highRiskCount })}</span>}
+                      {mediumRiskCount > 0 && <span className="risk-badge risk-medium">{t("module.extensionRiskMedium", { count: mediumRiskCount })}</span>}
+                    </span>
+                  )}
+                  <small>{candidate.version}</small>
+                </span>
+                <span className="extension-import-candidate-meta">
+                  <span className="mono-cell">{candidate.extensionId}</span>
+                  <span className="mono-cell">{candidate.path}</span>
+                </span>
+              </span>
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ExtensionDirectoryImportFailures({
+  failed,
+  t,
+}: {
+  failed: ExtensionDirectoryImportResult["failed"];
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  return (
+    <div className="extension-import-failures">
+      <strong>{t("extension.import.failedTitle", { count: failed.length })}</strong>
+      <div className="extension-import-failure-list">
+        {failed.map((item) => (
+          <div className="extension-import-failure" key={item.path}>
+            <span className="mono-cell">{item.path}</span>
+            <small>{item.error}</small>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function ProxyReferenceDialog({
+  busy,
+  close,
+  deleteProxy,
+  proxy,
+  proxies,
+  referenceCount,
+  replaceAndDelete,
+  replaceReferences,
+  showProfiles,
+  t,
+  type,
+  unbindAndDelete,
+  unbindReferences,
+}: {
+  busy: string;
+  close: () => void;
+  deleteProxy: (proxy: ProxyEntity) => Promise<void>;
+  proxy: ProxyEntity;
+  proxies: ProxyEntity[];
+  referenceCount: number;
+  replaceAndDelete: (proxy: ProxyEntity, targetId: string) => Promise<void>;
+  replaceReferences: (proxy: ProxyEntity, targetId: string) => Promise<void>;
+  showProfiles: (proxyId: string) => void;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  type: "replace" | "unbind" | "delete";
+  unbindAndDelete: (proxy: ProxyEntity) => Promise<void>;
+  unbindReferences: (proxy: ProxyEntity) => Promise<void>;
+}) {
+  const candidates = proxies.filter((item) => item.id !== proxy.id);
+  const [targetId, setTargetId] = useState(candidates[0]?.id ?? "");
+  const isReplace = type === "replace";
+  const titleKey = type === "delete" ? "proxy.references.deleteTitle" : type === "unbind" ? "proxy.references.unbindTitle" : "proxy.references.replaceTitle";
+  const bodyKey = type === "delete" ? "proxy.references.deleteBody" : type === "unbind" ? "proxy.references.unbindBody" : "proxy.references.replaceBody";
+  const busyKey = type === "replace" ? `proxy-replace:${proxy.id}` : type === "unbind" ? `proxy-unbind:${proxy.id}` : `proxy-delete:${proxy.id}`;
+  const isBusy = busy === busyKey;
+  const shouldChooseReplacement = isReplace || (type === "delete" && referenceCount > 0 && candidates.length > 0);
+
+  return (
+    <DialogShell
+      actions={
+        <>
+          <button className="command subtle" disabled={isBusy} onClick={close} type="button">
+            {t("actions.cancel")}
+          </button>
+          {type === "delete" && referenceCount > 0 && targetId && (
+            <button className="command danger" disabled={isBusy} onClick={() => void replaceAndDelete(proxy, targetId)} type="button">
+              {t("proxy.references.replaceAndDelete")}
+            </button>
+          )}
+          {type === "delete" && referenceCount === 0 && (
+            <button className="command danger" disabled={isBusy} onClick={() => void deleteProxy(proxy)} type="button">
+              {t("actions.delete")}
+            </button>
+          )}
+          {type === "replace" && (
+            <button className="command primary" disabled={!targetId || isBusy} onClick={() => void replaceReferences(proxy, targetId)} type="button">
+              {t("actions.replaceReferences")}
+            </button>
+          )}
+          {type === "unbind" && (
+            <button className="command danger" disabled={isBusy} onClick={() => void unbindReferences(proxy)} type="button">
+              {t("actions.unbindReferences")}
+            </button>
+          )}
+        </>
+      }
+      close={close}
+      closeDisabled={isBusy}
+      description={t(bodyKey, { count: referenceCount })}
+      labelledBy="proxy-reference-title"
+      panelClassName="reference-panel"
+      t={t}
+      title={t(titleKey, { name: proxy.name })}
+    >
+      <div className="reference-summary">
+        <span>{t("proxy.references.currentProxy")}</span>
+        <strong>{proxy.name}</strong>
+        <small className="mono-cell">{maskManagedProxyForDisplay(proxy)}</small>
+      </div>
+      {shouldChooseReplacement && (
+        <Field label={t("proxy.references.target")}>
+          <SelectMenu
+            disabled={candidates.length === 0}
+            value={targetId}
+            placeholder={t("proxy.references.noTarget")}
+            options={candidates.map((candidate) => ({
+              value: candidate.id,
+              label: candidate.name,
+              meta: `${candidate.scheme}://${candidate.host}:${candidate.port}`,
+            }))}
+            onChange={setTargetId}
+          />
+        </Field>
+      )}
+      {type === "delete" && referenceCount > 0 && (
+        <div className="reference-action-grid">
+          <button
+            className="command"
+            onClick={() => {
+              showProfiles(proxy.id);
+              close();
+            }}
+            type="button"
+          >
+            {t("proxy.actions.viewProfiles")}
+          </button>
+          <button className="command danger subtle" disabled={isBusy} onClick={() => void unbindAndDelete(proxy)} type="button">
+            {t("proxy.references.unbindAndDelete")}
+          </button>
+        </div>
+      )}
+      {type === "delete" && referenceCount === 0 && <p className="muted-line">{t("proxy.delete.body")}</p>}
+    </DialogShell>
+  );
+}
+
+type ProxyEditorDraft = {
+  canSave: boolean;
+  chained: boolean;
+  draft: ProxyEntity;
+  hostError: string;
+  isXray: boolean;
+  nameError: string;
+  portError: string;
+  previewDraft: ProxyEntity;
+  proxyUrlError: string;
+  proxyUrlText: string;
+  saveInput: Partial<ProxyEntity>;
+  shareLinkError: string;
+  updateParts: (patch: Partial<ProxyEntity>) => void;
+  updateRaw: (value: string) => void;
+  utlsApplies: boolean;
+};
+
+/** The draft, validation and preview shared by the single-proxy editor and the add-proxy dialog. */
+function useProxyDraftEditor(proxy: ProxyEntity | undefined, t: (key: TranslationKey) => string): ProxyEditorDraft {
+  const [draft, setDraft] = useState<ProxyEntity>(() => proxyEditorInitialDraft(proxy));
+  const [proxyUrlText, setProxyUrlText] = useState(() => proxyUrlFromParts(draft));
+  const [proxyUrlError, setProxyUrlError] = useState("");
+  const isXray = draft.scheme === "xray";
+  const chained = Boolean(draft.preProxyId);
+  // An https proxy also gets streamSettings.security = "tls" (see xrayOutboundFromProxy), so
+  // applyUtlsFingerprint emits a ClientHello on that hop too.
+  const utlsApplies = isXray || chained || draft.scheme === "https";
+  const shareLinkAnalysis = isXray ? analyzeXrayShareLink(draft.shareLink) : undefined;
+  const nameError = draft.name.trim() || shareLinkAnalysis?.parsed ? "" : t("proxy.editor.validationName");
+  const hostError = isXray || draft.host.trim() ? "" : t("proxy.editor.validationHost");
+  const portError = isXray || draft.port.trim() ? "" : t("proxy.editor.validationPort");
+  const shareLinkError = isXray ? xrayShareLinkError(draft.shareLink, t) : "";
+  const canSave = !nameError && !hostError && !portError && !proxyUrlError && !shareLinkError;
+  // What the server will store for an xray entry: host/port follow the link, the name falls back to the
+  // link's remark, and the URL credentials never apply.
+  const previewDraft: ProxyEntity = shareLinkAnalysis?.parsed
+    ? {
+        ...draft,
+        host: shareLinkAnalysis.parsed.summary.address,
+        port: String(shareLinkAnalysis.parsed.summary.port),
+        username: "",
+        password: "",
+      }
+    : draft;
+  const saveInput: Partial<ProxyEntity> = isXray
+    ? { ...previewDraft, name: draft.name.trim() || shareLinkAnalysis?.parsed?.summary.remark || previewDraft.host }
+    : draft;
+
+  const updateParts = (patch: Partial<ProxyEntity>) => {
+    const next = { ...draft, ...patch };
+    setDraft(next);
+    setProxyUrlError("");
+    setProxyUrlText(proxyUrlFromParts(next));
+  };
+
+  const updateRaw = (value: string) => {
+    const shareProtocol = detectXrayShareLinkProtocol(value);
+    if (shareProtocol && shareProtocol !== "socks" && shareProtocol !== "http") {
+      setProxyUrlText("");
+      setProxyUrlError("");
+      setDraft((current) => ({ ...current, scheme: "xray", shareLink: value.trim(), host: "", port: "", username: "", password: "" }));
+      return;
+    }
+    const parsed = parseProxyUrlInput(value);
+    setProxyUrlText(value);
+    setProxyUrlError(value.trim() && !parsed ? t("error.proxyUrlInvalid") : "");
+    if (!value.trim()) return;
+    if (!parsed) return;
+    setDraft((current) => ({
+      ...current,
+      ...parsed,
+    }));
+  };
+
+  return {
+    canSave,
+    chained,
+    draft,
+    hostError,
+    isXray,
+    nameError,
+    portError,
+    previewDraft,
+    proxyUrlError,
+    proxyUrlText,
+    saveInput,
+    shareLinkError,
+    updateParts,
+    updateRaw,
+    utlsApplies,
+  };
+}
+
+function ProxyEditorFields({
+  editor,
+  globalUtlsFingerprint,
+  locale,
+  proxy,
+  proxies,
+  t,
+}: {
+  editor: ProxyEditorDraft;
+  globalUtlsFingerprint?: XrayUtlsFingerprint;
+  /** The display locale, so the front-proxy check summary matches the proxy table's column. */
+  locale?: Locale;
+  proxy?: ProxyEntity;
+  proxies: ProxyEntity[];
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  const { chained, draft, hostError, isXray, nameError, portError, previewDraft, proxyUrlError, proxyUrlText, updateParts, updateRaw, utlsApplies } = editor;
+  return (
+    <>
+      <div className="form-grid two compact-section">
+        <Field label={t("proxy.editor.name")} wide error={nameError}>
+          <input value={draft.name} onChange={(event) => updateParts({ name: event.target.value })} placeholder={t("proxy.editor.namePlaceholder")} />
+        </Field>
+        <Field label={t("form.scheme")} wide help={t("tips.proxyScheme")}>
+          <Segmented<ProxyScheme>
+            value={draft.scheme}
+            options={[
+              { value: "http", label: "HTTP" },
+              { value: "https", label: "HTTPS" },
+              { value: "socks5", label: "SOCKS5" },
+              { value: "xray", label: t("form.schemeXray") },
+            ]}
+            onChange={(scheme) => updateParts({ scheme })}
+          />
+        </Field>
+        {isXray ? (
+          <XrayShareLinkField onChange={(shareLink) => updateParts({ shareLink })} t={t} value={draft.shareLink} />
+        ) : (
+          <>
+            <Field label={t("form.proxyUrl")} wide error={proxyUrlError}>
+              <input value={proxyUrlText} onChange={(event) => updateRaw(event.target.value)} placeholder={t("placeholder.proxyUrl")} />
+            </Field>
+            <Field label={t("form.host")} error={hostError}>
+              <input value={draft.host} onChange={(event) => updateParts({ host: event.target.value })} placeholder={t("placeholder.proxyHost")} />
+            </Field>
+            <Field label={t("form.port")} error={portError}>
+              <input value={draft.port} onChange={(event) => updateParts({ port: event.target.value })} placeholder={t("placeholder.proxyPort")} />
+            </Field>
+            <Field label={t("form.username")}>
+              <input autoComplete="off" value={draft.username} onChange={(event) => updateParts({ username: event.target.value })} placeholder={t("placeholder.proxyUsername")} />
+            </Field>
+            <Field label={t("form.password")}>
+              <PasswordInput value={draft.password} onChange={(password) => updateParts({ password })} t={t} />
+            </Field>
+          </>
+        )}
+        <Field label={t("form.bypass")} wide>
+          <input value={draft.bypass} onChange={(event) => updateParts({ bypass: event.target.value })} placeholder={t("placeholder.proxyBypass")} />
+        </Field>
+        <PreProxyField
+          excludeId={proxy?.id}
+          locale={locale}
+          onChange={(preProxyId) => updateParts({ preProxyId })}
+          proxies={proxies}
+          t={t}
+          value={draft.preProxyId}
+        />
+        {(isXray || chained) && (
+          <IpStrategyField onChange={(ipStrategy) => updateParts({ ipStrategy })} t={t} value={draft.ipStrategy} />
+        )}
+        {utlsApplies && (
+          <UtlsPreferenceField globalUtls={globalUtlsFingerprint} onChange={(utlsFingerprint) => updateParts({ utlsFingerprint })} t={t} value={draft.utlsFingerprint} />
+        )}
+        <Field label={t("form.notes")} wide>
+          <textarea value={draft.notes} onChange={(event) => updateParts({ notes: event.target.value })} placeholder={t("placeholder.notes")} />
+        </Field>
+        <ToggleField
+          checked={draft.status !== "disabled"}
+          label={t("proxy.editor.status")}
+          onChange={(enabled) => updateParts({ status: enabled ? "enabled" : "disabled" })}
+        />
+      </div>
+      <div className="proxy-editor-preview">
+        <span>{t("proxy.editor.preview")}</span>
+        <strong className="mono-cell">{maskManagedProxyForDisplay(previewDraft)}</strong>
+        {chained && <small>{t("proxy.xray.chained", { name: proxies.find((item) => item.id === draft.preProxyId)?.name ?? draft.preProxyId })}</small>}
+      </div>
+    </>
+  );
+}
+
+export function ProxyEditorDialog({
+  busy,
+  close,
+  globalUtlsFingerprint,
+  locale,
+  mode,
+  proxies = [],
+  proxy,
+  saveProxy,
+  t,
+}: {
+  busy: string;
+  close: () => void;
+  /** The global `xray.utlsFingerprint`, so the inherit option can say what it currently resolves to. */
+  globalUtlsFingerprint?: XrayUtlsFingerprint;
+  /** The display locale, so the front-proxy check summary matches the proxy table's column. */
+  locale?: Locale;
+  mode: "create" | "edit";
+  /** The library, for the front-proxy picker; the entry being edited is excluded from it. */
+  proxies?: ProxyEntity[];
+  proxy?: ProxyEntity;
+  saveProxy: (mode: "create" | "edit", input: Partial<ProxyEntity>, proxy?: ProxyEntity) => Promise<unknown>;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  const editor = useProxyDraftEditor(proxy, t);
+  const busyKey = mode === "create" ? "proxy-create" : proxy ? `proxy-update:${proxy.id}` : "proxy-update";
+  const isBusy = busy === busyKey;
+
+  return (
+    <DialogShell
+      actions={
+        <>
+          <button className="command subtle" disabled={isBusy} onClick={close} type="button">
+            {t("actions.cancel")}
+          </button>
+          <button className="command primary" disabled={!editor.canSave || isBusy} onClick={() => void saveProxy(mode, editor.saveInput, proxy)} type="button">
+            {t("actions.save")}
+          </button>
+        </>
+      }
+      bodyClassName="modal-body proxy-editor-body"
+      close={close}
+      closeDisabled={isBusy}
+      description={t("proxy.editor.description")}
+      labelledBy="proxy-editor-title"
+      panelClassName="proxy-editor-panel"
+      t={t}
+      title={t(mode === "create" ? "proxy.editor.createTitle" : "proxy.editor.editTitle")}
+    >
+      <ProxyEditorFields editor={editor} globalUtlsFingerprint={globalUtlsFingerprint} locale={locale} proxy={proxy} proxies={proxies} t={t} />
+    </DialogShell>
+  );
+}
+
+/** Add one proxy by hand or import share links in bulk; subscriptions are created from their panel. */
+export function ProxyAddDialog({
+  busy,
+  close,
+  globalUtlsFingerprint,
+  importLinks,
+  locale,
+  proxies = [],
+  saveProxy,
+  t,
+}: {
+  busy: string;
+  close: () => void;
+  globalUtlsFingerprint?: XrayUtlsFingerprint;
+  importLinks: (text: string) => Promise<ProxyImportOutcome>;
+  /** The display locale, so the front-proxy check summary matches the proxy table's column. */
+  locale?: Locale;
+  /** The library, for the front-proxy picker. */
+  proxies?: ProxyEntity[];
+  saveProxy: (input: Partial<ProxyEntity>) => Promise<boolean>;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  const [tab, setTab] = useState<"single" | "batch">("single");
+  const editor = useProxyDraftEditor(undefined, t);
+  const [text, setText] = useState("");
+  const [outcome, setOutcome] = useState<ProxyImportOutcome | null>(null);
+  const isBusy = busy === "proxy-create" || busy === "proxy-import";
+  const result = outcome?.result;
+  const error = outcome?.error;
+  const canSubmit = tab === "single" ? editor.canSave : text.trim().length > 0;
+  // A result belongs to the tab that produced it; switching tabs must not carry it over.
+  useEffect(() => {
+    setOutcome(null);
+  }, [tab]);
+  // A pasted provider address is a subscription, not a node; say so instead of silently saving it as
+  // an HTTP proxy with its path and token dropped.
+  const pastedSubscriptionUrl = /https?:\/\/\S+[/?]\S*/i.test(text) && !/https?:\/\/\S+@/i.test(text);
+
+  async function submit() {
+    if (tab === "single") {
+      if (await saveProxy(editor.saveInput)) close();
+      return;
+    }
+    setOutcome(await importLinks(text));
+  }
+
+  return (
+    <DialogShell
+      actions={
+        <>
+          <button className="command subtle" disabled={isBusy} onClick={close} type="button">
+            {outcome ? t("actions.close") : t("actions.cancel")}
+          </button>
+          <button className="command primary" disabled={!canSubmit || isBusy} onClick={() => void submit()} type="button">
+            {tab === "single" ? t("actions.save") : t("proxy.import.run")}
+          </button>
+        </>
+      }
+      bodyClassName="modal-body proxy-editor-body"
+      close={close}
+      closeDisabled={isBusy}
+      labelledBy="proxy-add-title"
+      panelClassName="proxy-editor-panel"
+      t={t}
+      title={t("proxy.import.title")}
+    >
+      <div className="proxy-add-tabs">
+        <Segmented<"single" | "batch">
+          value={tab}
+          options={[
+            { value: "single", label: t("proxy.add.single") },
+            { value: "batch", label: t("proxy.add.batch") },
+          ]}
+          onChange={setTab}
+        />
+      </div>
+      {tab === "single" ? (
+        <ProxyEditorFields editor={editor} globalUtlsFingerprint={globalUtlsFingerprint} locale={locale} proxies={proxies} t={t} />
+      ) : (
+        <>
+          <div className="form-grid two compact-section">
+            <Field label={t("proxy.import.links")} wide help={pastedSubscriptionUrl ? t("proxy.import.pastedSubscriptionHint") : undefined}>
+              <textarea
+                className="xray-share-link-input"
+                disabled={isBusy}
+                onChange={(event) => setText(event.target.value)}
+                placeholder={t("proxy.import.linksPlaceholder")}
+                rows={8}
+                spellCheck={false}
+                value={text}
+              />
+            </Field>
+          </div>
+          {error !== undefined && (
+            <div className="proxy-editor-preview proxy-import-result is-error" role="alert">
+              <span>{t("proxy.import.errorTitle")}</span>
+              <strong>{proxyImportErrorMessage(error, t)}</strong>
+              <small>{t("proxy.import.errorHint")}</small>
+            </div>
+          )}
+          {result && (
+            <div className="proxy-editor-preview proxy-import-result">
+              <span>{t("proxy.import.resultTitle")}</span>
+              <strong>
+                {t("proxy.import.result", {
+                  imported: result.imported.length,
+                  skipped: result.skipped,
+                  failed: result.failedTotal,
+                  total: result.total,
+                })}
+              </strong>
+              {(result.adopted ?? 0) > 0 && <small>{t("proxy.import.adopted", { count: result.adopted ?? 0 })}</small>}
+              {(result.kept ?? 0) > 0 && <small>{t("proxy.import.kept", { count: result.kept ?? 0 })}</small>}
+              {(result.removed ?? 0) > 0 && <small>{t("proxy.import.removed", { count: result.removed ?? 0 })}</small>}
+              {(result.detached ?? 0) > 0 && <small>{t("proxy.import.detached", { count: result.detached ?? 0 })}</small>}
+              {result.removalSkipped && <small className="proxy-import-warning">{t("proxy.import.removalSkipped", { count: result.failedTotal })}</small>}
+              {result.failedTotal > result.failed.length && (
+                <small>{t("proxy.import.failedTotal", { failed: result.failedTotal, shown: result.failed.length })}</small>
+              )}
+              {result.failed.length > 0 && (
+                <ul className="proxy-import-failures">
+                  {result.failed.slice(0, 20).map((failure, index) => (
+                    <li key={`${failure.link}-${index}`}>
+                      <span className="mono-cell">{failure.link}</span>
+                      <small>{failure.error}</small>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </DialogShell>
+  );
+}
+
+function SubscriptionIntervalSelect({
+  disabled,
+  onChange,
+  t,
+  value,
+}: {
+  disabled?: boolean;
+  onChange: (hours: number) => void;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  value: number;
+}) {
+  const options = PROXY_SUBSCRIPTION_INTERVAL_HOURS.includes(value as (typeof PROXY_SUBSCRIPTION_INTERVAL_HOURS)[number])
+    ? [...PROXY_SUBSCRIPTION_INTERVAL_HOURS]
+    : [...PROXY_SUBSCRIPTION_INTERVAL_HOURS, value].sort((a, b) => a - b);
+  return (
+    <SelectMenu<string>
+      disabled={disabled}
+      onChange={(next) => onChange(Number(next))}
+      options={options.map((hours) => ({ value: String(hours), label: t("subscription.intervalHours", { count: hours }) }))}
+      placeholder={t("subscription.interval")}
+      value={String(value)}
+    />
+  );
+}
+
+/** Create or edit a remembered subscription; creating also reads the address once. */
+export function ProxySubscriptionDialog({
+  busy,
+  close,
+  mode,
+  saveSubscription,
+  subscription,
+  t,
+}: {
+  busy: string;
+  close: () => void;
+  mode: "create" | "edit";
+  saveSubscription: (mode: "create" | "edit", input: Partial<ProxySubscriptionEntity>, subscription?: ProxySubscriptionEntity) => Promise<void>;
+  subscription?: ProxySubscriptionEntity;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  const [name, setName] = useState(subscription?.name ?? "");
+  const [url, setUrl] = useState(subscription?.url ?? "");
+  const [autoRefresh, setAutoRefresh] = useState(subscription?.autoRefresh ?? true);
+  const [refreshIntervalHours, setRefreshIntervalHours] = useState(subscription?.refreshIntervalHours ?? DEFAULT_PROXY_SUBSCRIPTION_INTERVAL_HOURS);
+  const [notes, setNotes] = useState(subscription?.notes ?? "");
+  const busyKey = mode === "create" ? "subscription-create" : subscription ? `subscription-update:${subscription.id}` : "subscription-update";
+  const isBusy = busy === busyKey;
+  const urlValid = /^https?:\/\/\S+$/i.test(url.trim());
+  // Only a typed address is judged; editing may leave it blank to keep the one on file (the list
+  // never carried it), and a fresh dialog should not open with a complaint.
+  const urlError = url.trim() && !urlValid ? t("subscription.validationUrl") : "";
+  const canSave = mode === "create" ? urlValid : !urlError;
+
+  async function submit() {
+    if (!canSave) return;
+    const input: Partial<ProxySubscriptionEntity> = {
+      name: name.trim(),
+      autoRefresh,
+      refreshIntervalHours,
+      notes: notes.trim(),
+      ...(url.trim() ? { url: url.trim() } : {}),
+    };
+    await saveSubscription(mode, input, subscription);
+  }
+
+  return (
+    <DialogShell
+      actions={
+        <>
+          <button className="command subtle" disabled={isBusy} onClick={close} type="button">
+            {t("actions.cancel")}
+          </button>
+          <button className="command primary" disabled={!canSave || isBusy} type="submit">
+            {mode === "create" ? t("subscription.saveAndRefresh") : t("actions.save")}
+          </button>
+        </>
+      }
+      asForm
+      bodyClassName="modal-body proxy-editor-body"
+      close={close}
+      closeDisabled={isBusy}
+      description={t("subscription.body")}
+      labelledBy="proxy-subscription-title"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
+      }}
+      panelClassName="proxy-editor-panel"
+      t={t}
+      title={mode === "create" ? t("subscription.new") : t("subscription.edit")}
+    >
+      <div className="form-grid two compact-section">
+        <Field label={t("subscription.url")} wide help={t("subscription.urlHelp")} error={urlError}>
+          <input
+            autoFocus={mode === "create"}
+            disabled={isBusy}
+            onChange={(event) => setUrl(event.target.value)}
+            placeholder={mode === "edit" ? t("subscription.urlUnchanged") : t("subscription.urlPlaceholder")}
+            value={url}
+          />
+        </Field>
+        <Field label={t("subscription.name")}>
+          <input
+            disabled={isBusy}
+            onChange={(event) => setName(event.target.value)}
+            placeholder={t("subscription.namePlaceholder")}
+            value={name}
+          />
+        </Field>
+        <Field label={t("subscription.interval")}>
+          <SubscriptionIntervalSelect disabled={isBusy || !autoRefresh} onChange={setRefreshIntervalHours} t={t} value={refreshIntervalHours} />
+        </Field>
+        <div className="wide">
+          <ToggleField
+            checked={autoRefresh}
+            disabled={isBusy}
+            help={t("subscription.autoRefreshHelp")}
+            label={t("subscription.autoRefresh")}
+            onChange={setAutoRefresh}
+          />
+        </div>
+        <Field label={t("subscription.notes")} wide>
+          <input disabled={isBusy} onChange={(event) => setNotes(event.target.value)} value={notes} />
+        </Field>
+      </div>
+    </DialogShell>
+  );
+}

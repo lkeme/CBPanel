@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.mdx"
+      - "README*"
+      - "CHANGELOG*"
+      - "LICENSE"
+      - "NOTICE*"
+      - "docs/**"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE*"
+  pull_request:
+  workflow_dispatch:
+
+# Read-only checks; nothing here needs to write to the repository.
+permissions:
+  contents: read
+
+# A newer push or PR update supersedes the previous check for the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, Test, Build
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check desktop Rust crate
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
+
+      - name: Test desktop Rust crate
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Bundle baseline
+        run: npm run bundle:baseline

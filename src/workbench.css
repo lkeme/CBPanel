@@ -1,0 +1,1819 @@
+/* Product workbench layer: neutral surfaces, one calm blue accent, high-contrast readable type.
+   The bundled UI font (SarasaUiSC) ships a single Regular weight, so this layer only uses
+   400/700 — intermediate weights fall back to Regular and render thin and fuzzy. */
+:root {
+  --font-size-base: 15px;
+  --font-size-table: 14px;
+  --font-size-code: 13px;
+  --background: #f1f4fa;
+  --foreground: #1d2129;
+  --foreground-muted: #4c5361;
+  --foreground-soft: #767d8b;
+  --surface: #ffffff;
+  --surface-muted: #f6f7f9;
+  --surface-raised: #ffffff;
+  --surface-elevated: #ffffff;
+  --surface-strong: #e9ebf0;
+  --border: #d9dce3;
+  --border-subtle: #e7e9ee;
+  --border-strong: #c2c7d2;
+  --primary: #2e5ed6;
+  --primary-hover: #2650c2;
+  --primary-strong: #1e419e;
+  --primary-foreground: #ffffff;
+  --primary-soft: #ecf1fd;
+  --accent: #0c7b93;
+  --accent-soft: #e8f5f8;
+  --success: #0e8759;
+  --success-hover: #0b7049;
+  --success-soft: #e7f5ef;
+  --warning: #ad6809;
+  --warning-soft: #fbf3e2;
+  --danger: #c24040;
+  --danger-hover: #a83333;
+  --danger-soft: #fceded;
+  --info: #2e6bd8;
+  --info-soft: #ecf2fd;
+  --rail: #f6f8fc;
+  --rail-foreground: #1d2129;
+  --rail-muted: #4c5361;
+  --rail-active: #e8eefc;
+  --titlebar-background: #f8f9fb;
+  --titlebar-border: #d9dce3;
+  --table-header: #f2f5fb;
+  --table-row-hover: #f4f6fb;
+  --table-row-selected: #e9effc;
+  --focus-ring: rgba(46, 94, 214, 0.22);
+  --shadow-panel: 0 12px 30px rgba(23, 28, 40, 0.1);
+  --shadow-popover: 0 18px 44px rgba(23, 28, 40, 0.16);
+  --shadow-sheet: 0 24px 64px rgba(23, 28, 40, 0.22);
+  --shadow-card: 0 1px 2px rgba(23, 28, 40, 0.05);
+  --shadow-surface: 0 1px 2px rgba(23, 28, 40, 0.05);
+  --shadow-rail: none;
+  --radius: 10px;
+  --radius-control: 8px;
+  --control-height: 38px;
+  --row-height: 66px;
+  --table-pad-y: 11px;
+  /* Type scale: ratios of the settings-driven sizes, so Settings → 字体 scales the whole app. */
+  --text-xs: calc(var(--font-size-base) * 0.72);
+  --text-sm: calc(var(--font-size-base) * 0.78);
+  --text-md: calc(var(--font-size-base) * 0.8125);
+  --text-lg: calc(var(--font-size-base) * 0.875);
+  --text-brand: calc(var(--font-size-base) * 0.94);
+  --text-h1: calc(var(--font-size-base) * 1.625);
+  --table-text-xs: calc(var(--font-size-table) * 0.767);
+  --table-text-sm: calc(var(--font-size-table) * 0.833);
+  --table-text-md: calc(var(--font-size-table) * 0.867);
+  --table-text-lg: calc(var(--font-size-table) * 0.933);
+}
+
+:root[data-theme="dark"] {
+  --background: #0e1117;
+  --foreground: #e8eaf0;
+  --foreground-muted: #a4aab7;
+  --foreground-soft: #7c838f;
+  --surface: #161a21;
+  --surface-muted: #1a1f28;
+  --surface-raised: #1a1d23;
+  --surface-elevated: #1f222a;
+  --surface-strong: #262a33;
+  --border: #2a2e37;
+  --border-subtle: #22252d;
+  --border-strong: #3f4552;
+  --primary: #84a6f6;
+  --primary-hover: #9dbaf9;
+  --primary-strong: #b6c9fb;
+  --primary-foreground: #0f1a36;
+  --primary-soft: rgba(132, 166, 246, 0.15);
+  --accent: #56b6c9;
+  --accent-soft: rgba(86, 182, 201, 0.14);
+  --success: #55c394;
+  --success-hover: #74d3a9;
+  --success-soft: rgba(85, 195, 148, 0.13);
+  --warning: #e0b166;
+  --warning-soft: rgba(224, 177, 102, 0.13);
+  --danger: #e48383;
+  --danger-hover: #eb9c9c;
+  --danger-soft: rgba(228, 131, 131, 0.13);
+  --info: #82a6f6;
+  --info-soft: rgba(130, 166, 246, 0.14);
+  --rail: #12151c;
+  --rail-foreground: #e8eaf0;
+  --rail-muted: #a4aab7;
+  --rail-active: rgba(132, 166, 246, 0.16);
+  --titlebar-background: #121419;
+  --titlebar-border: #2a2e37;
+  --table-header: #1a1e26;
+  --table-row-hover: #1d2027;
+  --table-row-selected: rgba(132, 166, 246, 0.11);
+  --focus-ring: rgba(132, 166, 246, 0.32);
+  --shadow-panel: 0 16px 40px rgba(0, 0, 0, 0.4);
+  --shadow-popover: 0 18px 44px rgba(0, 0, 0, 0.5);
+  --shadow-sheet: 0 24px 64px rgba(0, 0, 0, 0.55);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-surface: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-rail: none;
+}
+
+body {
+  font-size: var(--font-size-base);
+  letter-spacing: 0;
+  background: linear-gradient(165deg, #f5f7fc 0%, var(--background) 45%, #edf1f9 100%);
+}
+
+:root[data-theme="dark"] body {
+  background: linear-gradient(165deg, #10131a 0%, var(--background) 45%, #0d111a 100%);
+}
+
+::selection {
+  color: var(--primary-strong);
+  background: var(--primary-soft);
+}
+
+button,
+a,
+input,
+textarea,
+select {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.app-shell {
+  grid-template-columns: 236px minmax(0, 1fr);
+  min-width: 0;
+  background: var(--background);
+}
+
+.app-shell.sidebar-collapsed {
+  grid-template-columns: 72px minmax(0, 1fr);
+}
+
+.sidebar {
+  gap: 20px;
+  padding: 20px 14px 14px;
+  background: var(--rail);
+  border-right-color: var(--border);
+  box-shadow: none;
+}
+
+.sidebar.collapsed {
+  gap: 18px;
+  padding: 20px 10px 14px;
+}
+
+.sidebar-brand {
+  min-height: 40px;
+  padding: 0 8px;
+  border-radius: 8px;
+}
+
+.sidebar-brand .brand-mark {
+  width: 40px;
+  height: 40px;
+}
+
+.sidebar.collapsed .sidebar-brand .brand-mark {
+  width: 44px;
+  height: 44px;
+}
+
+.sidebar-brand strong {
+  color: var(--rail-foreground);
+  font-size: var(--text-brand);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.sidebar-brand-versions {
+  margin-top: 2px;
+  color: var(--rail-muted);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.sidebar-create {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 14px;
+  color: var(--primary-foreground);
+  background: linear-gradient(180deg, #3f6fe4, #2b59cf);
+  border: 0;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--primary) 30%, transparent);
+  font-size: var(--text-md);
+  font-weight: 700;
+  transition: background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+.sidebar-create:hover {
+  background: linear-gradient(180deg, #4a7aec, #3160d8);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--primary) 30%, transparent);
+}
+
+.sidebar-create > span:not(.new-profile-icon) {
+  display: block;
+  height: auto;
+  padding: 0;
+  border: 0;
+}
+
+.sidebar-create .new-profile-icon {
+  display: grid;
+  place-items: center;
+}
+
+.sidebar.collapsed .sidebar-create {
+  width: 42px;
+  min-height: 42px;
+  padding: 0;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 20px;
+  min-height: 0;
+  padding: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.sidebar-nav-group {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.sidebar-nav-group-system {
+  margin-top: auto;
+}
+
+.sidebar-nav-label {
+  padding: 0 11px 7px;
+  color: var(--foreground-soft);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1;
+}
+
+.sidebar-button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 6px 10px;
+  color: var(--foreground-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  text-align: left;
+  transition: color var(--motion-fast) ease, background-color var(--motion-fast) ease;
+}
+
+.sidebar-button::before {
+  display: none;
+}
+
+.sidebar-button > svg {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  stroke-width: 1.8;
+}
+
+.sidebar-button > span {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sidebar-button strong {
+  overflow: hidden;
+  font-size: var(--text-lg);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-button small {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  min-width: 22px;
+  min-height: 20px;
+  padding: 0 6px;
+  color: var(--foreground-muted);
+  background: var(--surface-strong);
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.sidebar-button.active small {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 14%, var(--surface));
+}
+
+.sidebar-button:hover {
+  color: var(--rail-foreground);
+  background: var(--surface-strong);
+}
+
+.sidebar-button.active {
+  color: var(--primary);
+  background: var(--rail-active);
+  box-shadow: inset 2px 0 0 var(--primary);
+}
+
+.sidebar-button.active strong {
+  font-weight: 700;
+}
+
+.sidebar-button.active small {
+  color: var(--primary);
+}
+
+.sidebar.collapsed .sidebar-nav {
+  gap: 18px;
+  width: 100%;
+}
+
+.sidebar.collapsed .sidebar-nav-group {
+  gap: 5px;
+}
+
+.sidebar.collapsed .sidebar-nav-label {
+  display: none;
+}
+
+.sidebar.collapsed .sidebar-button {
+  justify-content: center;
+  width: 42px;
+  min-height: 42px;
+  padding: 0;
+}
+
+.sidebar-footer {
+  gap: 2px;
+  padding-top: 10px;
+  border-top-color: var(--border);
+}
+
+/* The footer reuses the nav row's box model exactly (18px icon, 10px gap, 6px 10px padding), so the
+   collapse and settings rows share the trash row's icon centre and label edge instead of drifting. */
+.sidebar-utility {
+  display: flex;
+  align-items: center;
+  grid-template-columns: none;
+  gap: 10px;
+  min-height: 40px;
+  padding: 6px 10px;
+  color: var(--rail-muted);
+  border-radius: 8px;
+  font-size: var(--text-sm);
+}
+
+.sidebar-utility > svg {
+  flex: 0 0 auto;
+  justify-self: auto;
+  width: 18px;
+  height: 18px;
+  stroke-width: 1.8;
+}
+
+.sidebar-utility-icon {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar-utility-icon > svg {
+  width: 18px;
+  height: 18px;
+  stroke-width: 1.8;
+}
+
+.sidebar-utility-dot {
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 8px;
+  height: 8px;
+  background: var(--warning);
+  border: 2px solid var(--rail);
+  border-radius: 50%;
+  box-sizing: content-box;
+  pointer-events: none;
+}
+
+.sidebar.collapsed .sidebar-nav,
+.sidebar.collapsed .sidebar-footer {
+  width: 42px;
+}
+
+.sidebar.collapsed .sidebar-utility {
+  grid-template-columns: none;
+  justify-content: center;
+  width: 42px;
+  min-height: 42px;
+  padding: 0;
+}
+
+.sidebar.collapsed .sidebar-utility > svg,
+.sidebar.collapsed .sidebar-utility-icon > svg {
+  justify-self: auto;
+}
+
+.sidebar-utility:hover,
+.sidebar-utility.active,
+.sidebar-utility[aria-pressed="true"] {
+  color: var(--rail-foreground);
+  background: var(--surface-strong);
+}
+
+.workbench {
+  gap: 16px;
+  padding: 24px 28px 22px;
+  overflow: hidden;
+}
+
+/* Fill the workspace at any window size. A capped column left the content floating in the middle
+   once the window was maximized, with the table no longer following the window edges. */
+.workbench > * {
+  width: 100%;
+  min-width: 0;
+}
+
+.workspace-header {
+  flex: 0 0 auto;
+  align-items: center;
+  min-height: 52px;
+}
+
+/* One title row: icon, h1, then the one-line explanation beside it. The breadcrumb duplicated the
+   h1 and the icon, so the header now carries a single identity per view. */
+.workspace-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+
+.workspace-title-icon {
+  display: grid;
+  flex: 0 0 auto;
+  align-self: center;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  color: var(--primary);
+  background: linear-gradient(145deg, var(--primary-soft), color-mix(in srgb, var(--accent) 12%, var(--surface)));
+  border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border));
+  border-radius: 9px;
+}
+
+.workspace-header h1 {
+  flex: 0 0 auto;
+  font-size: var(--text-h1);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.18;
+}
+
+.workspace-header p {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--foreground-muted);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.offline-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 13px;
+  color: var(--warning);
+  background: var(--warning-soft);
+  border: 1px solid color-mix(in srgb, var(--warning) 26%, var(--border));
+  border-radius: 9px;
+  font-size: var(--text-md);
+}
+
+.offline-banner strong {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: var(--text-sm);
+}
+
+.workbench-toolbar {
+  flex: 0 0 auto;
+  min-height: 40px;
+  gap: 12px;
+}
+
+.toolbar-left,
+.toolbar-actions {
+  gap: 6px;
+}
+
+.toolbar-actions {
+  gap: 2px;
+  padding: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.search-box {
+  min-height: 38px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: none;
+  transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+.search-box:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.workbench-toolbar .search-box {
+  flex: 0 1 410px;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  min-width: 220px;
+}
+
+.search-shortcut {
+  padding: 3px 6px;
+  color: var(--foreground-soft);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.search-box input {
+  font-size: var(--text-md);
+}
+
+.filter-chip {
+  min-height: 36px;
+  padding-inline: 12px;
+  color: var(--foreground-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: var(--text-md);
+  font-weight: 400;
+}
+
+.filter-chip:hover {
+  color: var(--foreground);
+  background: var(--surface-strong);
+}
+
+.filter-chip.active {
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: transparent;
+  font-weight: 700;
+}
+
+.filter-chip.warning.active {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.icon-button {
+  color: var(--foreground-muted);
+  border-radius: 7px;
+}
+
+.toolbar-actions .icon-button {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  border: 0;
+}
+
+.icon-button:hover {
+  color: var(--foreground);
+  background: var(--surface-strong);
+}
+
+.filter-panel {
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-card);
+}
+
+.batch-bar {
+  border-radius: 10px;
+  box-shadow: var(--shadow-card);
+}
+
+.command {
+  min-height: 34px;
+  border-radius: 8px;
+  font-size: var(--text-md);
+  font-weight: 700;
+  box-shadow: none;
+}
+
+.command.primary {
+  background: linear-gradient(180deg, #3f6fe4, #2b59cf);
+  border-color: transparent;
+}
+
+.command.primary:hover {
+  background: linear-gradient(180deg, #4a7aec, #3160d8);
+  border-color: transparent;
+}
+
+.command.subtle {
+  font-weight: 400;
+  border-color: var(--border);
+}
+
+.main-grid {
+  flex: 1 1 auto;
+  gap: 16px;
+  min-height: 0;
+}
+
+.workbench-content {
+  min-height: 0;
+}
+
+.table-surface,
+.module-surface,
+.registry-list-surface {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-surface);
+}
+
+.table-surface {
+  overflow: hidden;
+}
+
+.profile-table {
+  font-size: var(--font-size-table);
+}
+
+.profile-table-row.table-head {
+  min-height: 42px;
+  color: var(--foreground-muted);
+  background: var(--table-header);
+  border-bottom-color: var(--border);
+  font-size: var(--table-text-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.profile-table-row:not(.table-head) {
+  min-height: var(--row-height);
+  background: var(--surface);
+  border-bottom-color: var(--border-subtle);
+  transition: background-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+.profile-table-row:not(.table-head):last-child {
+  border-bottom: 0;
+}
+
+.profile-table-row:not(.table-head):hover {
+  background: var(--table-row-hover);
+}
+
+.profile-table-row.active {
+  background: var(--table-row-selected);
+  box-shadow: inset 2px 0 0 var(--primary);
+}
+
+.cell {
+  color: var(--foreground-muted);
+  font-size: var(--table-text-md);
+}
+
+.table-head .cell {
+  color: var(--foreground-muted);
+  font-size: var(--table-text-xs);
+}
+
+.name-cell-button {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  text-align: left;
+}
+
+.name-cell-button:focus-visible {
+  outline-offset: 4px;
+}
+
+.name-cell-text strong {
+  color: var(--foreground);
+  font-size: var(--table-text-lg);
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.name-cell-text small {
+  margin-top: 3px;
+  color: var(--foreground-muted);
+  font-size: var(--table-text-sm);
+  line-height: 1.35;
+}
+
+.profile-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  font-size: var(--table-text-xs);
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--entity-color, var(--primary)) 16%, transparent);
+}
+
+.profile-avatar-dot {
+  border-width: 2px;
+}
+
+.row-primary {
+  min-height: 32px;
+  padding-inline: 12px;
+  color: var(--primary);
+  background: var(--primary-soft);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: var(--table-text-sm);
+  font-weight: 700;
+  box-shadow: none;
+}
+
+.row-primary:hover {
+  color: var(--primary-foreground);
+  background: linear-gradient(180deg, #3f6fe4, #2b59cf);
+}
+
+.row-primary.danger {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.row-primary.danger:hover {
+  color: var(--danger-foreground);
+  background: var(--danger);
+}
+
+.table-pagination {
+  flex-wrap: wrap;
+  min-height: 56px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border-top-color: var(--border);
+}
+
+.table-pagination .pagination-controls {
+  flex-wrap: wrap;
+}
+
+.pagination-summary,
+.pagination-controls {
+  font-size: var(--text-sm);
+}
+
+.pagination-size-options button,
+.page-indicator {
+  border-radius: 6px;
+}
+
+.profile-empty-state {
+  display: grid;
+  grid-column: 1 / -1;
+  min-height: 390px;
+  place-items: center;
+}
+
+.profile-empty-state .empty-panel {
+  min-height: 0;
+  padding: 48px 24px;
+}
+
+.empty-panel {
+  gap: 10px;
+}
+
+.empty-panel-icon {
+  width: 52px;
+  height: 52px;
+  margin-bottom: 6px;
+  color: var(--primary);
+  background: var(--primary-soft);
+  border: 0;
+  border-radius: 14px;
+}
+
+.empty-panel-title {
+  color: var(--foreground);
+  font-size: var(--font-size-base);
+  font-weight: 700;
+}
+
+.empty-panel-description {
+  max-width: 400px;
+  color: var(--foreground-muted);
+  font-size: var(--text-md);
+  line-height: 1.65;
+}
+
+.empty-panel-action {
+  margin-top: 10px;
+}
+
+.profile-table-loading {
+  min-height: 430px;
+  padding: 28px;
+}
+
+.profile-table-loading .loading-skeleton {
+  width: 100%;
+  max-width: none;
+}
+
+.side-section {
+  padding: 16px;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.section-title h2 {
+  font-size: var(--text-md);
+  font-weight: 700;
+}
+
+/* Keep the original chip language: small tiles in an auto-fit grid, horizontal wherever used. */
+.summary-chip {
+  padding: 9px 10px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+
+.summary-chip dt {
+  color: var(--foreground-muted);
+  font-size: var(--text-sm);
+}
+
+.summary-chip dd {
+  font-size: var(--text-md);
+  font-weight: 700;
+}
+
+/* Registry pages keep their original multi-column card grid; entity rows stay cards. */
+.module-frame {
+  gap: 14px;
+}
+
+.registry-toolbar {
+  min-height: 40px;
+}
+
+/* The card pins toolbar and pagination; the rows scroll inside it. Without this the rows
+   outgrew the card and the pagination poked out of the card's bottom edge. */
+.registry-list-surface {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.registry-list-surface > .proxy-table-toolbar {
+  flex: 0 0 auto;
+}
+
+.registry-list-surface > .proxy-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.registry-list-surface > .registry-pagination {
+  flex: 0 0 auto;
+}
+
+.module-surface {
+  box-shadow: var(--shadow-surface);
+}
+
+.entity-row {
+  background: var(--surface);
+  box-shadow: var(--shadow-card), inset 3px 0 0 color-mix(in srgb, var(--entity-color) 70%, transparent);
+}
+
+.entity-row:hover {
+  background: var(--surface);
+}
+
+.entity-row-name {
+  font-size: var(--text-md);
+  font-weight: 700;
+}
+
+.registry-pagination {
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.runtime-check-page {
+  min-height: 100%;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.runtime-check-hero {
+  padding: 24px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-surface);
+}
+
+.runtime-check-hero.missing {
+  background: var(--surface);
+  border-color: color-mix(in srgb, var(--warning) 32%, var(--border));
+}
+
+.runtime-check-hero-title-row strong {
+  font-size: var(--text-brand);
+  font-weight: 700;
+}
+
+.runtime-blocker {
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-panel);
+}
+
+/* Solid overlays: blur filters were a major source of the washed-out look. */
+.drawer-scrim {
+  background: rgba(15, 18, 25, 0.45);
+  backdrop-filter: none;
+}
+
+.drawer-header {
+  background: var(--surface);
+  backdrop-filter: none;
+}
+
+/* --- Profile editor drawer: one sheet per tab, divided sections, no nested cards. --- */
+.drawer-layer:has(.drawer-editor-shell) {
+  grid-template-columns: minmax(0, 1fr) minmax(680px, 920px);
+}
+
+.detail-drawer {
+  display: grid;
+  gap: 0;
+  padding: 16px 0;
+}
+
+/* Sections are separated by the divider each one already draws, not by margins between cards. */
+.detail-drawer .side-section {
+  margin: 0 16px;
+}
+
+.drawer-editor-shell .drawer-header {
+  padding: 14px 18px;
+}
+
+.drawer-editor-shell .drawer-header h2 {
+  font-size: var(--font-size-base);
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.compact-command-bar {
+  gap: 6px;
+}
+
+/* The header bar holds the same command vocabulary as the rest of the app, only shorter. Subtle
+   buttons keep their chip surface — stripping it turned Share/Import/Duplicate/Delete into bare
+   text, which read as disabled next to Save. */
+.compact-command-bar .command {
+  min-height: 32px;
+  padding: 0 11px;
+  font-size: var(--text-sm);
+}
+
+.editor-layout {
+  grid-template-columns: 152px minmax(0, 1fr);
+}
+
+/* The tab column is one flex column so the identity read-out can sit at its foot: tabs scroll if a
+   narrow window squeezes them, the read-out stays pinned. */
+.editor-side {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--surface-muted);
+  border-right: 1px solid var(--border);
+}
+
+.editor-section-nav {
+  display: grid;
+  flex: 1 1 auto;
+  align-content: start;
+  gap: 2px;
+  padding: 14px 10px;
+  overflow: auto;
+  background: transparent;
+  border-right: 0;
+}
+
+.editor-section-nav button {
+  min-height: 38px;
+  padding: 0 11px;
+  color: var(--foreground-muted);
+  border-radius: 8px;
+  font-size: var(--text-md);
+  font-weight: 400;
+}
+
+.editor-section-nav button:hover {
+  color: var(--foreground);
+  background: var(--surface-strong);
+}
+
+.editor-section-nav button.active {
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: transparent;
+  font-weight: 700;
+}
+
+.editor-scroll {
+  background: var(--surface);
+}
+
+/* Sections: divided blocks on one sheet, never cards inside cards. */
+.editor-form,
+.editor-grid {
+  display: grid;
+  gap: 0;
+  padding: 0;
+}
+
+.editor-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 18px;
+}
+
+.editor-grid > * {
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.editor-grid > .wide {
+  grid-column: 1 / -1;
+}
+
+.editor-form .form-section,
+.editor-form .preset-panel,
+.editor-form .extension-surface,
+.editor-form .quick-args-panel,
+.editor-grid .form-section,
+.editor-grid .quick-args-panel {
+  padding: 18px 22px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* The surface owns the section separator, and the panel inside it is a plain block: the tinted card
+   background it carried before the library became its own surface would now read as a box nested in
+   the sheet. */
+.editor-form .extension-surface .extension-binding-panel {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.editor-form > *:last-child,
+.editor-grid > *:last-child {
+  border-bottom: 0;
+}
+
+.form-section-header {
+  margin-bottom: 2px;
+}
+
+.form-section-header h3,
+.panel-heading > strong,
+.quick-arg-group-heading strong {
+  font-size: var(--text-md);
+  font-weight: 700;
+  color: var(--foreground);
+  letter-spacing: 0;
+}
+
+.form-section-header p,
+.panel-heading > span {
+  margin-top: 3px;
+  color: var(--foreground-muted);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+/* Section-level notes live under the title, everywhere — never right-aligned, never inline. */
+.panel-heading {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 12px;
+}
+
+.panel-heading > span {
+  margin-top: 0;
+}
+
+.form-grid.two {
+  gap: 14px 16px;
+  padding: 0;
+}
+
+.field {
+  gap: 6px;
+}
+
+.field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--foreground-muted);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+/* The one help pattern: a quiet icon beside the label. */
+.info-tip {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  padding: 0;
+  color: var(--foreground-soft);
+  background: transparent;
+  border: 0;
+}
+
+.info-tip:hover {
+  color: var(--primary);
+  background: transparent;
+}
+
+.editor-tab-content input:not([type="checkbox"]):not([type="radio"]),
+.editor-tab-content textarea,
+.editor-tab-content select {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  color: var(--foreground);
+  font-size: var(--text-md);
+  transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+.editor-tab-content input:focus,
+.editor-tab-content textarea:focus,
+.editor-tab-content select:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+  outline: 0;
+}
+
+.editor-tab-content input::placeholder,
+.editor-tab-content textarea::placeholder {
+  color: var(--foreground-soft);
+}
+
+/* Preset picker: the only real cards in the editor, because they are choices, not containers.
+   Each card carries its own "template" badge in the top-right corner, so a glance is enough to tell
+   it apart from a setting the draft already owns — and because the badge is out of the flow there,
+   a summary that wraps to a second line pushes nothing around: the title and the body start at the
+   same height on every card, and the grid row grows for the pair sharing it. */
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: stretch;
+}
+
+.preset-button {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  /* Equal-height cards per row: the pair sharing a row stretches together, so a summary that wraps
+     to a second line grows the row instead of deforming one card. */
+  height: 100%;
+  align-content: start;
+  gap: 4px;
+  padding: 12px 14px;
+  text-align: left;
+  background: var(--surface-muted);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-control);
+  transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease;
+}
+
+/* The badge is anchored in the corner and the title reserves room for it, so the two never collide
+   and the reserved space is identical on every card — short and long titles still start at the same
+   x, and a one-line summary sits exactly as high as a two-line one starts. Scoped to the card so it
+   outranks the legacy `.preset-button span` rule in styles.css, which would otherwise paint the badge
+   with the summary's muted colour and size. */
+.preset-button .preset-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 1px 7px;
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  line-height: 1.5;
+}
+
+.preset-button:hover {
+  background: var(--surface);
+  border-color: var(--primary);
+}
+
+.preset-button strong {
+  min-width: 0;
+  padding-right: 58px;
+  font-size: var(--text-md);
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.preset-button .preset-summary {
+  color: var(--foreground-muted);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* Switches: flat rows, never boxed. */
+.toggle-field {
+  min-height: 38px;
+  padding: 6px 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.toggle-field > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--foreground);
+  font-size: var(--text-md);
+  font-weight: 400;
+}
+
+.switch-field-row {
+  justify-content: flex-end;
+  min-height: 32px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+/* Segmented controls read as one track with a raised selection. */
+.segmented {
+  min-height: 36px;
+  padding: 3px;
+  background: var(--surface-strong);
+  border: 1px solid transparent;
+  border-radius: 8px;
+}
+
+.segmented button {
+  font-size: var(--text-sm);
+  color: var(--foreground-muted);
+  border-radius: 6px;
+}
+
+.segmented button:hover {
+  color: var(--foreground);
+}
+
+.segmented button.active {
+  color: var(--foreground);
+  font-weight: 700;
+  background: var(--surface-raised);
+  border-color: var(--border);
+  box-shadow: var(--shadow-card);
+}
+
+/* Identity at the foot of the tab column: a narrow read-out, so it stacks value / source / action
+   instead of forming one wide row. The value ellipsizes rather than widening the column. */
+.editor-identity {
+  display: grid;
+  gap: 6px;
+  flex: 0 0 auto;
+  margin: 0 10px 14px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+
+.editor-identity-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--foreground-muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.editor-identity-label .info-tip {
+  margin-inline-start: auto;
+}
+
+.editor-identity-value {
+  display: block;
+  min-width: 0;
+  padding: 3px 7px;
+  overflow: hidden;
+  color: var(--foreground);
+  background: var(--surface-muted);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A stored seed is the one state where the value is also the way out of itself. Both labels sit in
+   the same grid cell, so swapping them never changes the row's height or width — the seed id and the
+   action occupy the exact same box. */
+.editor-identity-button {
+  display: grid;
+  width: 100%;
+  cursor: pointer;
+}
+
+.editor-identity-button > span {
+  grid-area: 1 / 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-identity-idle {
+  font-family: var(--font-mono);
+}
+
+.editor-identity-hover {
+  visibility: hidden;
+  font-family: inherit;
+}
+
+.editor-identity-button:hover,
+.editor-identity-button:focus-visible {
+  color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--border-subtle));
+}
+
+.editor-identity-button:hover .editor-identity-idle,
+.editor-identity-button:focus-visible .editor-identity-idle {
+  visibility: hidden;
+}
+
+.editor-identity-button:hover .editor-identity-hover,
+.editor-identity-button:focus-visible .editor-identity-hover {
+  visibility: visible;
+}
+
+.editor-identity-source {
+  color: var(--foreground-muted);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
+.editor-identity .command {
+  justify-content: center;
+  width: 100%;
+}
+
+.editor-identity-note {
+  color: var(--warning);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
+/* Group divider inside a section (rarely edited overrides). */
+.form-group-heading {
+  margin-top: 4px;
+  padding-top: 14px;
+  color: var(--foreground-muted);
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+/* Extension binding: the empty state is one line, not a box inside the section. */
+.extension-binding-panel .module-empty.compact {
+  display: grid;
+  gap: 3px;
+  min-height: 0;
+  padding: 4px 0 2px;
+  text-align: left;
+  place-items: start;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.extension-binding-panel .module-empty.compact strong {
+  font-size: var(--text-md);
+  font-weight: 700;
+}
+
+.extension-binding-panel .module-empty.compact span {
+  color: var(--foreground-muted);
+  font-size: var(--text-sm);
+}
+
+/* The extension surface is one block: the library and the manual path list are both "extensions" to
+   an operator, so an unsaved draft masks them together under one note instead of leaving half of the
+   concept looking usable. The mask is painted, not interactive; the two panels it covers are already
+   refused by their own disabled controls and by the `inert` attribute the runtime tab sets. */
+.extension-surface {
+  position: relative;
+}
+
+.extension-surface-mask {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  line-height: 1.5;
+  backdrop-filter: blur(2px);
+}
+
+/* Proxy tab: the master switch rides at the right of the source row, level with the control. */
+.proxy-source-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: end;
+}
+
+.proxy-source-toggle {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  justify-content: flex-end;
+}
+
+/* Centre the 24px switch on the segmented track, whatever the label height above it is. */
+.proxy-source-toggle .toggle-switch {
+  margin-bottom: 7px;
+}
+
+/* Enhanced proxy and its checks share one action row. The row sits in the editor grid's last cell,
+   so the 18px/22px cell padding keeps it clear of the divider above. */
+.proxy-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+}
+
+.proxy-action-row > .wide {
+  flex: 0 0 auto;
+  width: auto;
+}
+
+.proxy-action-row .toggle-field {
+  min-height: 0;
+  padding: 0;
+}
+
+.proxy-action-row .proxy-check-panel {
+  display: contents;
+}
+
+.proxy-action-row .proxy-engine-line {
+  order: -1;
+  flex: 1 1 100%;
+}
+
+.proxy-action-row .proxy-check-actions {
+  margin-left: auto;
+}
+
+.proxy-check-panel {
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.proxy-check-panel.disabled .proxy-check-actions {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.proxy-check-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Quick args: the switch grid is a flat two-column checklist. */
+.quick-args-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.quick-arg-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 20px;
+}
+
+.quick-arg-group-heading {
+  margin: 6px 0 8px;
+}
+
+.quick-args-panel > .field {
+  margin-top: 6px;
+}
+
+/* Arrow buttons belong to the field, not to a second control: the whole combobox is one frame, and the
+   arrow is a centred inset button. The old full-height seam read as a second input welded on. */
+.combo-control,
+.start-url-combobox-control {
+  padding-right: 3px;
+}
+
+.combo-control button,
+.tag-combobox-control button,
+.start-url-combobox-control button {
+  align-self: center;
+  width: 30px;
+  min-width: 30px;
+  min-height: calc(var(--control-height) - 4px);
+  margin-right: 0;
+  color: var(--foreground-soft);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+}
+
+.combo-control button:hover,
+.tag-combobox-control button:hover,
+.start-url-combobox-control button:hover {
+  color: var(--foreground);
+  background: var(--surface-strong);
+}
+
+/* --- End editor drawer --- */
+
+@media (min-width: 1600px) {
+  .app-shell {
+    grid-template-columns: 248px minmax(0, 1fr);
+  }
+
+  .workbench {
+    padding-inline: 36px;
+  }
+
+}
+
+@media (max-width: 1180px) {
+  .app-shell {
+    grid-template-columns: 212px minmax(0, 1fr);
+  }
+
+  .workbench {
+    padding: 22px;
+    overflow: auto;
+  }
+
+  .workspace-header,
+  .workbench-toolbar {
+    flex-direction: row;
+    align-items: center;
+  }
+
+}
+
+@media (max-width: 900px) {
+  .app-shell,
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: 68px minmax(0, 1fr);
+  }
+
+  .sidebar,
+  .sidebar.collapsed {
+    align-items: center;
+    gap: 18px;
+    padding: 18px 9px 12px;
+  }
+
+  .sidebar-brand-copy,
+  .sidebar-create > span:not(.new-profile-icon),
+  .sidebar-nav-label,
+  .sidebar-button > span,
+  .sidebar-utility > span:not(.sidebar-utility-icon) {
+    display: none;
+  }
+
+  .sidebar-brand {
+    justify-content: center;
+    padding: 0;
+  }
+
+  .sidebar-create,
+  .sidebar.collapsed .sidebar-create {
+    width: 42px;
+    min-height: 42px;
+    padding: 0;
+  }
+
+  .sidebar-button,
+  .sidebar.collapsed .sidebar-button {
+    justify-content: center;
+    width: 42px;
+    min-height: 42px;
+    padding: 0;
+  }
+
+  .sidebar-utility {
+    justify-content: center;
+    width: 42px;
+    padding: 0;
+  }
+
+  .workbench {
+    padding: 20px 18px;
+  }
+
+  .workspace-header {
+    align-items: flex-start;
+  }
+
+  /* Below tablet width the explanation wraps under the title instead of being clipped. */
+  .workspace-title {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .workspace-header p {
+    flex: 1 1 100%;
+    white-space: normal;
+  }
+
+  .workbench-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .workbench-toolbar .search-box {
+    flex: 1 1 260px;
+  }
+}
+
+@media (max-width: 640px) {
+  .drawer-layer:has(.drawer-editor-shell),
+  .drawer-layer:has(.detail-drawer) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workbench {
+    gap: 13px;
+    padding: 16px 12px;
+  }
+
+  .workspace-header {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .workspace-title {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .workspace-header h1 {
+    font-size: calc(var(--font-size-base) * 1.44);
+  }
+
+  .workspace-header p {
+    flex: 1 1 100%;
+    white-space: normal;
+  }
+
+  .toolbar-left {
+    min-width: 0;
+  }
+
+  .workbench-toolbar .search-box {
+    flex-basis: 100%;
+    min-width: 0;
+  }
+
+  .toolbar-actions {
+    margin-left: auto;
+  }
+
+  .offline-banner {
+    align-items: flex-start;
+  }
+
+  .offline-banner strong {
+    display: none;
+  }
+
+  .profile-empty-state {
+    min-height: 320px;
+  }
+
+  .runtime-check-hero {
+    padding: 18px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .profile-avatar-dot {
+    box-shadow: none;
+  }
+}

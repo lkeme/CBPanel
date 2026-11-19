@@ -1,0 +1,3003 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import {
+  type BrowserProfile,
+  createId,
+  defaultProfile,
+  normalizeProfile,
+  normalizeProxyScheme,
+  normalizeXrayIpStrategy,
+  normalizeXrayUtlsPreference,
+  nowIso,
+} from "../../src/shared/profile";
+import {
+  type ParsedXrayShareLink,
+  type XrayNodeSummary,
+  isMaskedXrayShareLink,
+  parseXrayShareLink,
+  tryParseXrayShareLink,
+  proxyNodeIdentity,
+} from "../../src/shared/xray";
+import type {
+  BrowserEnvironment,
+  EntityStatus,
+  ExtensionDirectoryMode,
+  ExtensionEntity,
+  ExtensionInstallState,
+  ExtensionPermissionRisk,
+  ExtensionSourceKind,
+  ExtensionUpdatePolicy,
+  GroupEntity,
+  NetworkCheckResult,
+  ReferenceUsage,
+  ProxyCheckResult,
+  ProxyEntity,
+  ProxySubscriptionEntity,
+  ProxySubscriptionRefreshResult,
+  TagEntity,
+  TrashEnvironment,
+} from "../../src/shared/entities";
+import { DEFAULT_PROXY_SUBSCRIPTION_INTERVAL_HOURS, normalizeExtensionBindingMetadata } from "../../src/shared/entities";
+import {
+  type AppSettings,
+  type AppSettingsPatch,
+  type StorageInfo,
+  DEFAULT_APP_SETTINGS,
+  mergeSettings,
+  normalizeSettings,
+} from "../../src/shared/settings";
+import {
+  APP_BACKUP_SCHEMA_VERSION,
+  decodeAppBackupData,
+  type AppBackupData,
+} from "../../src/shared/appBackup";
+import {
+  chromeWebStoreListingUrl,
+  normalizeExtensionAuthorityFields,
+} from "../../src/shared/extensionAcquisition";
+import type {
+  EnvironmentExtensionBinding,
+  EnvironmentPackageImportInput,
+  EnvironmentPackageImportResult,
+  ExtensionAcquisitionDatabaseCommitInput,
+  PanelRepository,
+} from "./types";
+
+type SqliteStoreOptions = {
+  dataDir: string;
+  databasePath?: string;
+  portable?: boolean;
+};
+
+type ProfileRow = {
+  id?: string;
+  profile_json: string;
+};
+
+type EnvironmentRow = {
+  id: string;
+  name: string;
+  notes: string;
+  mode: BrowserProfile["mode"];
+  start_url: string;
+  group_id: string;
+  proxy_id: string | null;
+  runtime_profile_json: string;
+  last_network_check_json: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+  delete_reason: string | null;
+};
+
+type GroupRow = {
+  id: string;
+  name: string;
+  color: string;
+  description: string;
+  sort_order: number;
+  status: EntityStatus;
+  is_default: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type TagRow = {
+  id: string;
+  name: string;
+  color: string;
+  description: string;
+  sort_order: number;
+  status: EntityStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+type ProxyRow = {
+  id: string;
+  name: string;
+  scheme: BrowserProfile["proxy"]["scheme"];
+  host: string;
+  port: string;
+  username: string;
+  password: string;
+  bypass: string;
+  notes: string;
+  status: EntityStatus;
+  last_check_json: string | null;
+  share_link: string | null;
+  pre_proxy_id: string | null;
+  ip_strategy: string | null;
+  utls_fingerprint: string | null;
+  subscription_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type ProxySubscriptionRow = {
+  id: string;
+  name: string;
+  url: string;
+  status: EntityStatus;
+  auto_refresh: number;
+  refresh_interval_hours: number;
+  last_refresh_json: string | null;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type ExtensionRow = {
+  id: string;
+  name: string;
+  description: string;
+  source_kind: ExtensionSourceKind;
+  source_url: string;
+  store_id: string | null;
+  store_url: string | null;
+  store_namespace: string | null;
+  provenance_json: string | null;
+  artifact_archive_path: string | null;
+  update_provider_id: string | null;
+  update_state_json: string | null;
+  version: string;
+  manifest_version: number | null;
+  permissions_json: string;
+  host_permissions_json: string;
+  optional_permissions_json: string;
+  optional_host_permissions_json: string;
+  permission_risks_json: string;
+  install_state: ExtensionInstallState;
+  update_policy: ExtensionUpdatePolicy;
+  sha256: string | null;
+  manifest_sha256: string | null;
+  local_path: string | null;
+  manifest_key: string | null;
+  directory_mode: string | null;
+  last_installed_at: string | null;
+  last_checked_at: string | null;
+  last_error: string | null;
+  status: EntityStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+type IdRow = {
+  id: string;
+};
+
+type EnvironmentExtensionBindingRow = {
+  environment_id: string;
+  extension_id: string;
+  lifecycle_revision: string;
+};
+
+type IdentityTable = "profiles" | "browser_environments" | "groups" | "tags" | "proxies" | "proxy_subscriptions" | "extensions";
+
+type SettingsRow = {
+  settings_json: string;
+};
+
+type CountRow = {
+  count: number;
+};
+
+export class SqlitePanelRepository implements PanelRepository {
+  private readonly dataDir: string;
+  private readonly databasePath: string;
+  private readonly portable: boolean;
+  private db?: DatabaseSync;
+  private initialization?: Promise<void>;
+
+  constructor(options: SqliteStoreOptions) {
+    this.dataDir = path.resolve(options.dataDir);
+    this.databasePath = options.databasePath ?? path.join(options.dataDir, "cbpanel.sqlite");
+    this.portable = options.portable ?? Boolean(process.env.CBPANEL_PORTABLE);
+  }
+
+  async initialize(): Promise<void> {
+    if (!this.initialization) {
+      this.initialization = this.initializeOnce();
+    }
+    await this.initialization;
+  }
+
+  async listProfiles(): Promise<BrowserProfile[]> {
+    await this.initialize();
+    return this.readProfiles();
+  }
+
+  async getProfile(id: string): Promise<BrowserProfile | undefined> {
+    await this.initialize();
+    const row = this.database()
+      .prepare(`
+        SELECT profile_json
+        FROM profiles
+        WHERE id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM browser_environments
+            WHERE browser_environments.id = profiles.id
+              AND browser_environments.deleted_at IS NOT NULL
+          )
+      `)
+      .get(id) as ProfileRow | undefined;
+    return row ? parseProfile(row.profile_json) : undefined;
+  }
+
+  async createProfile(profile: Partial<BrowserProfile>): Promise<BrowserProfile> {
+    await this.initialize();
+    const normalized = normalizeProfile(defaultProfile(profile));
+    this.assertUnusedId("profiles", normalized.id);
+    this.assertUniqueProfileName(normalized.name, normalized.id);
+    this.insertProfile(normalized);
+    return normalized;
+  }
+
+  async updateProfile(id: string, patch: Partial<BrowserProfile>): Promise<BrowserProfile> {
+    await this.initialize();
+    const existing = await this.getProfile(id);
+    if (!existing) throw Object.assign(new Error("配置不存在"), { status: 404 });
+    const updated = normalizeProfile({ ...existing, ...patch, id: existing.id, createdAt: existing.createdAt });
+    this.assertUniqueProfileName(updated.name, updated.id);
+    this.upsertProfile(updated);
+    return updated;
+  }
+
+  async duplicateProfile(id: string): Promise<BrowserProfile> {
+    await this.initialize();
+    const existing = await this.getProfile(id);
+    if (!existing) throw Object.assign(new Error("配置不存在"), { status: 404 });
+    const copy = normalizeProfile({
+      ...existing,
+      id: undefined,
+      name: this.nextProfileCopyName(existing.name),
+      createdAt: undefined,
+      updatedAt: undefined,
+    });
+    this.insertProfile(copy);
+    return copy;
+  }
+
+  async deleteProfile(id: string): Promise<void> {
+    await this.initialize();
+    const existing = await this.getProfile(id);
+    if (!existing) throw Object.assign(new Error("配置不存在"), { status: 404 });
+    this.upsertEnvironmentFromProfile(existing);
+    const deletedAt = nowIso();
+    const result = this.database()
+      .prepare("UPDATE browser_environments SET deleted_at = ?, delete_reason = ?, updated_at = ? WHERE id = ?")
+      .run(deletedAt, "profile-delete", deletedAt, id);
+    if (Number(result.changes) === 0) throw Object.assign(new Error("配置不存在"), { status: 404 });
+  }
+
+  async importProfiles(profiles: unknown[]): Promise<{ imported: number; profiles: BrowserProfile[] }> {
+    await this.initialize();
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const profile of profiles) {
+        const normalized = normalizeProfile({ ...(profile as Partial<BrowserProfile>), id: undefined });
+        this.assertUniqueProfileName(normalized.name, normalized.id);
+        this.insertProfile(normalized);
+      }
+        db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    return { imported: profiles.length, profiles: this.readProfiles() };
+  }
+
+  async exportProfiles(): Promise<{ profiles: BrowserProfile[] }> {
+    await this.initialize();
+    return { profiles: this.readProfiles() };
+  }
+
+  async listEnvironments(): Promise<BrowserEnvironment[]> {
+    await this.initialize();
+    return this.readEnvironments({ includeDeleted: false });
+  }
+
+  async createEnvironment(profile: Partial<BrowserProfile>): Promise<BrowserEnvironment> {
+    const created = await this.createProfile(profile);
+    return this.environmentFromProfile(created);
+  }
+
+  async updateEnvironment(id: string, patch: Partial<BrowserProfile> & { proxyId?: string | null }): Promise<BrowserEnvironment> {
+    await this.initialize();
+    const { proxyId, ...profilePatch } = patch;
+    const updated = await this.updateProfile(id, profilePatch);
+    if (Object.prototype.hasOwnProperty.call(patch, "proxyId")) {
+      this.setEnvironmentProxyReference(id, proxyId);
+    }
+    return this.getEnvironmentOrThrow(updated.id);
+  }
+
+  async duplicateEnvironment(id: string): Promise<BrowserEnvironment> {
+    const duplicated = await this.duplicateProfile(id);
+    return this.environmentFromProfile(duplicated);
+  }
+
+  async saveEnvironmentNetworkCheck(id: string, result: NetworkCheckResult): Promise<BrowserEnvironment> {
+    await this.initialize();
+    this.getEnvironmentOrThrow(id);
+    const timestamp = nowIso();
+    this.database()
+      .prepare("UPDATE browser_environments SET last_network_check_json = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(result), timestamp, id);
+    return this.getEnvironmentOrThrow(id);
+  }
+
+  async softDeleteEnvironment(id: string, reason = "environment-delete"): Promise<void> {
+    await this.initialize();
+    const existing = await this.getEnvironment(id);
+    if (!existing || existing.deletedAt) throw Object.assign(new Error("环境不存在"), { status: 404 });
+    if (reason === "profile-delete") {
+      await this.deleteProfile(id);
+      return;
+    }
+    const deletedAt = nowIso();
+    this.database()
+      .prepare("UPDATE browser_environments SET deleted_at = ?, delete_reason = ?, updated_at = ? WHERE id = ?")
+      .run(deletedAt, reason.trim() || "environment-delete", deletedAt, id);
+  }
+
+  async listTrashEnvironments(): Promise<TrashEnvironment[]> {
+    await this.initialize();
+    return this.readEnvironments({ includeDeleted: true, onlyDeleted: true }).map((environment) => ({
+      environment,
+      deletedAt: environment.deletedAt ?? environment.updatedAt,
+      deleteReason: environment.deleteReason,
+    }));
+  }
+
+  async getEnvironment(id: string): Promise<BrowserEnvironment | undefined> {
+    await this.initialize();
+    const row = this.database()
+      .prepare("SELECT * FROM browser_environments WHERE id = ?")
+      .get(id) as EnvironmentRow | undefined;
+    return row ? this.environmentFromRow(row) : undefined;
+  }
+
+  async restoreEnvironment(id: string): Promise<BrowserEnvironment> {
+    await this.initialize();
+    const existing = await this.getEnvironment(id);
+    if (!existing) throw Object.assign(new Error("环境不存在"), { status: 404 });
+    const restoredProfile = normalizeProfile({ ...existing.runtimeProfile, updatedAt: nowIso() });
+    this.upsertProfile(restoredProfile);
+    this.database()
+      .prepare("UPDATE browser_environments SET deleted_at = NULL, delete_reason = NULL, updated_at = ? WHERE id = ?")
+      .run(restoredProfile.updatedAt, id);
+    return this.environmentFromProfile(restoredProfile);
+  }
+
+  async permanentlyDeleteEnvironment(id: string): Promise<void> {
+    await this.initialize();
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = db.prepare("DELETE FROM browser_environments WHERE id = ? AND deleted_at IS NOT NULL").run(id);
+      if (Number(result.changes) === 0) throw Object.assign(new Error("回收站环境不存在"), { status: 404 });
+      db.prepare("DELETE FROM profiles WHERE id = ?").run(id);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async clearTrashEnvironments(): Promise<{ deleted: number }> {
+    await this.initialize();
+    const trashIds = this.readEnvironments({ includeDeleted: true, onlyDeleted: true }).map((environment) => environment.id);
+    if (trashIds.length === 0) return { deleted: 0 };
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const id of trashIds) {
+        db.prepare("DELETE FROM browser_environments WHERE id = ? AND deleted_at IS NOT NULL").run(id);
+        db.prepare("DELETE FROM profiles WHERE id = ?").run(id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    return { deleted: trashIds.length };
+  }
+
+  async importEnvironmentPackage(input: EnvironmentPackageImportInput): Promise<EnvironmentPackageImportResult> {
+    await this.initialize();
+    const db = this.database();
+    const groupIdMap: Record<string, string> = {};
+    const extensionIdMap: Record<string, string> = {};
+    const environmentIdMap: Record<string, string> = {};
+    const importedIds: string[] = [];
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const group of input.groups) {
+        const localGroup = this.ensurePackageGroup(group);
+        groupIdMap[group.id] = localGroup.id;
+      }
+
+      for (const extension of input.extensions) {
+        const localExtension = this.ensurePackageExtension(
+          extension,
+          input.extensionIdMap?.[extension.id],
+          input.extensionLocalPaths?.[extension.id],
+          input.extensionArtifactPaths?.[extension.id],
+          input.extensionManifestKeys?.[extension.id],
+        );
+        extensionIdMap[extension.id] = localExtension.id;
+      }
+
+      for (const environment of input.environments) {
+        const requestedId = input.environmentIdMap?.[environment.id];
+        const imported = this.insertImportedEnvironment(environment, groupIdMap, extensionIdMap, requestedId);
+        environmentIdMap[environment.id] = imported.id;
+        importedIds.push(imported.id);
+      }
+
+      for (const binding of input.environmentExtensionBindings ?? []) {
+        const environmentId = environmentIdMap[binding.environmentId];
+        const extensionId = extensionIdMap[binding.extensionId];
+        if (!environmentId || !extensionId) {
+          throw Object.assign(new Error("Environment package binding metadata references an unknown entity"), { status: 400 });
+        }
+        const mappedPair = db.prepare(`
+          SELECT 1 AS present
+          FROM environment_extensions
+          WHERE environment_id = ? AND extension_id = ?
+          LIMIT 1
+        `).get(environmentId, extensionId);
+        if (!mappedPair) {
+          throw Object.assign(new Error("Environment package binding metadata references an unbound entity pair"), { status: 400 });
+        }
+        db.prepare(`
+          UPDATE environment_extensions
+          SET lifecycle_revision = ?
+          WHERE environment_id = ? AND extension_id = ?
+        `).run(binding.lifecycleRevision, environmentId, extensionId);
+      }
+
+        db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    return {
+      imported: importedIds.length,
+      environments: importedIds.map((id) => this.getEnvironmentOrThrow(id)),
+      idMap: {
+        environments: environmentIdMap,
+        groups: groupIdMap,
+        extensions: extensionIdMap,
+      },
+    };
+  }
+
+  async listGroups(): Promise<GroupEntity[]> {
+    await this.initialize();
+    return this.database()
+      .prepare("SELECT * FROM groups ORDER BY sort_order ASC, name ASC")
+      .all()
+      .map((row) => groupFromRow(row as GroupRow));
+  }
+
+  async createGroup(input: Partial<GroupEntity>): Promise<GroupEntity> {
+    await this.initialize();
+    const timestamp = nowIso();
+    const name = cleanRequiredName(input.name, "分组名称不能为空");
+    const group: GroupEntity = {
+      id: createEntityId(input.id, "group"),
+      name,
+      color: cleanColor(input.color, colorForName(name)),
+      description: input.description?.trim() ?? "",
+      order: Number.isFinite(input.order) ? Number(input.order) : this.nextSortOrder("groups"),
+      status: input.status === "disabled" ? "disabled" : "enabled",
+      isDefault: input.isDefault === true,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    this.assertUnusedId("groups", group.id);
+    this.insertGroup(group);
+    return group;
+  }
+
+  async updateGroup(id: string, patch: Partial<GroupEntity>): Promise<GroupEntity> {
+    await this.initialize();
+    const existing = this.getGroupOrThrow(id);
+    if (existing.isDefault && patch.status === "disabled") {
+      throw Object.assign(new Error("默认分组不能停用"), { status: 409 });
+    }
+    const name = patch.name !== undefined ? cleanRequiredName(patch.name, "分组名称不能为空") : existing.name;
+    const updated: GroupEntity = {
+      ...existing,
+      name,
+      color: patch.color !== undefined ? cleanColor(patch.color, existing.color) : existing.color,
+      description: patch.description !== undefined ? patch.description.trim() : existing.description,
+      order: Number.isFinite(patch.order) ? Number(patch.order) : existing.order,
+      status: patch.status === "enabled" || patch.status === "disabled" ? patch.status : existing.status,
+      isDefault: existing.isDefault,
+      updatedAt: nowIso(),
+    };
+    this.insertGroup(updated);
+    return updated;
+  }
+
+  async deleteGroup(id: string): Promise<void> {
+    await this.initialize();
+    const group = this.getGroupOrThrow(id);
+    if (group.isDefault) throw Object.assign(new Error("默认分组不能删除"), { status: 409 });
+    this.throwIfReferenced("group", id);
+    this.database().prepare("DELETE FROM groups WHERE id = ?").run(id);
+  }
+
+  async mergeGroup(id: string, targetId: string): Promise<GroupEntity> {
+    await this.initialize();
+    if (id === targetId) throw Object.assign(new Error("不能合并到自身"), { status: 400 });
+    const source = this.getGroupOrThrow(id);
+    const target = this.getGroupOrThrow(targetId);
+    const affected = rowsToIds(this.database(), "browser_environments", "group_id", source.id);
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare("UPDATE browser_environments SET group_id = ?, updated_at = ? WHERE group_id = ?").run(target.id, nowIso(), source.id);
+      if (!source.isDefault) db.prepare("DELETE FROM groups WHERE id = ?").run(source.id);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    this.refreshProfilesFromEnvironments(affected);
+    return target;
+  }
+
+  async listTags(): Promise<TagEntity[]> {
+    await this.initialize();
+    return this.database()
+      .prepare("SELECT * FROM tags ORDER BY sort_order ASC, name ASC")
+      .all()
+      .map((row) => tagFromRow(row as TagRow));
+  }
+
+  async createTag(input: Partial<TagEntity>): Promise<TagEntity> {
+    await this.initialize();
+    const timestamp = nowIso();
+    const name = cleanRequiredName(input.name, "标签名称不能为空");
+    const tag: TagEntity = {
+      id: createEntityId(input.id, "tag"),
+      name,
+      color: cleanColor(input.color, colorForName(name)),
+      description: input.description?.trim() ?? "",
+      order: Number.isFinite(input.order) ? Number(input.order) : this.nextSortOrder("tags"),
+      status: input.status === "disabled" ? "disabled" : "enabled",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    this.assertUnusedId("tags", tag.id);
+    this.insertTag(tag);
+    return tag;
+  }
+
+  async updateTag(id: string, patch: Partial<TagEntity>): Promise<TagEntity> {
+    await this.initialize();
+    const existing = this.getTagOrThrow(id);
+    const name = patch.name !== undefined ? cleanRequiredName(patch.name, "标签名称不能为空") : existing.name;
+    const updated: TagEntity = {
+      ...existing,
+      name,
+      color: patch.color !== undefined ? cleanColor(patch.color, existing.color) : existing.color,
+      description: patch.description !== undefined ? patch.description.trim() : existing.description,
+      order: Number.isFinite(patch.order) ? Number(patch.order) : existing.order,
+      status: patch.status === "enabled" || patch.status === "disabled" ? patch.status : existing.status,
+      updatedAt: nowIso(),
+    };
+    this.insertTag(updated);
+    return updated;
+  }
+
+  async deleteTag(id: string): Promise<void> {
+    await this.initialize();
+    this.getTagOrThrow(id);
+    this.throwIfReferenced("tag", id);
+    this.database().prepare("DELETE FROM tags WHERE id = ?").run(id);
+  }
+
+  async mergeTag(id: string, targetId: string): Promise<TagEntity> {
+    await this.initialize();
+    if (id === targetId) throw Object.assign(new Error("不能合并到自身"), { status: 400 });
+    this.getTagOrThrow(id);
+    const target = this.getTagOrThrow(targetId);
+    const affected = rowsToIds(this.database(), "environment_tags", "tag_id", id, "environment_id");
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = db.prepare("SELECT environment_id AS id FROM environment_tags WHERE tag_id = ?").all(id) as IdRow[];
+      for (const row of rows) {
+        db.prepare("INSERT OR IGNORE INTO environment_tags (environment_id, tag_id) VALUES (?, ?)").run(row.id, targetId);
+      }
+      db.prepare("DELETE FROM environment_tags WHERE tag_id = ?").run(id);
+      db.prepare("DELETE FROM tags WHERE id = ?").run(id);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    this.refreshProfilesFromEnvironments(affected);
+    return target;
+  }
+
+  async assignTags(environmentIds: string[], tagIds: string[]): Promise<BrowserEnvironment[]> {
+    await this.initialize();
+    const cleanEnvironmentIds = uniqueStrings(environmentIds);
+    const cleanTagIds = uniqueStrings(tagIds);
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const environmentId of cleanEnvironmentIds) this.getEnvironmentOrThrow(environmentId);
+      for (const tagId of cleanTagIds) this.getTagOrThrow(tagId);
+      for (const environmentId of cleanEnvironmentIds) {
+        for (const tagId of cleanTagIds) {
+          db.prepare("INSERT OR IGNORE INTO environment_tags (environment_id, tag_id) VALUES (?, ?)").run(environmentId, tagId);
+        }
+        this.syncProfileTagsFromEnvironment(environmentId);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    return cleanEnvironmentIds.map((id) => this.getEnvironmentOrThrow(id));
+  }
+
+  async removeTags(environmentIds: string[], tagIds: string[]): Promise<BrowserEnvironment[]> {
+    await this.initialize();
+    const cleanEnvironmentIds = uniqueStrings(environmentIds);
+    const cleanTagIds = uniqueStrings(tagIds);
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const environmentId of cleanEnvironmentIds) {
+        this.getEnvironmentOrThrow(environmentId);
+        for (const tagId of cleanTagIds) {
+          db.prepare("DELETE FROM environment_tags WHERE environment_id = ? AND tag_id = ?").run(environmentId, tagId);
+        }
+        this.syncProfileTagsFromEnvironment(environmentId);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    return cleanEnvironmentIds.map((id) => this.getEnvironmentOrThrow(id));
+  }
+
+  async listProxies(options: { includeSecrets?: boolean } = {}): Promise<ProxyEntity[]> {
+    await this.initialize();
+    return this.database()
+      .prepare("SELECT * FROM proxies ORDER BY updated_at DESC")
+      .all()
+      .map((row) => proxyFromRow(row as ProxyRow, { includeSecrets: options.includeSecrets === true }));
+  }
+
+  async createProxy(input: Partial<ProxyEntity>): Promise<ProxyEntity> {
+    await this.initialize();
+    const timestamp = nowIso();
+    const proxy = normalizeProxyEntity({
+      ...input,
+      id: createEntityId(input.id, "proxy"),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    this.assertUnusedId("proxies", proxy.id);
+    this.insertProxy(proxy);
+    return proxy;
+  }
+
+  async updateProxy(id: string, patch: Partial<ProxyEntity>): Promise<ProxyEntity> {
+    await this.initialize();
+    const existing = this.getProxyOrThrow(id, { includeSecrets: true });
+    // A client that only ever saw the masked link (no secrets requested) must not be able to write
+    // the mask back over the real node, the same way a masked password is never persisted.
+    const { shareLink: patchedShareLink, ...rest } = patch;
+    const shareLink = typeof patchedShareLink === "string" && !isMaskedXrayShareLink(patchedShareLink)
+      ? patchedShareLink
+      : existing.shareLink;
+    const candidate = normalizeProxyEntity({
+      ...existing,
+      ...rest,
+      shareLink,
+      id: existing.id,
+      createdAt: existing.createdAt,
+      updatedAt: nowIso(),
+    });
+    // Editing the node itself (not its name, chain or notes) makes it the user's own: it leaves its
+    // subscription, or the next refresh would throw the edit away as a node the address no longer lists.
+    const detached = Boolean(existing.subscriptionId) && proxyIdentityKey(existing) !== proxyIdentityKey(candidate);
+    const updated = detached ? { ...candidate, subscriptionId: "" } : candidate;
+    this.insertProxy(updated);
+    this.syncProfilesForProxy(id);
+    this.syncProfilesForPreProxy(id);
+    return updated;
+  }
+
+  async duplicateProxy(id: string): Promise<ProxyEntity> {
+    await this.initialize();
+    const existing = this.getProxyOrThrow(id, { includeSecrets: true });
+    const timestamp = nowIso();
+    const copy = normalizeProxyEntity({
+      ...existing,
+      id: createId("proxy"),
+      name: `${existing.name} copy`,
+      subscriptionId: "",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    this.insertProxy(copy);
+    return copy;
+  }
+
+  async deleteProxy(id: string): Promise<void> {
+    await this.initialize();
+    this.getProxyOrThrow(id, { includeSecrets: false });
+    this.throwIfReferenced("proxy", id);
+    this.database().prepare("DELETE FROM proxies WHERE id = ?").run(id);
+    this.clearPreProxyReferences(id);
+  }
+
+  /**
+   * A deleted proxy may still be named as the front proxy of a chain — by other library entries and
+   * by environments that keep their own proxy settings. Those chains are unwound rather than left
+   * dangling, so the next launch runs the target proxy directly instead of failing on a missing id.
+   */
+  private clearPreProxyReferences(proxyId: string): void {
+    const timestamp = nowIso();
+    const chainedProxies = this.database()
+      .prepare("SELECT id FROM proxies WHERE pre_proxy_id = ?")
+      .all(proxyId)
+      .map((row) => (row as IdRow).id);
+    if (chainedProxies.length > 0) {
+      this.database().prepare("UPDATE proxies SET pre_proxy_id = '', updated_at = ? WHERE pre_proxy_id = ?").run(timestamp, proxyId);
+      for (const chainedProxyId of chainedProxies) this.syncProfilesForProxy(chainedProxyId);
+    }
+    const environments = this.database()
+      .prepare("SELECT * FROM browser_environments WHERE deleted_at IS NULL")
+      .all()
+      .map((row) => this.environmentFromRow(row as EnvironmentRow))
+      .filter((environment) => environment.runtimeProfile.proxy.preProxyId === proxyId);
+    for (const environment of environments) {
+      const runtimeProfile = normalizeProfile({
+        ...environment.runtimeProfile,
+        proxy: { ...environment.runtimeProfile.proxy, preProxyId: "" },
+        updatedAt: timestamp,
+      });
+      this.database()
+        .prepare("UPDATE browser_environments SET runtime_profile_json = ?, updated_at = ? WHERE id = ?")
+        .run(JSON.stringify(runtimeProfile), timestamp, environment.id);
+      this.upsertProfileRow(this.profileFromEnvironment(this.getEnvironmentOrThrow(environment.id)));
+    }
+  }
+
+  /** Environments whose library proxy chains through `proxyId` see the chain in their runtime profile. */
+  private syncProfilesForPreProxy(proxyId: string): void {
+    const chainedProxies = this.database()
+      .prepare("SELECT id FROM proxies WHERE pre_proxy_id = ?")
+      .all(proxyId)
+      .map((row) => (row as IdRow).id);
+    for (const chainedProxyId of chainedProxies) this.syncProfilesForProxy(chainedProxyId);
+  }
+
+  async replaceProxyReferences(id: string, targetId?: string): Promise<BrowserEnvironment[]> {
+    await this.initialize();
+    this.getProxyOrThrow(id, { includeSecrets: false });
+    if (targetId) this.getProxyOrThrow(targetId, { includeSecrets: false });
+    const affected = rowsToIds(this.database(), "browser_environments", "proxy_id", id);
+    for (const environmentId of affected) {
+      this.setEnvironmentProxyReference(environmentId, targetId ?? null);
+    }
+    return affected.map((environmentId) => this.getEnvironmentOrThrow(environmentId));
+  }
+
+  async saveProxyCheckResult(id: string, result: ProxyEntity["lastCheck"]): Promise<ProxyEntity> {
+    await this.initialize();
+    const existing = this.getProxyOrThrow(id, { includeSecrets: true });
+    const updated = { ...existing, lastCheck: result, updatedAt: nowIso() };
+    this.insertProxy(updated);
+    return proxyFromRow(
+      this.database().prepare("SELECT * FROM proxies WHERE id = ?").get(id) as ProxyRow,
+      { includeSecrets: false },
+    );
+  }
+
+  /**
+   * Which proxies are in use: named by an environment (live or in the trash, the same rows that
+   * block a delete) or chained as another proxy's front. A subscription refresh must not delete or
+   * replace those, and a subscription delete keeps them.
+   */
+  async listProxyUsage(): Promise<Map<string, { environmentIds: string[]; chainedProxyIds: string[] }>> {
+    await this.initialize();
+    const usage = new Map<string, { environmentIds: string[]; chainedProxyIds: string[] }>();
+    const entry = (proxyId: string) => {
+      let current = usage.get(proxyId);
+      if (!current) {
+        current = { environmentIds: [], chainedProxyIds: [] };
+        usage.set(proxyId, current);
+      }
+      return current;
+    };
+    for (const row of this.database().prepare("SELECT id, proxy_id FROM browser_environments WHERE proxy_id IS NOT NULL AND proxy_id != ''").all()) {
+      const { id, proxy_id: proxyId } = row as { id: string; proxy_id: string };
+      entry(proxyId).environmentIds.push(id);
+    }
+    for (const row of this.database().prepare("SELECT id, pre_proxy_id FROM proxies WHERE pre_proxy_id != ''").all()) {
+      const { id, pre_proxy_id: preProxyId } = row as { id: string; pre_proxy_id: string };
+      entry(preProxyId).chainedProxyIds.push(id);
+    }
+    return usage;
+  }
+
+  async listProxySubscriptions(options: { includeSecrets?: boolean } = {}): Promise<ProxySubscriptionEntity[]> {
+    await this.initialize();
+    return this.database()
+      .prepare("SELECT * FROM proxy_subscriptions ORDER BY created_at ASC")
+      .all()
+      .map((row) => proxySubscriptionFromRow(row as ProxySubscriptionRow, { includeSecrets: options.includeSecrets === true }));
+  }
+
+  async getProxySubscription(id: string, options: { includeSecrets?: boolean } = {}): Promise<ProxySubscriptionEntity | undefined> {
+    await this.initialize();
+    const row = this.database().prepare("SELECT * FROM proxy_subscriptions WHERE id = ?").get(id) as ProxySubscriptionRow | undefined;
+    return row ? proxySubscriptionFromRow(row, { includeSecrets: options.includeSecrets === true }) : undefined;
+  }
+
+  async createProxySubscription(input: Partial<ProxySubscriptionEntity>): Promise<ProxySubscriptionEntity> {
+    await this.initialize();
+    const timestamp = nowIso();
+    const subscription = normalizeProxySubscriptionEntity({
+      ...input,
+      id: createEntityId(input.id, "subscription"),
+      lastRefresh: undefined,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    this.assertUnusedId("proxy_subscriptions", subscription.id);
+    const duplicate = this.database()
+      .prepare("SELECT id FROM proxy_subscriptions WHERE url = ?")
+      .get(subscription.url) as IdRow | undefined;
+    if (duplicate) {
+      throw Object.assign(new Error("这个订阅地址已经存在。"), { status: 409, code: "PROXY_SUBSCRIPTION_EXISTS", subscriptionId: duplicate.id });
+    }
+    this.insertProxySubscription(subscription);
+    return subscription;
+  }
+
+  async updateProxySubscription(id: string, patch: Partial<ProxySubscriptionEntity>): Promise<ProxySubscriptionEntity> {
+    await this.initialize();
+    const existing = this.getProxySubscriptionOrThrow(id, { includeSecrets: true });
+    // A client that only saw the masked list never gets to blank the address; "" means unchanged.
+    const { url: patchedUrl, lastRefresh: _ignoredRefresh, ...rest } = patch;
+    const url = typeof patchedUrl === "string" && patchedUrl.trim() ? patchedUrl.trim() : existing.url;
+    const updated = normalizeProxySubscriptionEntity({
+      ...existing,
+      ...rest,
+      url,
+      id: existing.id,
+      // A new address has not been read yet: keeping the old outcome would describe a different source.
+      lastRefresh: url === existing.url ? existing.lastRefresh : undefined,
+      createdAt: existing.createdAt,
+      updatedAt: nowIso(),
+    });
+    if (url !== existing.url) {
+      const duplicate = this.database()
+        .prepare("SELECT id FROM proxy_subscriptions WHERE url = ? AND id != ?")
+        .get(url, id) as IdRow | undefined;
+      if (duplicate) {
+        throw Object.assign(new Error("这个订阅地址已经存在。"), { status: 409, code: "PROXY_SUBSCRIPTION_EXISTS", subscriptionId: duplicate.id });
+      }
+    }
+    this.insertProxySubscription(updated);
+    return updated;
+  }
+
+  async saveProxySubscriptionRefresh(id: string, result: ProxySubscriptionRefreshResult): Promise<ProxySubscriptionEntity> {
+    await this.initialize();
+    const existing = this.getProxySubscriptionOrThrow(id, { includeSecrets: true });
+    // Like a proxy probe: an observation, not an edit, so updatedAt stays.
+    this.insertProxySubscription({ ...existing, lastRefresh: result });
+    return this.getProxySubscriptionOrThrow(id, { includeSecrets: false });
+  }
+
+  /**
+   * Deleting a subscription never touches a proxy that is in use. With `proxies: "keep"` every member
+   * simply becomes standalone; with `"delete"` the unused members go and the used ones are kept
+   * as standalone proxies, reported back so the caller can say so.
+   */
+  async deleteProxySubscription(id: string, options: { proxies: "keep" | "delete" }): Promise<{ detached: string[]; deleted: string[] }> {
+    await this.initialize();
+    this.getProxySubscriptionOrThrow(id, { includeSecrets: false });
+    const members = (await this.listProxies()).filter((proxy) => proxy.subscriptionId === id);
+    const usage = await this.listProxyUsage();
+    const outcome = { detached: [] as string[], deleted: [] as string[] };
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const member of members) {
+        const used = usage.has(member.id);
+        if (options.proxies === "delete" && !used) {
+          db.prepare("DELETE FROM proxies WHERE id = ?").run(member.id);
+          outcome.deleted.push(member.id);
+        } else {
+          db.prepare("UPDATE proxies SET subscription_id = '' WHERE id = ?").run(member.id);
+          outcome.detached.push(member.id);
+        }
+      }
+      db.prepare("DELETE FROM proxy_subscriptions WHERE id = ?").run(id);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    for (const deletedId of outcome.deleted) this.clearPreProxyReferences(deletedId);
+    return outcome;
+  }
+
+  async listExtensions(): Promise<ExtensionEntity[]> {
+    await this.initialize();
+    return this.database()
+      .prepare("SELECT * FROM extensions ORDER BY updated_at DESC")
+      .all()
+      .map((row) => extensionFromRow(row as ExtensionRow));
+  }
+
+  async getExtension(id: string): Promise<ExtensionEntity | undefined> {
+    await this.initialize();
+    const row = this.database().prepare("SELECT * FROM extensions WHERE id = ?").get(id) as ExtensionRow | undefined;
+    return row ? extensionFromRow(row) : undefined;
+  }
+
+  async createExtension(input: Partial<ExtensionEntity>): Promise<ExtensionEntity> {
+    await this.initialize();
+    const timestamp = nowIso();
+    const extension = normalizeExtensionEntity({
+      ...input,
+      id: createEntityId(input.id, "extension"),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    this.assertUnusedId("extensions", extension.id);
+    this.insertExtension(extension);
+    return extension;
+  }
+
+  async updateExtension(
+    id: string,
+    patch: Partial<ExtensionEntity>,
+    beforeWrite?: () => void,
+  ): Promise<ExtensionEntity> {
+    await this.initialize();
+    // The caller may have awaited external policy immediately before this
+    // method. Recheck its synchronous guard after our final async boundary and
+    // before any SQLite projection becomes visible.
+    beforeWrite?.();
+    const existing = this.getExtensionOrThrow(id);
+    const updated = normalizeExtensionEntity({
+      ...existing,
+      ...patch,
+      id: existing.id,
+      createdAt: existing.createdAt,
+      updatedAt: nowIso(),
+    });
+    this.insertExtension(updated);
+    this.refreshProfilesFromEnvironments(rowsToIds(this.database(), "environment_extensions", "extension_id", id, "environment_id"));
+    return updated;
+  }
+
+  async commitExtensionAcquisition(input: ExtensionAcquisitionDatabaseCommitInput): Promise<ExtensionEntity> {
+    await this.initialize();
+    const extension = normalizeExtensionEntity(input.extension);
+    const environmentBindings = normalizeExtensionBindingMetadata(input.environmentBindings) ?? [];
+    if (environmentBindings.some((binding) => binding.extensionId !== extension.id)) {
+      throw new TypeError("Extension acquisition bindings must name the target.");
+    }
+    const environmentIds = uniqueStrings(environmentBindings.map((binding) => binding.environmentId));
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (input.expectedArtifactProviderId !== undefined) {
+        const settingsRow = db.prepare("SELECT settings_json FROM app_settings WHERE id = 'default'")
+          .get() as SettingsRow | undefined;
+        const settings = settingsRow ? parseSettings(settingsRow.settings_json) : DEFAULT_APP_SETTINGS;
+        if (settings.extensionAcquisition.artifactProviderId !== input.expectedArtifactProviderId) {
+          throw Object.assign(new Error("The selected extension download channel changed before commit."), {
+            status: 409,
+            code: "ARTIFACT_PROVIDER_DISABLED",
+          });
+        }
+      }
+      if (input.expectedEnvironmentBindings !== undefined) {
+        const expected = normalizeExtensionBindingMetadata(input.expectedEnvironmentBindings) ?? [];
+        const current = db.prepare(`
+          SELECT environment_id, extension_id, lifecycle_revision
+          FROM environment_extensions
+          WHERE extension_id = ?
+          ORDER BY environment_id ASC
+        `).all(extension.id).map((row) => {
+          const value = row as EnvironmentExtensionBindingRow;
+          return {
+            environmentId: value.environment_id,
+            extensionId: value.extension_id,
+            lifecycleRevision: value.lifecycle_revision,
+          };
+        });
+        if (JSON.stringify(current) !== JSON.stringify(expected)) {
+          throw Object.assign(new Error("Extension acquisition bindings changed before commit."), {
+            status: 409,
+            code: "ACQUISITION_CONFLICT_TARGET_INVALID",
+          });
+        }
+      }
+      const currentRow = db.prepare("SELECT * FROM extensions WHERE id = ?").get(extension.id) as ExtensionRow | undefined;
+      if (input.expectedExistingUpdatedAt === undefined) {
+        if (currentRow) throw Object.assign(new Error("Extension acquisition target already exists."), {
+          status: 409,
+          code: "ACQUISITION_CONFLICT_TARGET_INVALID",
+        });
+      } else {
+        const current = currentRow ? extensionFromRow(currentRow) : undefined;
+        if (!current || current.updatedAt !== input.expectedExistingUpdatedAt) {
+          throw Object.assign(new Error("Extension acquisition target changed before commit."), {
+            status: 409,
+            code: "ACQUISITION_CONFLICT_TARGET_INVALID",
+          });
+        }
+        if (extension.createdAt !== current.createdAt) {
+          throw new TypeError("Extension acquisition cannot change the target creation time.");
+        }
+      }
+      for (const environmentId of environmentIds) this.getActiveEnvironmentOrThrow(environmentId);
+      this.insertExtension(extension);
+      for (const binding of environmentBindings) {
+        db.prepare(`
+          INSERT OR IGNORE INTO environment_extensions (environment_id, extension_id, lifecycle_revision)
+          VALUES (?, ?, ?)
+        `).run(binding.environmentId, extension.id, binding.lifecycleRevision as string);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    this.refreshProfilesFromEnvironments([
+      ...rowsToIds(db, "environment_extensions", "extension_id", extension.id, "environment_id"),
+    ]);
+    return extension;
+  }
+
+  async deleteExtension(id: string): Promise<void> {
+    await this.initialize();
+    this.getExtensionOrThrow(id);
+    this.throwIfReferenced("extension", id);
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      // Trashed environments keep their binding rows; leaving them behind would resurrect a
+      // dangling reference the moment the environment is restored.
+      db.prepare("DELETE FROM environment_extensions WHERE extension_id = ?").run(id);
+      db.prepare("DELETE FROM extensions WHERE id = ?").run(id);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async listEnvironmentExtensionBindings(environmentId: string): Promise<EnvironmentExtensionBinding[]> {
+    await this.initialize();
+    return this.database()
+      .prepare(`
+        SELECT environment_id, extension_id, lifecycle_revision
+        FROM environment_extensions
+        WHERE environment_id = ?
+        ORDER BY extension_id ASC
+      `)
+      .all(environmentId)
+      .map((row) => {
+        const binding = row as EnvironmentExtensionBindingRow;
+        return {
+          environmentId: binding.environment_id,
+          extensionId: binding.extension_id,
+          lifecycleRevision: binding.lifecycle_revision,
+        };
+      });
+  }
+
+  async listExtensionEnvironmentBindings(extensionId: string): Promise<EnvironmentExtensionBinding[]> {
+    await this.initialize();
+    return this.database()
+      .prepare(`
+        SELECT environment_id, extension_id, lifecycle_revision
+        FROM environment_extensions
+        WHERE extension_id = ?
+        ORDER BY environment_id ASC
+      `)
+      .all(extensionId)
+      .map((row) => {
+        const binding = row as EnvironmentExtensionBindingRow;
+        return {
+          environmentId: binding.environment_id,
+          extensionId: binding.extension_id,
+          lifecycleRevision: binding.lifecycle_revision,
+        };
+      });
+  }
+
+  async bindExtensionToEnvironments(id: string, environmentIds: string[]): Promise<BrowserEnvironment[]> {
+    await this.initialize();
+    this.getExtensionOrThrow(id);
+    const cleanEnvironmentIds = uniqueStrings(environmentIds);
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const environmentId of cleanEnvironmentIds) {
+        this.getActiveEnvironmentOrThrow(environmentId);
+        db.prepare(`
+          INSERT OR IGNORE INTO environment_extensions (environment_id, extension_id, lifecycle_revision)
+          VALUES (?, ?, ?)
+        `).run(environmentId, id, createId("binding"));
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    this.refreshProfilesFromEnvironments(cleanEnvironmentIds);
+    return cleanEnvironmentIds.map((environmentId) => this.getEnvironmentOrThrow(environmentId));
+  }
+
+  async unbindExtensionFromEnvironments(id: string, environmentIds?: string[]): Promise<BrowserEnvironment[]> {
+    await this.initialize();
+    this.getExtensionOrThrow(id);
+    const affected = environmentIds
+      ? uniqueStrings(environmentIds)
+      : rowsToIds(this.database(), "environment_extensions", "extension_id", id, "environment_id");
+    // Validate the complete explicit request before the first DELETE. Previously a mixed valid/missing
+    // list committed the valid deletion and only threw while building the response after COMMIT.
+    if (environmentIds) {
+      for (const environmentId of affected) this.getEnvironmentOrThrow(environmentId);
+    }
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const environmentId of affected) {
+        db.prepare("DELETE FROM environment_extensions WHERE environment_id = ? AND extension_id = ?").run(environmentId, id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    this.refreshProfilesFromEnvironments(affected);
+    return affected.map((environmentId) => this.getEnvironmentOrThrow(environmentId));
+  }
+
+  async getSettings(): Promise<AppSettings> {
+    await this.initialize();
+    const row = this.database()
+      .prepare("SELECT settings_json FROM app_settings WHERE id = 'default'")
+      .get() as SettingsRow | undefined;
+    const settings = row ? parseSettings(row.settings_json) : DEFAULT_APP_SETTINGS;
+    if (!row) this.writeSettings(settings);
+    return settings;
+  }
+
+  async saveSettings(patch: AppSettingsPatch): Promise<AppSettings> {
+    await this.initialize();
+    // Keep the synchronous SQLite read/merge/write in one turn. Awaiting getSettings() here
+    // lets another settings writer read the same row and later replace a different group's patch.
+    const row = this.getSettingsRow();
+    const current = row ? parseSettings(row.settings_json) : DEFAULT_APP_SETTINGS;
+    const next = mergeSettings(current, patch);
+    this.writeSettings(next);
+    return next;
+  }
+
+  async getInfo(): Promise<StorageInfo> {
+    await this.initialize();
+    return this.storageInfo();
+  }
+
+  async exportFullBackupData(): Promise<AppBackupData> {
+    await this.initialize();
+    const extensions = await this.listExtensions();
+    return {
+      schemaVersion: APP_BACKUP_SCHEMA_VERSION,
+      settings: await this.getSettings(),
+      profiles: this.readAllProfileRows(),
+      environments: this.readEnvironments({ includeDeleted: true }),
+      groups: await this.listGroups(),
+      tags: await this.listTags(),
+      proxies: await this.listProxies({ includeSecrets: true }),
+      proxySubscriptions: await this.listProxySubscriptions({ includeSecrets: true }),
+      extensions,
+      retainedExtensionArtifacts: extensions
+        .filter((extension) => extension.provenance?.artifact.retained && extension.artifactArchivePath)
+        .map((extension) => ({
+          extensionId: extension.id,
+          archivePath: `extension-artifacts/${extension.id}/current.crx`,
+          sha256: extension.provenance!.artifact.sha256!,
+        })),
+      environmentExtensionBindings: this.readAllEnvironmentExtensionBindings(),
+    };
+  }
+
+  async restoreFullBackupData(data: AppBackupData): Promise<void> {
+    await this.initialize();
+    const normalized = normalizeFullBackupData(data, this.dataDir);
+    const db = this.database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      this.clearUserDataTables();
+      for (const group of normalized.groups) this.insertGroupExact(group);
+      for (const tag of normalized.tags) this.insertTagExact(tag);
+      for (const proxy of normalized.proxies) this.insertProxyExact(proxy);
+      for (const subscription of normalized.proxySubscriptions ?? []) this.insertProxySubscription(subscription);
+      // A backup from before subscriptions, or one edited by hand, may name a subscription it does
+      // not carry; such members are standalone proxies, not orphans.
+      db.prepare("UPDATE proxies SET subscription_id = '' WHERE subscription_id != '' AND subscription_id NOT IN (SELECT id FROM proxy_subscriptions)").run();
+      for (const extension of normalized.extensions) this.insertExtensionExact(extension);
+      for (const profile of normalized.profiles) this.upsertProfileRow(profile);
+      for (const environment of normalized.environments) this.insertEnvironmentExact(environment);
+      this.restoreBindingRevisions(normalized.environmentExtensionBindings);
+      this.writeSettings(normalized.settings);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  close(): void {
+    this.db?.close();
+    this.db = undefined;
+    this.initialization = undefined;
+  }
+
+  private async initializeOnce(): Promise<void> {
+    await fs.mkdir(path.dirname(this.databasePath), { recursive: true });
+    this.db = new DatabaseSync(this.databasePath);
+    this.db.exec("PRAGMA journal_mode = WAL");
+    this.db.exec("PRAGMA foreign_keys = ON");
+    this.applySchema();
+    this.syncRegistryFromProfiles();
+    if (!this.getSettingsRow()) this.writeSettings(DEFAULT_APP_SETTINGS);
+  }
+
+  private applySchema(): void {
+    this.database().exec(`
+      CREATE TABLE IF NOT EXISTS profiles (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        profile_group TEXT NOT NULL,
+        tags_json TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('persistent', 'ephemeral')),
+        launcher TEXT NOT NULL,
+        proxy_enabled INTEGER NOT NULL CHECK (proxy_enabled IN (0, 1)),
+        start_url TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        profile_json TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_profiles_group ON profiles(profile_group);
+      CREATE INDEX IF NOT EXISTS idx_profiles_updated_at ON profiles(updated_at);
+      CREATE INDEX IF NOT EXISTS idx_profiles_mode ON profiles(mode);
+      CREATE INDEX IF NOT EXISTS idx_profiles_proxy_enabled ON profiles(proxy_enabled);
+
+      CREATE TABLE IF NOT EXISTS groups (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        color TEXT NOT NULL,
+        description TEXT NOT NULL,
+        sort_order INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('enabled', 'disabled')),
+        is_default INTEGER NOT NULL CHECK (is_default IN (0, 1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS tags (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        color TEXT NOT NULL,
+        description TEXT NOT NULL,
+        sort_order INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('enabled', 'disabled')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS proxies (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        scheme TEXT NOT NULL,
+        host TEXT NOT NULL,
+        port TEXT NOT NULL,
+        username TEXT NOT NULL,
+        password TEXT NOT NULL,
+        bypass TEXT NOT NULL,
+        notes TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('enabled', 'disabled')),
+        last_check_json TEXT,
+        share_link TEXT NOT NULL DEFAULT '',
+        pre_proxy_id TEXT NOT NULL DEFAULT '',
+        ip_strategy TEXT NOT NULL DEFAULT 'auto',
+        utls_fingerprint TEXT NOT NULL DEFAULT '',
+        subscription_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS proxy_subscriptions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('enabled', 'disabled')),
+        auto_refresh INTEGER NOT NULL CHECK (auto_refresh IN (0, 1)),
+        refresh_interval_hours INTEGER NOT NULL,
+        last_refresh_json TEXT,
+        notes TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS extensions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_url TEXT NOT NULL,
+        store_id TEXT,
+        store_url TEXT,
+        store_namespace TEXT,
+        provenance_json TEXT,
+        artifact_archive_path TEXT,
+        update_provider_id TEXT,
+        update_state_json TEXT,
+        version TEXT NOT NULL,
+        manifest_version INTEGER,
+        permissions_json TEXT NOT NULL,
+        host_permissions_json TEXT NOT NULL,
+        optional_permissions_json TEXT NOT NULL DEFAULT '[]',
+        optional_host_permissions_json TEXT NOT NULL DEFAULT '[]',
+        permission_risks_json TEXT NOT NULL,
+        install_state TEXT NOT NULL,
+        update_policy TEXT NOT NULL,
+        sha256 TEXT,
+        manifest_sha256 TEXT,
+        local_path TEXT,
+        manifest_key TEXT,
+        directory_mode TEXT,
+        last_installed_at TEXT,
+        last_checked_at TEXT,
+        last_error TEXT,
+        status TEXT NOT NULL CHECK (status IN ('enabled', 'disabled')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS browser_environments (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        notes TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('persistent', 'ephemeral')),
+        start_url TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        proxy_id TEXT,
+        runtime_profile_json TEXT NOT NULL,
+        last_network_check_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT,
+        delete_reason TEXT,
+        FOREIGN KEY (group_id) REFERENCES groups(id),
+        FOREIGN KEY (proxy_id) REFERENCES proxies(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS environment_tags (
+        environment_id TEXT NOT NULL,
+        tag_id TEXT NOT NULL,
+        PRIMARY KEY (environment_id, tag_id),
+        FOREIGN KEY (environment_id) REFERENCES browser_environments(id) ON DELETE CASCADE,
+        FOREIGN KEY (tag_id) REFERENCES tags(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS environment_extensions (
+        environment_id TEXT NOT NULL,
+        extension_id TEXT NOT NULL,
+        lifecycle_revision TEXT NOT NULL,
+        PRIMARY KEY (environment_id, extension_id),
+        FOREIGN KEY (environment_id) REFERENCES browser_environments(id) ON DELETE CASCADE,
+        FOREIGN KEY (extension_id) REFERENCES extensions(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_browser_environments_group ON browser_environments(group_id);
+      CREATE INDEX IF NOT EXISTS idx_browser_environments_proxy ON browser_environments(proxy_id);
+      CREATE INDEX IF NOT EXISTS idx_browser_environments_deleted_at ON browser_environments(deleted_at);
+
+      CREATE TABLE IF NOT EXISTS app_settings (
+        id TEXT PRIMARY KEY CHECK (id = 'default'),
+        settings_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+  }
+
+  private readProfiles(): BrowserProfile[] {
+    return this.database()
+      .prepare(`
+        SELECT id, profile_json
+        FROM profiles
+        WHERE NOT EXISTS (
+          SELECT 1 FROM browser_environments
+          WHERE browser_environments.id = profiles.id
+            AND browser_environments.deleted_at IS NOT NULL
+        )
+        ORDER BY updated_at DESC
+      `)
+      .all()
+      .map((row) => parseProfile((row as ProfileRow).profile_json));
+  }
+
+  private clearUserDataTables(): void {
+    this.database().exec(`
+      DELETE FROM environment_extensions;
+      DELETE FROM environment_tags;
+      DELETE FROM browser_environments;
+      DELETE FROM profiles;
+      DELETE FROM extensions;
+      DELETE FROM proxies;
+      DELETE FROM proxy_subscriptions;
+      DELETE FROM tags;
+      DELETE FROM groups;
+    `);
+  }
+
+  private insertProfile(profile: BrowserProfile): void {
+    this.upsertProfile(normalizeProfile(profile));
+  }
+
+  private upsertProfile(profile: BrowserProfile): void {
+    const normalized = normalizeProfile(profile);
+    this.upsertProfileRow(normalized);
+    this.upsertEnvironmentFromProfile(normalized);
+  }
+
+  private upsertProfileRow(profile: BrowserProfile): void {
+    const normalized = normalizeProfile(profile);
+    this.database()
+      .prepare(`
+        INSERT INTO profiles (
+          id, name, profile_group, tags_json, mode, launcher, proxy_enabled,
+          start_url, created_at, updated_at, profile_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          profile_group = excluded.profile_group,
+          tags_json = excluded.tags_json,
+          mode = excluded.mode,
+          launcher = excluded.launcher,
+          proxy_enabled = excluded.proxy_enabled,
+          start_url = excluded.start_url,
+          created_at = excluded.created_at,
+          updated_at = excluded.updated_at,
+          profile_json = excluded.profile_json
+      `)
+      .run(
+        normalized.id,
+        normalized.name,
+        normalized.group,
+        JSON.stringify(normalized.tags),
+        normalized.mode,
+        normalized.runtime.launcher,
+        normalized.proxy.enabled ? 1 : 0,
+        normalized.startUrl,
+        normalized.createdAt,
+        normalized.updatedAt,
+        JSON.stringify(normalized),
+      );
+  }
+
+  private syncRegistryFromProfiles(): void {
+    for (const profile of this.readAllProfileRows()) {
+      this.upsertEnvironmentFromProfile(profile);
+    }
+  }
+
+  private readAllProfileRows(): BrowserProfile[] {
+    return this.database()
+      .prepare("SELECT profile_json FROM profiles ORDER BY updated_at DESC")
+      .all()
+      .map((row) => parseProfile((row as ProfileRow).profile_json));
+  }
+
+  /**
+   * Uniqueness deliberately spans the trash — a soft-deleted environment keeps its `profiles` row, so
+   * restoring it must not be able to collide with a name taken meanwhile. A trash hit gets its own code
+   * because the occupier is one the environment table cannot show, and a bare "name must be unique" left
+   * users looking for a duplicate that was not there.
+   *
+   * The `LIMIT 1` is ordered so an active occupier always wins: that is the actionable message of the two,
+   * because the user can see that row in the list, whereas the trash message sends them somewhere else.
+   * Nothing this class exposes can produce two holders of one normalized name — the check itself refuses
+   * the second — but `restoreFullBackupData` writes rows exactly as the backup names them, so a hand-edited
+   * one can. Without the order, which of the two messages that user got would be whatever the scan reached
+   * first.
+   */
+  private assertUniqueProfileName(name: string, profileId: string): void {
+    const normalizedName = normalizeProfileNameKey(name);
+    const duplicate = this.database()
+      .prepare(`
+        SELECT id,
+          EXISTS (
+            SELECT 1 FROM browser_environments
+            WHERE browser_environments.id = profiles.id
+              AND browser_environments.deleted_at IS NOT NULL
+          ) AS in_trash
+        FROM profiles
+        WHERE lower(trim(name)) = ?
+          AND id != ?
+        ORDER BY in_trash ASC, id ASC
+        LIMIT 1
+      `)
+      .get(normalizedName, profileId) as { id: string; in_trash: number } | undefined;
+    if (duplicate) {
+      const inTrash = Number(duplicate.in_trash) === 1;
+      const error = Object.assign(
+        new Error(inTrash ? "该名称被回收站中的环境占用，请改名或先清空回收站" : "Profile 名称不能重复"),
+        {
+          status: 409,
+          code: inTrash ? "PROFILE_NAME_DUPLICATE_IN_TRASH" : "PROFILE_NAME_DUPLICATE",
+        },
+      );
+      throw error;
+    }
+  }
+
+  private assertUnusedId(table: IdentityTable, id: string): void {
+    const duplicate = this.database()
+      .prepare(`SELECT id FROM ${table} WHERE id = ? LIMIT 1`)
+      .get(id) as IdRow | undefined;
+    if (duplicate) {
+      throw Object.assign(new Error("Entity id already exists"), {
+        status: 409,
+        code: "ENTITY_ID_DUPLICATE",
+      });
+    }
+  }
+
+  private nextProfileCopyName(baseName: string): string {
+    const cleanBase = baseName.trim() || "Profile";
+    const names = new Set(this.readAllProfileRows().map((profile) => normalizeProfileNameKey(profile.name)));
+    const first = `${cleanBase} 副本`;
+    if (!names.has(normalizeProfileNameKey(first))) return first;
+    for (let index = 2; index < 10_000; index += 1) {
+      const candidate = `${first} ${index}`;
+      if (!names.has(normalizeProfileNameKey(candidate))) return candidate;
+    }
+    return `${first} ${Date.now()}`;
+  }
+
+  private readEnvironments(options: { includeDeleted: boolean; onlyDeleted?: boolean }): BrowserEnvironment[] {
+    const where = options.onlyDeleted
+      ? "WHERE deleted_at IS NOT NULL"
+      : options.includeDeleted
+        ? ""
+        : "WHERE deleted_at IS NULL";
+    return this.database()
+      .prepare(`SELECT * FROM browser_environments ${where} ORDER BY updated_at DESC`)
+      .all()
+      .map((row) => this.environmentFromRow(row as EnvironmentRow));
+  }
+
+  private ensurePackageGroup(group: GroupEntity): GroupEntity {
+    const cleanName = group.name.trim() || "默认";
+    const existing = this.database()
+      .prepare("SELECT * FROM groups WHERE name = ?")
+      .get(cleanName) as GroupRow | undefined;
+    if (existing) return groupFromRow(existing);
+
+    const timestamp = nowIso();
+    const importedGroup: GroupEntity = {
+      ...group,
+      id: createId("group"),
+      name: cleanName,
+      color: cleanColor(group.color, colorForName(cleanName)),
+      order: Number.isFinite(group.order) ? Number(group.order) : this.nextSortOrder("groups"),
+      status: group.status === "disabled" ? "disabled" : "enabled",
+      isDefault: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    this.insertGroup(importedGroup);
+    return importedGroup;
+  }
+
+  private ensurePackageExtension(
+    extension: ExtensionEntity,
+    requestedId: string | undefined,
+    localPath: string | undefined,
+    artifactArchivePath?: string,
+    packageManifestKey?: string,
+  ): ExtensionEntity {
+    const cleanRequestedId = requestedId?.trim();
+    if (cleanRequestedId) {
+      const existing = this.database()
+        .prepare("SELECT * FROM extensions WHERE id = ? LIMIT 1")
+        .get(cleanRequestedId) as ExtensionRow | undefined;
+      if (existing) {
+        const current = extensionFromRow(existing);
+        if (
+          packageManifestKey
+          && !current.manifestKey
+          && current.installState === "installed"
+        ) {
+          const adopted = normalizeExtensionEntity({ ...current, manifestKey: packageManifestKey });
+          this.insertExtension(adopted);
+          return adopted;
+        }
+        return current;
+      }
+    }
+
+    const timestamp = nowIso();
+    const restoredFiles = Boolean(localPath);
+    const restoredArtifact = Boolean(artifactArchivePath);
+    const missingInstalledFiles = !restoredFiles
+      && (extension.installState === "installed" || extension.installState === "update-available");
+    const importedExtension = normalizeExtensionEntity({
+      ...extension,
+      id: cleanRequestedId,
+      sourceKind: restoredArtifact ? "local-crx" : "managed-snapshot",
+      sourceUrl: artifactArchivePath ?? "",
+      localPath,
+      artifactArchivePath,
+      provenance: extension.provenance
+        ? {
+            ...extension.provenance,
+            transfer: { kind: "environment-package-import", at: timestamp },
+          }
+        : undefined,
+      directoryMode: undefined,
+      installState: missingInstalledFiles ? "local-missing" : restoredFiles ? "installed" : extension.installState,
+      // `lastInstalledAt` doubles as the explicit package revision consumed by lifecycle protection.
+      // Re-homing identical package bytes must preserve it, otherwise the imported environment's first
+      // launch looks like a reinstall and third-party extensions receive a synthetic update.
+      lastInstalledAt: restoredFiles ? extension.lastInstalledAt ?? timestamp : undefined,
+      lastCheckedAt: undefined,
+      lastError: restoredFiles ? undefined : missingInstalledFiles ? "Extension files missing from imported package." : extension.lastError,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    this.assertUnusedId("extensions", importedExtension.id);
+    this.insertExtension(importedExtension);
+    return importedExtension;
+  }
+
+  private insertImportedEnvironment(
+    environment: BrowserEnvironment,
+    groupIdMap: Record<string, string>,
+    extensionIdMap: Record<string, string>,
+    requestedId: string | undefined,
+  ): BrowserEnvironment {
+    const timestamp = nowIso();
+    const id = requestedId?.trim() || createId();
+    this.assertUnusedId("profiles", id);
+    this.assertUnusedId("browser_environments", id);
+
+    const groupId = groupIdMap[environment.groupId] ?? this.ensureGroup(environment.runtimeProfile.group, timestamp).id;
+    const group = this.getGroupOrThrow(groupId);
+    const unmappedExtensionIds = environment.extensionIds.filter((extensionId) => !extensionIdMap[extensionId]);
+    if (unmappedExtensionIds.length > 0) {
+      throw Object.assign(new Error("Environment package references an unknown extension."), {
+        status: 400,
+        code: "ENVIRONMENT_PACKAGE_SCHEMA_INVALID",
+      });
+    }
+    const extensionIds = uniqueStrings(environment.extensionIds.map((extensionId) => extensionIdMap[extensionId]));
+    const profileName = this.nextImportedProfileName(environment.name || environment.runtimeProfile.name);
+    const runtimeProfile = normalizeProfile({
+      ...environment.runtimeProfile,
+      id,
+      name: profileName,
+      group: group.name,
+      tags: [...environment.runtimeProfile.tags],
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    this.ensureTags(runtimeProfile.tags, timestamp);
+    this.upsertProfileRow(runtimeProfile);
+    this.database()
+      .prepare(`
+        INSERT INTO browser_environments (
+          id, name, notes, mode, start_url, group_id, proxy_id, runtime_profile_json, last_network_check_json,
+          created_at, updated_at, deleted_at, delete_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL)
+      `)
+      .run(
+        id,
+        runtimeProfile.name,
+        environment.notes,
+        runtimeProfile.mode,
+        runtimeProfile.startUrl,
+        groupId,
+        JSON.stringify(runtimeProfile),
+        environment.lastNetworkCheck ? JSON.stringify(environment.lastNetworkCheck) : null,
+        timestamp,
+        timestamp,
+      );
+    this.replaceEnvironmentTags(id, runtimeProfile.tags);
+    for (const extensionId of extensionIds) {
+      this.database()
+        .prepare("INSERT OR IGNORE INTO environment_extensions (environment_id, extension_id, lifecycle_revision) VALUES (?, ?, ?)")
+        .run(id, extensionId, createId("binding"));
+    }
+    this.upsertProfileRow(this.profileFromEnvironment(this.getEnvironmentOrThrow(id)));
+    return this.getEnvironmentOrThrow(id);
+  }
+
+  private nextImportedProfileName(baseName: string): string {
+    const cleanBase = baseName.trim() || "Imported Environment";
+    const names = new Set(this.readAllProfileRows().map((profile) => normalizeProfileNameKey(profile.name)));
+    if (!names.has(normalizeProfileNameKey(cleanBase))) return cleanBase;
+    const first = `${cleanBase} import`;
+    if (!names.has(normalizeProfileNameKey(first))) return first;
+    for (let index = 2; index < 10_000; index += 1) {
+      const candidate = `${first} ${index}`;
+      if (!names.has(normalizeProfileNameKey(candidate))) return candidate;
+    }
+    return `${first} ${Date.now()}`;
+  }
+
+  private upsertEnvironmentFromProfile(profile: BrowserProfile): void {
+    const normalized = normalizeProfile(profile);
+    const group = this.ensureGroup(normalized.group, normalized.createdAt);
+    this.ensureTags(normalized.tags, normalized.createdAt);
+
+    const existing = this.database()
+      .prepare("SELECT proxy_id, deleted_at, delete_reason, last_network_check_json FROM browser_environments WHERE id = ?")
+      .get(normalized.id) as Pick<EnvironmentRow, "proxy_id" | "deleted_at" | "delete_reason" | "last_network_check_json"> | undefined;
+
+    this.database()
+      .prepare(`
+        INSERT INTO browser_environments (
+          id, name, notes, mode, start_url, group_id, proxy_id, runtime_profile_json, last_network_check_json,
+          created_at, updated_at, deleted_at, delete_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          notes = excluded.notes,
+          mode = excluded.mode,
+          start_url = excluded.start_url,
+          group_id = excluded.group_id,
+          proxy_id = excluded.proxy_id,
+          runtime_profile_json = excluded.runtime_profile_json,
+          last_network_check_json = excluded.last_network_check_json,
+          created_at = excluded.created_at,
+          updated_at = excluded.updated_at,
+          deleted_at = excluded.deleted_at,
+          delete_reason = excluded.delete_reason
+      `)
+      .run(
+        normalized.id,
+        normalized.name,
+        normalized.notes,
+        normalized.mode,
+        normalized.startUrl,
+        group.id,
+        existing?.proxy_id ?? null,
+        JSON.stringify(normalized),
+        existing?.last_network_check_json ?? null,
+        normalized.createdAt,
+        normalized.updatedAt,
+        existing?.deleted_at ?? null,
+        existing?.delete_reason ?? null,
+      );
+
+    this.replaceEnvironmentTags(normalized.id, normalized.tags);
+  }
+
+  private ensureGroup(name: string, timestamp: string): GroupEntity {
+    const cleanName = name.trim() || "默认";
+    const existing = this.database()
+      .prepare("SELECT * FROM groups WHERE name = ?")
+      .get(cleanName) as GroupRow | undefined;
+    if (existing) return groupFromRow(existing);
+
+    const id = createId("group");
+    const sortOrder = this.nextSortOrder("groups");
+    this.database()
+      .prepare(`
+        INSERT INTO groups (id, name, color, description, sort_order, status, is_default, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'enabled', ?, ?, ?)
+      `)
+      .run(id, cleanName, colorForName(cleanName), "", sortOrder, cleanName === "默认" ? 1 : 0, timestamp, timestamp);
+    return {
+      id,
+      name: cleanName,
+      color: colorForName(cleanName),
+      description: "",
+      order: sortOrder,
+      status: "enabled",
+      isDefault: cleanName === "默认",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+  }
+
+  private insertGroup(group: GroupEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO groups (id, name, color, description, sort_order, status, is_default, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          color = excluded.color,
+          description = excluded.description,
+          sort_order = excluded.sort_order,
+          status = excluded.status,
+          is_default = excluded.is_default,
+          updated_at = excluded.updated_at
+      `)
+      .run(
+        group.id,
+        group.name,
+        group.color,
+        group.description,
+        group.order,
+        group.status,
+        group.isDefault ? 1 : 0,
+        group.createdAt,
+        group.updatedAt,
+      );
+  }
+
+  private insertGroupExact(group: GroupEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO groups (id, name, color, description, sort_order, status, is_default, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        group.id,
+        group.name,
+        group.color,
+        group.description,
+        group.order,
+        group.status,
+        group.isDefault ? 1 : 0,
+        group.createdAt,
+        group.updatedAt,
+      );
+  }
+
+  private getGroupOrThrow(id: string): GroupEntity {
+    const row = this.database().prepare("SELECT * FROM groups WHERE id = ?").get(id) as GroupRow | undefined;
+    if (!row) throw Object.assign(new Error("分组不存在"), { status: 404 });
+    return groupFromRow(row);
+  }
+
+  private ensureTags(tags: string[], timestamp: string): TagEntity[] {
+    return tags.map((tag) => this.ensureTag(tag, timestamp));
+  }
+
+  private ensureTag(name: string, timestamp: string): TagEntity {
+    const cleanName = name.trim();
+    const existing = this.database()
+      .prepare("SELECT * FROM tags WHERE name = ?")
+      .get(cleanName) as TagRow | undefined;
+    if (existing) return tagFromRow(existing);
+
+    const id = createId("tag");
+    const sortOrder = this.nextSortOrder("tags");
+    this.database()
+      .prepare(`
+        INSERT INTO tags (id, name, color, description, sort_order, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'enabled', ?, ?)
+      `)
+      .run(id, cleanName, colorForName(cleanName), "", sortOrder, timestamp, timestamp);
+    return {
+      id,
+      name: cleanName,
+      color: colorForName(cleanName),
+      description: "",
+      order: sortOrder,
+      status: "enabled",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+  }
+
+  private insertTag(tag: TagEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO tags (id, name, color, description, sort_order, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          color = excluded.color,
+          description = excluded.description,
+          sort_order = excluded.sort_order,
+          status = excluded.status,
+          updated_at = excluded.updated_at
+      `)
+      .run(tag.id, tag.name, tag.color, tag.description, tag.order, tag.status, tag.createdAt, tag.updatedAt);
+  }
+
+  private insertTagExact(tag: TagEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO tags (id, name, color, description, sort_order, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(tag.id, tag.name, tag.color, tag.description, tag.order, tag.status, tag.createdAt, tag.updatedAt);
+  }
+
+  private getTagOrThrow(id: string): TagEntity {
+    const row = this.database().prepare("SELECT * FROM tags WHERE id = ?").get(id) as TagRow | undefined;
+    if (!row) throw Object.assign(new Error("标签不存在"), { status: 404 });
+    return tagFromRow(row);
+  }
+
+  private insertProxy(proxy: ProxyEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO proxies (
+          id, name, scheme, host, port, username, password, bypass, notes, status,
+          last_check_json, share_link, pre_proxy_id, ip_strategy, utls_fingerprint, subscription_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          scheme = excluded.scheme,
+          host = excluded.host,
+          port = excluded.port,
+          username = excluded.username,
+          password = excluded.password,
+          bypass = excluded.bypass,
+          notes = excluded.notes,
+          status = excluded.status,
+          last_check_json = excluded.last_check_json,
+          share_link = excluded.share_link,
+          pre_proxy_id = excluded.pre_proxy_id,
+          ip_strategy = excluded.ip_strategy,
+          utls_fingerprint = excluded.utls_fingerprint,
+          subscription_id = excluded.subscription_id,
+          updated_at = excluded.updated_at
+      `)
+      .run(...proxyRowValues(proxy));
+  }
+
+  private insertProxyExact(proxy: ProxyEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO proxies (
+          id, name, scheme, host, port, username, password, bypass, notes, status,
+          last_check_json, share_link, pre_proxy_id, ip_strategy, utls_fingerprint, subscription_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(...proxyRowValues(proxy));
+  }
+
+  private insertProxySubscription(subscription: ProxySubscriptionEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO proxy_subscriptions (
+          id, name, url, status, auto_refresh, refresh_interval_hours, last_refresh_json, notes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          url = excluded.url,
+          status = excluded.status,
+          auto_refresh = excluded.auto_refresh,
+          refresh_interval_hours = excluded.refresh_interval_hours,
+          last_refresh_json = excluded.last_refresh_json,
+          notes = excluded.notes,
+          updated_at = excluded.updated_at
+      `)
+      .run(...proxySubscriptionRowValues(subscription));
+  }
+
+  private getProxySubscriptionOrThrow(id: string, options: { includeSecrets: boolean }): ProxySubscriptionEntity {
+    const row = this.database().prepare("SELECT * FROM proxy_subscriptions WHERE id = ?").get(id) as ProxySubscriptionRow | undefined;
+    if (!row) throw Object.assign(new Error("订阅不存在"), { status: 404 });
+    return proxySubscriptionFromRow(row, options);
+  }
+
+  private getProxyOrThrow(id: string, options: { includeSecrets: boolean }): ProxyEntity {
+    const row = this.database().prepare("SELECT * FROM proxies WHERE id = ?").get(id) as ProxyRow | undefined;
+    if (!row) throw Object.assign(new Error("代理不存在"), { status: 404 });
+    return proxyFromRow(row, options);
+  }
+
+  private insertExtension(extension: ExtensionEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO extensions (
+          id, name, description, source_kind, source_url, store_id, store_url,
+          store_namespace, provenance_json, artifact_archive_path, update_provider_id, update_state_json,
+          version, manifest_version, permissions_json, host_permissions_json, optional_permissions_json,
+          optional_host_permissions_json, permission_risks_json,
+          install_state, update_policy, sha256, manifest_sha256, local_path, manifest_key, directory_mode,
+          last_installed_at, last_checked_at, last_error, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          description = excluded.description,
+          source_kind = excluded.source_kind,
+          source_url = excluded.source_url,
+          store_id = excluded.store_id,
+          store_url = excluded.store_url,
+          store_namespace = excluded.store_namespace,
+          provenance_json = excluded.provenance_json,
+          artifact_archive_path = excluded.artifact_archive_path,
+          update_provider_id = excluded.update_provider_id,
+          update_state_json = excluded.update_state_json,
+          version = excluded.version,
+          manifest_version = excluded.manifest_version,
+          permissions_json = excluded.permissions_json,
+          host_permissions_json = excluded.host_permissions_json,
+          optional_permissions_json = excluded.optional_permissions_json,
+          optional_host_permissions_json = excluded.optional_host_permissions_json,
+          permission_risks_json = excluded.permission_risks_json,
+          install_state = excluded.install_state,
+          update_policy = excluded.update_policy,
+          sha256 = excluded.sha256,
+          manifest_sha256 = excluded.manifest_sha256,
+          local_path = excluded.local_path,
+          manifest_key = excluded.manifest_key,
+          directory_mode = excluded.directory_mode,
+          last_installed_at = excluded.last_installed_at,
+          last_checked_at = excluded.last_checked_at,
+          last_error = excluded.last_error,
+          status = excluded.status,
+          updated_at = excluded.updated_at
+      `)
+      .run(
+        extension.id,
+        extension.name,
+        extension.description,
+        extension.sourceKind,
+        extension.sourceUrl,
+        extension.storeId ?? null,
+        extension.storeUrl ?? null,
+        extension.storeIdentity?.namespace ?? null,
+        extension.provenance ? JSON.stringify(extension.provenance) : null,
+        extension.artifactArchivePath ?? null,
+        extension.updateProviderId ?? null,
+        extension.updateState ? JSON.stringify(extension.updateState) : null,
+        extension.version,
+        extension.manifestVersion ?? null,
+        JSON.stringify(extension.permissions),
+        JSON.stringify(extension.hostPermissions),
+        JSON.stringify(extension.optionalPermissions ?? []),
+        JSON.stringify(extension.optionalHostPermissions ?? []),
+        JSON.stringify(extension.permissionRisks),
+        extension.installState,
+        extension.updatePolicy,
+        extension.sha256 ?? null,
+        extension.manifestSha256 ?? null,
+        extension.localPath ?? null,
+        extension.manifestKey ?? null,
+        extension.directoryMode ?? null,
+        extension.lastInstalledAt ?? null,
+        extension.lastCheckedAt ?? null,
+        extension.lastError ?? null,
+        extension.status,
+        extension.createdAt,
+        extension.updatedAt,
+      );
+  }
+
+  private insertExtensionExact(extension: ExtensionEntity): void {
+    this.database()
+      .prepare(`
+        INSERT INTO extensions (
+          id, name, description, source_kind, source_url, store_id, store_url,
+          store_namespace, provenance_json, artifact_archive_path, update_provider_id, update_state_json,
+          version, manifest_version, permissions_json, host_permissions_json, optional_permissions_json,
+          optional_host_permissions_json, permission_risks_json,
+          install_state, update_policy, sha256, manifest_sha256, local_path, manifest_key, directory_mode,
+          last_installed_at, last_checked_at, last_error, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        extension.id,
+        extension.name,
+        extension.description,
+        extension.sourceKind,
+        extension.sourceUrl,
+        extension.storeId ?? null,
+        extension.storeUrl ?? null,
+        extension.storeIdentity?.namespace ?? null,
+        extension.provenance ? JSON.stringify(extension.provenance) : null,
+        extension.artifactArchivePath ?? null,
+        extension.updateProviderId ?? null,
+        extension.updateState ? JSON.stringify(extension.updateState) : null,
+        extension.version,
+        extension.manifestVersion ?? null,
+        JSON.stringify(extension.permissions),
+        JSON.stringify(extension.hostPermissions),
+        JSON.stringify(extension.optionalPermissions ?? []),
+        JSON.stringify(extension.optionalHostPermissions ?? []),
+        JSON.stringify(extension.permissionRisks),
+        extension.installState,
+        extension.updatePolicy,
+        extension.sha256 ?? null,
+        extension.manifestSha256 ?? null,
+        extension.localPath ?? null,
+        extension.manifestKey ?? null,
+        extension.directoryMode ?? null,
+        extension.lastInstalledAt ?? null,
+        extension.lastCheckedAt ?? null,
+        extension.lastError ?? null,
+        extension.status,
+        extension.createdAt,
+        extension.updatedAt,
+      );
+  }
+
+  private getExtensionOrThrow(id: string): ExtensionEntity {
+    const row = this.database().prepare("SELECT * FROM extensions WHERE id = ?").get(id) as ExtensionRow | undefined;
+    if (!row) throw Object.assign(new Error("Extension does not exist"), { status: 404 });
+    return extensionFromRow(row);
+  }
+
+  private getEnvironmentOrThrow(id: string): BrowserEnvironment {
+    const row = this.database().prepare("SELECT * FROM browser_environments WHERE id = ?").get(id) as EnvironmentRow | undefined;
+    if (!row) throw Object.assign(new Error("环境不存在"), { status: 404 });
+    return this.environmentFromRow(row);
+  }
+
+  private getActiveEnvironmentOrThrow(id: string): BrowserEnvironment {
+    const environment = this.getEnvironmentOrThrow(id);
+    if (environment.deletedAt) throw Object.assign(new Error("环境不存在"), { status: 404 });
+    return environment;
+  }
+
+  private insertEnvironmentExact(environment: BrowserEnvironment): void {
+    const runtimeProfile = normalizeProfile(environment.runtimeProfile);
+    this.database()
+      .prepare(`
+        INSERT INTO browser_environments (
+          id, name, notes, mode, start_url, group_id, proxy_id, runtime_profile_json, last_network_check_json,
+          created_at, updated_at, deleted_at, delete_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        environment.id,
+        environment.name,
+        environment.notes,
+        environment.mode,
+        environment.startUrl,
+        environment.groupId,
+        environment.proxyId ?? null,
+        JSON.stringify(runtimeProfile),
+        environment.lastNetworkCheck ? JSON.stringify(environment.lastNetworkCheck) : null,
+        environment.createdAt,
+        environment.updatedAt,
+        environment.deletedAt ?? null,
+        environment.deleteReason ?? null,
+      );
+    for (const tagId of environment.tagIds) {
+      this.database()
+        .prepare("INSERT OR IGNORE INTO environment_tags (environment_id, tag_id) VALUES (?, ?)")
+        .run(environment.id, tagId);
+    }
+    for (const extensionId of environment.extensionIds) {
+      this.database()
+        .prepare("INSERT OR IGNORE INTO environment_extensions (environment_id, extension_id, lifecycle_revision) VALUES (?, ?, ?)")
+        .run(environment.id, extensionId, createId("binding"));
+    }
+  }
+
+  private throwIfReferenced(entityKind: ReferenceUsage["entityKind"], entityId: string): void {
+    const usage = this.referenceUsage(entityKind, entityId);
+    if (usage.count === 0) return;
+    const error = Object.assign(new Error("实体仍被环境引用"), {
+      status: 409,
+      code: "REFERENCE_CONFLICT",
+      usage,
+    });
+    throw error;
+  }
+
+  private referenceUsage(entityKind: ReferenceUsage["entityKind"], entityId: string): ReferenceUsage {
+    let environmentIds: string[];
+    if (entityKind === "group") {
+      environmentIds = rowsToIds(this.database(), "browser_environments", "group_id", entityId);
+    } else if (entityKind === "tag") {
+      environmentIds = rowsToIds(this.database(), "environment_tags", "tag_id", entityId, "environment_id");
+    } else if (entityKind === "proxy") {
+      environmentIds = rowsToIds(this.database(), "browser_environments", "proxy_id", entityId);
+    } else {
+      // Trashed environments are invisible in the UI; counting them makes the delete guard
+      // report a 409 that names an environment the user cannot find or unbind.
+      environmentIds = this.database()
+        .prepare(`
+          SELECT environment_extensions.environment_id AS id
+          FROM environment_extensions
+          JOIN browser_environments ON browser_environments.id = environment_extensions.environment_id
+          WHERE environment_extensions.extension_id = ? AND browser_environments.deleted_at IS NULL
+        `)
+        .all(entityId)
+        .map((row) => (row as IdRow).id);
+    }
+    return {
+      entityId,
+      entityKind,
+      environmentIds,
+      count: environmentIds.length,
+    };
+  }
+
+  private syncProfileTagsFromEnvironment(environmentId: string): void {
+    const environment = this.getEnvironmentOrThrow(environmentId);
+    const tagNames = this.database()
+      .prepare(`
+        SELECT tags.name AS name
+        FROM tags
+        JOIN environment_tags ON environment_tags.tag_id = tags.id
+        WHERE environment_tags.environment_id = ?
+        ORDER BY tags.sort_order ASC, tags.name ASC
+      `)
+      .all(environmentId)
+      .map((row) => (row as { name: string }).name);
+    const profile = normalizeProfile({
+      ...environment.runtimeProfile,
+      tags: tagNames,
+      updatedAt: nowIso(),
+    });
+    this.upsertProfileRow(profile);
+  }
+
+  private syncProfilesForProxy(proxyId: string): void {
+    this.refreshProfilesFromEnvironments(rowsToIds(this.database(), "browser_environments", "proxy_id", proxyId));
+  }
+
+  private setEnvironmentProxyReference(environmentId: string, proxyId: string | null | undefined): void {
+    const timestamp = nowIso();
+    const proxy = proxyId ? this.getProxyOrThrow(proxyId, { includeSecrets: true }) : undefined;
+    const environment = this.getEnvironmentOrThrow(environmentId);
+    const runtimeProfile = normalizeProfile({
+      ...environment.runtimeProfile,
+      proxy: proxy ? proxyToProfileSettings(proxy) : environment.runtimeProfile.proxy,
+      updatedAt: timestamp,
+    });
+    this.database()
+      .prepare("UPDATE browser_environments SET proxy_id = ?, runtime_profile_json = ?, updated_at = ? WHERE id = ?")
+      .run(proxy?.id ?? null, JSON.stringify(runtimeProfile), timestamp, environmentId);
+    this.upsertProfileRow(this.profileFromEnvironment(this.getEnvironmentOrThrow(environmentId)));
+  }
+
+  private refreshProfilesFromEnvironments(environmentIds: string[]): void {
+    for (const environmentId of uniqueStrings(environmentIds)) {
+      const environment = this.getEnvironmentOrThrow(environmentId);
+      const profile = this.profileFromEnvironment(environment);
+      this.upsertProfileRow(profile);
+    }
+  }
+
+  private profileFromEnvironment(environment: BrowserEnvironment): BrowserProfile {
+    const group = this.database().prepare("SELECT name FROM groups WHERE id = ?").get(environment.groupId) as { name: string } | undefined;
+    const tagNames = this.database()
+      .prepare(`
+        SELECT tags.name AS name
+        FROM tags
+        JOIN environment_tags ON environment_tags.tag_id = tags.id
+        WHERE environment_tags.environment_id = ?
+        ORDER BY tags.sort_order ASC, tags.name ASC
+      `)
+      .all(environment.id)
+      .map((row) => (row as { name: string }).name);
+    const proxy = environment.proxyId
+      ? this.getProxyOrThrow(environment.proxyId, { includeSecrets: true })
+      : undefined;
+    // Extension directories are deliberately not projected here: they are a launch input the extension
+    // service resolves from this environment's bindings, and writing them onto the profile row would put
+    // a second, staler copy of the same fact back into storage.
+    return normalizeProfile({
+      ...environment.runtimeProfile,
+      name: environment.name,
+      notes: environment.notes,
+      mode: environment.mode,
+      startUrl: environment.startUrl,
+      group: group?.name ?? environment.runtimeProfile.group,
+      tags: tagNames,
+      proxy: proxy ? proxyToProfileSettings(proxy) : environment.runtimeProfile.proxy,
+      updatedAt: nowIso(),
+    });
+  }
+
+  private replaceEnvironmentTags(environmentId: string, tagNames: string[]): void {
+    this.database().prepare("DELETE FROM environment_tags WHERE environment_id = ?").run(environmentId);
+    for (const tagName of tagNames) {
+      const row = this.database().prepare("SELECT id FROM tags WHERE name = ?").get(tagName) as IdRow | undefined;
+      if (!row) continue;
+      this.database()
+        .prepare("INSERT OR IGNORE INTO environment_tags (environment_id, tag_id) VALUES (?, ?)")
+        .run(environmentId, row.id);
+    }
+  }
+
+  private environmentFromProfile(profile: BrowserProfile): BrowserEnvironment {
+    const row = this.database()
+      .prepare("SELECT * FROM browser_environments WHERE id = ?")
+      .get(profile.id) as EnvironmentRow | undefined;
+    if (row) return this.environmentFromRow(row);
+    this.upsertEnvironmentFromProfile(profile);
+    const created = this.database()
+      .prepare("SELECT * FROM browser_environments WHERE id = ?")
+      .get(profile.id) as EnvironmentRow;
+    return this.environmentFromRow(created);
+  }
+
+  private environmentFromRow(row: EnvironmentRow): BrowserEnvironment {
+    const runtimeProfile = parseProfile(row.runtime_profile_json);
+    return {
+      id: row.id,
+      name: row.name,
+      notes: row.notes,
+      mode: row.mode,
+      startUrl: row.start_url,
+      groupId: row.group_id,
+      tagIds: this.environmentTagIds(row.id),
+      proxyId: row.proxy_id ?? undefined,
+      extensionIds: this.environmentExtensionIds(row.id),
+      runtimeProfile,
+      lastNetworkCheck: row.last_network_check_json
+        ? parseJson<NetworkCheckResult>(row.last_network_check_json)
+        : undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      deletedAt: row.deleted_at ?? undefined,
+      deleteReason: row.delete_reason ?? undefined,
+    };
+  }
+
+  private environmentTagIds(environmentId: string): string[] {
+    return this.database()
+      .prepare("SELECT tag_id AS id FROM environment_tags WHERE environment_id = ? ORDER BY tag_id ASC")
+      .all(environmentId)
+      .map((row) => (row as IdRow).id);
+  }
+
+  private environmentExtensionIds(environmentId: string): string[] {
+    return this.database()
+      .prepare("SELECT extension_id AS id FROM environment_extensions WHERE environment_id = ? ORDER BY extension_id ASC")
+      .all(environmentId)
+      .map((row) => (row as IdRow).id);
+  }
+
+  private readAllEnvironmentExtensionBindings(): EnvironmentExtensionBinding[] {
+    return this.database()
+      .prepare(`
+        SELECT environment_id, extension_id, lifecycle_revision
+        FROM environment_extensions
+        ORDER BY environment_id ASC, extension_id ASC
+      `)
+      .all()
+      .map((row) => {
+        const binding = row as EnvironmentExtensionBindingRow;
+        return {
+          environmentId: binding.environment_id,
+          extensionId: binding.extension_id,
+          lifecycleRevision: binding.lifecycle_revision,
+        };
+      });
+  }
+
+  private restoreBindingRevisions(bindings: EnvironmentExtensionBinding[] | undefined): void {
+    if (!bindings) return;
+    const statement = this.database().prepare(`
+      UPDATE environment_extensions
+      SET lifecycle_revision = ?
+      WHERE environment_id = ? AND extension_id = ?
+    `);
+    for (const binding of bindings) {
+      const result = statement.run(binding.lifecycleRevision, binding.environmentId, binding.extensionId);
+      if (Number(result.changes) === 0) {
+        throw Object.assign(new Error("App backup binding metadata references an unknown entity"), { status: 400 });
+      }
+    }
+  }
+
+  private nextSortOrder(table: "groups" | "tags"): number {
+    const row = this.database().prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as CountRow;
+    return Number(row.count) + 1;
+  }
+
+  private getSettingsRow(): SettingsRow | undefined {
+    return this.database()
+      .prepare("SELECT settings_json FROM app_settings WHERE id = 'default'")
+      .get() as SettingsRow | undefined;
+  }
+
+  private writeSettings(settings: AppSettings): void {
+    const normalized = normalizeSettings(settings);
+    this.database()
+      .prepare(`
+        INSERT INTO app_settings (id, settings_json, updated_at)
+        VALUES ('default', ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          settings_json = excluded.settings_json,
+          updated_at = excluded.updated_at
+      `)
+      .run(JSON.stringify(normalized), nowIso());
+  }
+
+  private storageInfo(): StorageInfo {
+    return {
+      kind: "sqlite",
+      databasePath: this.databasePath,
+      portable: this.portable,
+    };
+  }
+
+  private database(): DatabaseSync {
+    if (!this.db) throw new Error("SQLite store is not initialized");
+    return this.db;
+  }
+}
+
+function parseProfile(raw: string): BrowserProfile {
+  return normalizeProfile(JSON.parse(raw) as Partial<BrowserProfile>);
+}
+
+function parseSettings(raw: string): AppSettings {
+  return normalizeSettings(JSON.parse(raw) as Partial<AppSettings>);
+}
+
+function normalizeFullBackupData(data: AppBackupData, receivingDataDir: string): AppBackupData {
+  const originalExtensions = new Map(data.extensions.map((extension) => [extension.id, extension]));
+  const portable = {
+    ...data,
+    extensions: data.extensions.map((extension) => {
+      if (!extension.provenance?.artifact.retained) return extension;
+      const expectedAbsolute = path.join(receivingDataDir, "extension-artifacts", extension.id, "current.crx");
+      const expectedRelative = `extension-artifacts/${extension.id}/current.crx`;
+      const sourceUrl = extension.sourceUrl === expectedAbsolute ? expectedRelative : extension.sourceUrl;
+      const artifactArchivePath = extension.artifactArchivePath === expectedAbsolute
+        ? expectedRelative
+        : extension.artifactArchivePath;
+      return { ...extension, sourceUrl, artifactArchivePath };
+    }),
+  };
+  const decoded = decodeAppBackupData(portable);
+  if (decoded.schemaVersion !== APP_BACKUP_SCHEMA_VERSION) {
+    throw Object.assign(new Error("Unsupported app backup schema version."), { status: 400 });
+  }
+
+  return {
+    schemaVersion: APP_BACKUP_SCHEMA_VERSION,
+    settings: normalizeSettings(decoded.settings),
+    profiles: decoded.profiles.map((profile) => normalizeProfile(profile)),
+    environments: decoded.environments.map((environment) => ({
+      ...environment,
+      runtimeProfile: normalizeProfile(environment.runtimeProfile),
+      tagIds: uniqueStrings(environment.tagIds ?? []),
+      extensionIds: uniqueStrings(environment.extensionIds ?? []),
+      proxyId: typeof environment.proxyId === "string" && environment.proxyId.trim() ? environment.proxyId.trim() : undefined,
+      deletedAt: typeof environment.deletedAt === "string" && environment.deletedAt.trim() ? environment.deletedAt.trim() : undefined,
+      deleteReason: typeof environment.deleteReason === "string" && environment.deleteReason.trim() ? environment.deleteReason.trim() : undefined,
+    })),
+    groups: decoded.groups.map((group) => ({
+      ...group,
+      id: createEntityId(group.id, "group"),
+      name: cleanRequiredName(group.name, "Group name cannot be empty"),
+      color: cleanColor(group.color, colorForName(group.name)),
+      description: typeof group.description === "string" ? group.description : "",
+      order: Number.isFinite(group.order) ? Number(group.order) : 0,
+      status: group.status === "disabled" ? "disabled" : "enabled",
+      isDefault: group.isDefault === true,
+      createdAt: typeof group.createdAt === "string" && group.createdAt ? group.createdAt : nowIso(),
+      updatedAt: typeof group.updatedAt === "string" && group.updatedAt ? group.updatedAt : nowIso(),
+    })),
+    tags: decoded.tags.map((tag) => ({
+      ...tag,
+      id: createEntityId(tag.id, "tag"),
+      name: cleanRequiredName(tag.name, "Tag name cannot be empty"),
+      color: cleanColor(tag.color, colorForName(tag.name)),
+      description: typeof tag.description === "string" ? tag.description : "",
+      order: Number.isFinite(tag.order) ? Number(tag.order) : 0,
+      status: tag.status === "disabled" ? "disabled" : "enabled",
+      createdAt: typeof tag.createdAt === "string" && tag.createdAt ? tag.createdAt : nowIso(),
+      updatedAt: typeof tag.updatedAt === "string" && tag.updatedAt ? tag.updatedAt : nowIso(),
+    })),
+    proxies: decoded.proxies.map(normalizeProxyEntity),
+    proxySubscriptions: (decoded.proxySubscriptions ?? []).map((subscription) => normalizeProxySubscriptionEntity(subscription)),
+    extensions: decoded.extensions.map((extension) => {
+      const normalized = normalizeExtensionEntity(extension);
+      const original = originalExtensions.get(extension.id);
+      if (
+        original?.provenance?.artifact.retained
+        && original.sourceUrl === path.join(receivingDataDir, "extension-artifacts", extension.id, "current.crx")
+      ) {
+        return normalizeExtensionEntity({
+          ...normalized,
+          sourceUrl: original.sourceUrl,
+          artifactArchivePath: original.artifactArchivePath,
+        });
+      }
+      return normalized;
+    }),
+    retainedExtensionArtifacts: decoded.retainedExtensionArtifacts,
+    environmentExtensionBindings: normalizeExtensionBindingMetadata(decoded.environmentExtensionBindings),
+  };
+}
+
+function normalizeProxyEntity(input: Partial<ProxyEntity>): ProxyEntity {
+  const now = nowIso();
+  const id = createEntityId(input.id, "proxy");
+  const scheme = typeof input.scheme === "string" ? normalizeProxyScheme(input.scheme) : "http";
+  if (!scheme) throw Object.assign(new Error("代理协议不受支持"), { status: 400 });
+  const preProxyId = typeof input.preProxyId === "string" ? input.preProxyId.trim() : "";
+  if (preProxyId && preProxyId === id) throw Object.assign(new Error("前置代理不能是代理自身"), { status: 400 });
+  const ipStrategy = normalizeXrayIpStrategy(input.ipStrategy);
+  const utlsFingerprint = normalizeXrayUtlsPreference(input.utlsFingerprint);
+  const subscriptionId = typeof input.subscriptionId === "string" ? input.subscriptionId.trim() : "";
+  const bypass = typeof input.bypass === "string" ? input.bypass : "localhost,127.0.0.1";
+  const notes = typeof input.notes === "string" ? input.notes.trim() : "";
+  const status = input.status === "disabled" ? "disabled" : "enabled";
+
+  if (scheme === "xray") {
+    // An xray entry is its share link: host/port are projections of it and the URL credentials do not
+    // apply, so a link that does not parse is the one thing that makes the record invalid.
+    const shareLink = typeof input.shareLink === "string" ? input.shareLink.trim() : "";
+    if (!shareLink || isMaskedXrayShareLink(shareLink)) throw Object.assign(new Error("Xray 分享链接不能为空"), { status: 400 });
+    let parsed: ParsedXrayShareLink;
+    try {
+      parsed = parseXrayShareLink(shareLink);
+    } catch (error) {
+      throw Object.assign(new Error(`Xray 分享链接无法解析：${(error as Error).message}`), { status: 400 });
+    }
+    const host = parsed.summary.address;
+    const port = String(parsed.summary.port);
+    return {
+      id,
+      name: typeof input.name === "string" && input.name.trim() ? input.name.trim() : parsed.summary.remark || host,
+      scheme,
+      host,
+      port,
+      username: "",
+      password: "",
+      bypass,
+      notes,
+      status,
+      lastCheck: input.lastCheck,
+      shareLink,
+      preProxyId,
+      ipStrategy,
+      utlsFingerprint,
+      xrayNode: parsed.summary,
+      subscriptionId,
+      createdAt: input.createdAt ?? now,
+      updatedAt: input.updatedAt ?? now,
+    };
+  }
+
+  const host = typeof input.host === "string" ? input.host.trim() : "";
+  const port = typeof input.port === "string" ? input.port.trim() : "";
+  if (!host || !port) throw Object.assign(new Error("代理 host 和 port 不能为空"), { status: 400 });
+  return {
+    id,
+    name: typeof input.name === "string" && input.name.trim() ? input.name.trim() : host,
+    scheme,
+    host,
+    port,
+    username: typeof input.username === "string" ? input.username.trim() : "",
+    password: typeof input.password === "string" ? input.password : "",
+    bypass,
+    notes,
+    status,
+    lastCheck: input.lastCheck,
+    shareLink: "",
+    preProxyId,
+    ipStrategy,
+    utlsFingerprint,
+    subscriptionId,
+    createdAt: input.createdAt ?? now,
+    updatedAt: input.updatedAt ?? now,
+  };
+}
+
+function proxyRowValues(proxy: ProxyEntity): Array<string | null> {
+  return [
+    proxy.id,
+    proxy.name,
+    proxy.scheme,
+    proxy.host,
+    proxy.port,
+    proxy.username,
+    proxy.password,
+    proxy.bypass,
+    proxy.notes,
+    proxy.status,
+    proxy.lastCheck ? JSON.stringify(proxy.lastCheck) : null,
+    // Backups written before the engine existed carry none of these; SQLite cannot bind undefined.
+    proxy.shareLink ?? "",
+    proxy.preProxyId ?? "",
+    normalizeXrayIpStrategy(proxy.ipStrategy),
+    normalizeXrayUtlsPreference(proxy.utlsFingerprint),
+    proxy.subscriptionId ?? "",
+    proxy.createdAt,
+    proxy.updatedAt,
+  ];
+}
+
+function proxySubscriptionRowValues(subscription: ProxySubscriptionEntity): Array<string | number | null> {
+  return [
+    subscription.id,
+    subscription.name,
+    subscription.url,
+    subscription.status,
+    subscription.autoRefresh ? 1 : 0,
+    subscription.refreshIntervalHours,
+    subscription.lastRefresh ? JSON.stringify(subscription.lastRefresh) : null,
+    subscription.notes,
+    subscription.createdAt,
+    subscription.updatedAt,
+  ];
+}
+
+function proxySubscriptionFromRow(row: ProxySubscriptionRow, options: { includeSecrets: boolean }): ProxySubscriptionEntity {
+  return {
+    id: row.id,
+    name: row.name,
+    url: options.includeSecrets ? row.url : "",
+    urlHost: subscriptionUrlHost(row.url),
+    status: row.status,
+    autoRefresh: row.auto_refresh === 1,
+    refreshIntervalHours: normalizeRefreshIntervalHours(row.refresh_interval_hours),
+    lastRefresh: row.last_refresh_json ? parseJson<ProxySubscriptionRefreshResult>(row.last_refresh_json) : undefined,
+    notes: row.notes,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * A subscription is its address; everything else has a default. The address must be an http(s)
+ * URL because that is what the refresh fetches, and it is validated here rather than at the route
+ * so a backup cannot smuggle in something the scheduler would later choke on.
+ */
+function normalizeProxySubscriptionEntity(input: Partial<ProxySubscriptionEntity>): ProxySubscriptionEntity {
+  const now = nowIso();
+  const url = typeof input.url === "string" ? input.url.trim() : "";
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw Object.assign(new Error("订阅地址无效。"), { status: 400, code: "PROXY_SUBSCRIPTION_URL_INVALID" });
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw Object.assign(new Error("订阅地址必须是 http:// 或 https://。"), { status: 400, code: "PROXY_SUBSCRIPTION_URL_INVALID" });
+  }
+  return {
+    id: createEntityId(input.id, "subscription"),
+    name: typeof input.name === "string" && input.name.trim() ? input.name.trim() : parsed.host,
+    url,
+    urlHost: parsed.host,
+    status: input.status === "disabled" ? "disabled" : "enabled",
+    autoRefresh: input.autoRefresh === true,
+    refreshIntervalHours: normalizeRefreshIntervalHours(input.refreshIntervalHours),
+    lastRefresh: input.lastRefresh,
+    notes: typeof input.notes === "string" ? input.notes.trim() : "",
+    createdAt: typeof input.createdAt === "string" && input.createdAt ? input.createdAt : now,
+    updatedAt: typeof input.updatedAt === "string" && input.updatedAt ? input.updatedAt : now,
+  };
+}
+
+function normalizeRefreshIntervalHours(value: unknown): number {
+  const hours = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : DEFAULT_PROXY_SUBSCRIPTION_INTERVAL_HOURS;
+  return Math.min(24 * 30, Math.max(1, hours));
+}
+
+function subscriptionUrlHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+}
+
+/** See `proxyNodeIdentity`: a subscription refresh matches members by it, and an edit that changes it detaches a member. */
+function proxyIdentityKey(proxy: Pick<ProxyEntity, "scheme" | "host" | "port" | "username" | "password" | "shareLink">): string {
+  return proxyNodeIdentity(proxy);
+}
+
+function xrayNodeFromRow(row: Pick<ProxyRow, "scheme" | "share_link">): XrayNodeSummary | undefined {
+  if (row.scheme !== "xray" || !row.share_link) return undefined;
+  return tryParseXrayShareLink(row.share_link)?.summary;
+}
+
+function normalizeExtensionEntity(input: Partial<ExtensionEntity>): ExtensionEntity {
+  const now = nowIso();
+  const id = createEntityId(input.id, "extension");
+  const name = typeof input.name === "string" && input.name.trim() ? input.name.trim() : "Extension";
+  const sourceKind = isExtensionSourceKind(input.sourceKind) ? input.sourceKind : "local-directory";
+  const version = typeof input.version === "string" && input.version.trim() ? input.version.trim() : "0.0.0";
+  const authority = normalizeExtensionAuthorityFields(input);
+  const storeIdentity = authority.storeIdentity;
+  return {
+    id,
+    name,
+    description: typeof input.description === "string" ? input.description.trim() : "",
+    sourceKind,
+    sourceUrl: typeof input.sourceUrl === "string" ? input.sourceUrl.trim() : "",
+    storeId: storeIdentity?.storeId
+      ?? (typeof input.storeId === "string" && input.storeId.trim() ? input.storeId.trim() : undefined),
+    storeUrl: storeIdentity?.listingUrl
+      ?? (typeof input.storeUrl === "string" && input.storeUrl.trim() ? input.storeUrl.trim() : undefined),
+    storeIdentity,
+    provenance: authority.provenance,
+    artifactArchivePath: authority.artifactArchivePath,
+    updateProviderId: authority.updateProviderId,
+    updateState: authority.updateState,
+    version,
+    manifestVersion: Number.isFinite(input.manifestVersion) ? Number(input.manifestVersion) : undefined,
+    permissions: uniqueStrings(input.permissions ?? []),
+    hostPermissions: uniqueStrings(input.hostPermissions ?? []),
+    optionalPermissions: uniqueStrings(input.optionalPermissions ?? []),
+    optionalHostPermissions: uniqueStrings(input.optionalHostPermissions ?? []),
+    permissionRisks: Array.isArray(input.permissionRisks) ? input.permissionRisks : [],
+    installState: isExtensionInstallState(input.installState) ? input.installState : "metadata-only",
+    updatePolicy: isExtensionUpdatePolicy(input.updatePolicy) ? input.updatePolicy : "pinned",
+    sha256: typeof input.sha256 === "string" && input.sha256.trim() ? input.sha256.trim().toLowerCase() : undefined,
+    manifestSha256: typeof input.manifestSha256 === "string" && input.manifestSha256.trim() ? input.manifestSha256.trim().toLowerCase() : undefined,
+    localPath: typeof input.localPath === "string" && input.localPath.trim() ? input.localPath.trim() : undefined,
+    manifestKey: typeof input.manifestKey === "string" && input.manifestKey.trim() ? input.manifestKey.trim() : undefined,
+    directoryMode: normalizeExtensionDirectoryMode(sourceKind, input.directoryMode),
+    lastInstalledAt: typeof input.lastInstalledAt === "string" && input.lastInstalledAt.trim() ? input.lastInstalledAt.trim() : undefined,
+    lastCheckedAt: typeof input.lastCheckedAt === "string" && input.lastCheckedAt.trim() ? input.lastCheckedAt.trim() : undefined,
+    lastError: typeof input.lastError === "string" && input.lastError.trim() ? input.lastError.trim() : undefined,
+    status: input.status === "disabled" ? "disabled" : "enabled",
+    createdAt: input.createdAt ?? now,
+    updatedAt: input.updatedAt ?? now,
+  };
+}
+
+function proxyToProfileSettings(proxy: ProxyEntity): BrowserProfile["proxy"] {
+  return {
+    enabled: proxy.status === "enabled",
+    raw: "",
+    scheme: proxy.scheme,
+    host: proxy.host,
+    port: proxy.port,
+    username: proxy.username,
+    password: proxy.password,
+    bypass: proxy.bypass,
+    shareLink: proxy.shareLink,
+    preProxyId: proxy.preProxyId,
+    ipStrategy: proxy.ipStrategy,
+    utlsFingerprint: proxy.utlsFingerprint,
+  };
+}
+
+
+
+function isExtensionSourceKind(value: unknown): value is ExtensionSourceKind {
+  return (
+    value === "local-directory" ||
+    value === "local-zip" ||
+    value === "local-crx" ||
+    value === "managed-snapshot" ||
+    value === "chrome-web-store"
+  );
+}
+
+function isExtensionInstallState(value: unknown): value is ExtensionInstallState {
+  return (
+    value === "metadata-only" ||
+    value === "download-pending" ||
+    value === "downloading" ||
+    value === "installed" ||
+    value === "update-available" ||
+    value === "local-missing" ||
+    value === "invalid-manifest" ||
+    value === "install-failed"
+  );
+}
+
+function isExtensionUpdatePolicy(value: unknown): value is ExtensionUpdatePolicy {
+  return value === "pinned" || value === "notify" || value === "auto";
+}
+
+function normalizeExtensionDirectoryMode(sourceKind: ExtensionSourceKind, value: unknown): ExtensionDirectoryMode | undefined {
+  if (sourceKind !== "local-directory") return undefined;
+  return value === "copy" || value === "reference" ? value : "reference";
+}
+
+function cleanRequiredName(value: unknown, message: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw Object.assign(new Error(message), { status: 400 });
+  }
+  return value.trim();
+}
+
+function createEntityId(value: unknown, prefix: string): string {
+  return typeof value === "string" && value.trim() ? value.trim() : createId(prefix);
+}
+
+function cleanColor(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  return /^#[0-9a-f]{6}$/i.test(trimmed) ? trimmed.toUpperCase() : fallback;
+}
+
+function uniqueStrings(values: unknown[]): string[] {
+  return [...new Set(values.filter((value): value is string => typeof value === "string" && value.trim().length > 0).map((value) => value.trim()))];
+}
+
+function rowsToIds(
+  db: DatabaseSync,
+  table: "browser_environments" | "environment_tags" | "environment_extensions",
+  column: string,
+  value: string,
+  idColumn = "id",
+): string[] {
+  return db
+    .prepare(`SELECT ${idColumn} AS id FROM ${table} WHERE ${column} = ?`)
+    .all(value)
+    .map((row) => (row as IdRow).id);
+}
+
+function groupFromRow(row: GroupRow): GroupEntity {
+  return {
+    id: row.id,
+    name: row.name,
+    color: row.color,
+    description: row.description,
+    order: Number(row.sort_order),
+    status: row.status,
+    isDefault: row.is_default === 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function tagFromRow(row: TagRow): TagEntity {
+  return {
+    id: row.id,
+    name: row.name,
+    color: row.color,
+    description: row.description,
+    order: Number(row.sort_order),
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function proxyFromRow(row: ProxyRow, options: { includeSecrets: boolean }): ProxyEntity {
+  const xrayNode = xrayNodeFromRow(row);
+  return {
+    id: row.id,
+    name: row.name,
+    scheme: normalizeProxyScheme(row.scheme) ?? "http",
+    host: row.host,
+    port: row.port,
+    username: row.username,
+    password: options.includeSecrets ? row.password : "",
+    bypass: row.bypass,
+    notes: row.notes,
+    status: row.status,
+    lastCheck: row.last_check_json ? parseJson<ProxyCheckResult>(row.last_check_json) : undefined,
+    shareLink: options.includeSecrets ? row.share_link ?? "" : "",
+    preProxyId: row.pre_proxy_id ?? "",
+    ipStrategy: normalizeXrayIpStrategy(row.ip_strategy),
+    utlsFingerprint: normalizeXrayUtlsPreference(row.utls_fingerprint),
+    ...(xrayNode ? { xrayNode } : {}),
+    subscriptionId: row.subscription_id ?? "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function extensionFromRow(row: ExtensionRow): ExtensionEntity {
+  const authority = normalizeExtensionAuthorityFields({
+    sourceKind: row.source_kind,
+    sourceUrl: row.source_url,
+    sha256: row.sha256 ?? undefined,
+    manifestSha256: row.manifest_sha256 ?? undefined,
+    storeId: row.store_id ?? undefined,
+    storeUrl: row.store_url ?? undefined,
+    storeIdentity: row.store_namespace === null
+      ? undefined
+      : {
+          namespace: row.store_namespace,
+          storeId: row.store_id,
+          listingUrl: row.store_url ?? (row.store_id ? chromeWebStoreListingUrl(row.store_id) : undefined),
+        },
+    provenance: row.provenance_json ? parseJson<unknown>(row.provenance_json) : undefined,
+    artifactArchivePath: row.artifact_archive_path ?? undefined,
+    updateProviderId: row.update_provider_id ?? undefined,
+    updateState: row.update_state_json ? parseJson<unknown>(row.update_state_json) : undefined,
+  });
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    sourceKind: row.source_kind,
+    sourceUrl: row.source_url,
+    storeId: row.store_id ?? undefined,
+    storeUrl: row.store_url ?? undefined,
+    storeIdentity: authority.storeIdentity,
+    provenance: authority.provenance,
+    artifactArchivePath: authority.artifactArchivePath,
+    updateProviderId: authority.updateProviderId,
+    updateState: authority.updateState,
+    version: row.version,
+    manifestVersion: row.manifest_version ?? undefined,
+    permissions: parseJson<string[]>(row.permissions_json, []),
+    hostPermissions: parseJson<string[]>(row.host_permissions_json, []),
+    optionalPermissions: parseJson<string[]>(row.optional_permissions_json, []),
+    optionalHostPermissions: parseJson<string[]>(row.optional_host_permissions_json, []),
+    permissionRisks: parseJson<ExtensionPermissionRisk[]>(row.permission_risks_json, []),
+    installState: row.install_state,
+    updatePolicy: row.update_policy,
+    sha256: row.sha256 ?? undefined,
+    manifestSha256: row.manifest_sha256 ?? undefined,
+    localPath: row.local_path ?? undefined,
+    manifestKey: row.manifest_key ?? undefined,
+    directoryMode: normalizeExtensionDirectoryMode(row.source_kind, row.directory_mode),
+    lastInstalledAt: row.last_installed_at ?? undefined,
+    lastCheckedAt: row.last_checked_at ?? undefined,
+    lastError: row.last_error ?? undefined,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function parseJson<T>(raw: string, fallback?: T): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    if (fallback !== undefined) return fallback;
+    throw new Error("Stored JSON is invalid");
+  }
+}
+
+function colorForName(name: string): string {
+  const palette = ["#0891B2", "#7C3AED", "#DB2777", "#16A34A", "#D97706", "#475569"];
+  let hash = 0;
+  for (const char of name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return palette[hash % palette.length];
+}
+
+function normalizeProfileNameKey(name: string): string {
+  return name.trim().toLocaleLowerCase();
+}

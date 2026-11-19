@@ -1,0 +1,63 @@
+import type { Dispatch, SetStateAction } from "react";
+
+import type { TranslationKey } from "../i18n";
+import { api } from "../lib/apiClient";
+import type { SystemDiagnostics } from "../shared/entities";
+
+export function useDiagnosticsActions({
+  downloadTextFile,
+  diagnostics,
+  setDiagnostics,
+  t,
+  toast,
+}: {
+  downloadTextFile: (content: string, filename: string, type: string) => Promise<boolean>;
+  diagnostics: SystemDiagnostics | null;
+  setDiagnostics: Dispatch<SetStateAction<SystemDiagnostics | null>>;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  toast: (kind: "success" | "error" | "info", text: string) => void;
+}) {
+  // `proxyId`, never a proxy URL: the credentials stay server-side, and an empty id reads as "do not
+  // resolve" so the routine load stays free of network calls.
+  async function fetchDiagnostics(proxyId?: string): Promise<SystemDiagnostics> {
+    const query = proxyId?.trim() ? `?proxyId=${encodeURIComponent(proxyId.trim())}` : "";
+    const next = await api<SystemDiagnostics>(`/api/system/diagnostics${query}`);
+    setDiagnostics(next);
+    return next;
+  }
+
+  async function loadDiagnostics() {
+    try {
+      await fetchDiagnostics();
+    } catch {
+      setDiagnostics(null);
+    }
+  }
+
+  async function copyDiagnostics() {
+    if (!diagnostics) return;
+    try {
+      await navigator.clipboard.writeText(`${JSON.stringify(diagnostics, null, 2)}\n`);
+      toast("success", t("toast.diagnosticsCopied"));
+    } catch (error) {
+      toast("error", (error as Error).message);
+    }
+  }
+
+  async function exportDiagnostics() {
+    if (!diagnostics) return;
+    try {
+      const saved = await downloadTextFile(`${JSON.stringify(diagnostics, null, 2)}\n`, "cbpanel-diagnostics.json", "application/json");
+      if (saved) toast("success", t("toast.exported"));
+    } catch (error) {
+      toast("error", (error as Error).message);
+    }
+  }
+
+  return {
+    copyDiagnostics,
+    exportDiagnostics,
+    fetchDiagnostics,
+    loadDiagnostics,
+  };
+}
