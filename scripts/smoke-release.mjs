@@ -18,6 +18,7 @@ const packageMetadata = JSON.parse(await fs.readFile(path.join(root, "package.js
 const installerPath = path.join(root, "src-tauri", "target", "release", "bundle", "nsis", `CBPanel_${packageMetadata.version}_x64-setup.exe`);
 const smokePortableDir = await fs.mkdtemp(path.join(os.tmpdir(), "cbpanel-release-smoke-"));
 const smokeDataDir = path.join(smokePortableDir, "portable-data");
+const smokeLogPath = path.join(smokePortableDir, "cbpanel-smoke.log");
 const port = process.env.CBPANEL_RELEASE_SMOKE_PORT ? Number(process.env.CBPANEL_RELEASE_SMOKE_PORT) : await findFreePort();
 const token = process.env.CBPANEL_RELEASE_SMOKE_TOKEN ?? `smoke-${Date.now()}`;
 const tauriOrigin = "https://tauri.localhost";
@@ -41,6 +42,12 @@ for (const artifact of requiredReleaseArtifacts({
 
 await prepareSmokePortableDir();
 
+// The shell's own stderr is the only diagnostic a failed start leaves behind: the window stays hidden
+// during the handshake and Tauri spawns the sidecar with null stdio, so nothing else reaches this
+// process. Keep a bounded tail so a failure report can quote the reason without retaining megabytes.
+const smokeLogHandle = await fs.open(smokeLogPath, "w").then((handle) => handle.createWriteStream());
+const smokeLogTail = [];
+
 const child = spawn(path.join(smokePortableDir, "CBPanel.exe"), {
   cwd: smokePortableDir,
   env: {
@@ -49,12 +56,21 @@ const child = spawn(path.join(smokePortableDir, "CBPanel.exe"), {
     CBPANEL_RELEASE_SMOKE_PORT: String(port),
     CBPANEL_RELEASE_SMOKE_TOKEN: token,
   },
-  stdio: "ignore",
+  stdio: ["ignore", "ignore", "pipe"],
   windowsHide: true,
+});
+child.stderr?.setEncoding("utf8");
+child.stderr?.on("data", (chunk) => {
+  smokeLogHandle.write(chunk);
+  smokeLogTail.push(chunk);
+  if (smokeLogTail.length > 80) smokeLogTail.splice(0, smokeLogTail.length - 80);
+});
+child.once("exit", () => {
+  smokeLogHandle.end();
 });
 
 try {
-  await waitForReady(port, token);
+  await waitForReady(port, token, child);
 
   const unauthorized = await fetch(`http://127.0.0.1:${port}/api/state`);
   if (unauthorized.status !== 401) {
@@ -104,19 +120,40 @@ try {
   await fs.rm(smokePortableDir, { recursive: true, force: true });
 }
 
-async function waitForReady(inputPort, inputToken) {
-  const deadline = Date.now() + 20_000;
+async function waitForReady(inputPort, inputToken, inputChild) {
+  // A packaged first start on a CI runner pays the full cold path: Defender scanning a fresh 38 MB
+  // installer payload and a 127 MB sidecar, then SQLite initialization. The previous 20 s budget
+  // reported "fetch failed" on a run whose only problem was that cold start, so the window is sized
+  // for the slow case while still bounded.
+  const deadline = Date.now() + 90_000;
   let lastError;
   while (Date.now() < deadline) {
+    // A shell that never started the sidecar keeps the probe answering "fetch failed", which names
+    // neither the exit code nor a reason. Reporting the exit as soon as it happens is what makes a
+    // release failure actionable.
+    if (inputChild.exitCode !== null || inputChild.signalCode !== null) {
+      throw new Error(
+        `Packaged app exited before the sidecar was ready (exitCode=${inputChild.exitCode}, signal=${inputChild.signalCode}). ` +
+          `Last probe: ${lastError?.message ?? "none"}.${stderrTailSuffix()}`,
+      );
+    }
     try {
       await fetchJson(`http://127.0.0.1:${inputPort}/api/desktop/runtime`, inputToken);
       return;
     } catch (error) {
       lastError = error;
-      await sleep(300);
+      await sleep(250);
     }
   }
-  throw new Error(`Sidecar did not become ready: ${lastError?.message ?? "timeout"}`);
+  throw new Error(
+    `Sidecar did not become ready within 90 s (last probe: ${lastError?.message ?? "timeout"}).${stderrTailSuffix()}`,
+  );
+}
+
+function stderrTailSuffix() {
+  const tail = smokeLogTail.join("").trim();
+  if (!tail) return ` Shell stderr log: ${smokeLogPath}`;
+  return ` Shell stderr (last lines):\n${tail.split(/\r?\n/).slice(-20).join("\n")}`;
 }
 
 async function fetchJson(url, inputToken, init = {}) {

@@ -117,7 +117,9 @@ test("one aborted caller stops waiting without cancelling the shared transfer", 
   const started = new Promise<void>((resolve) => {
     transferStarted = resolve;
   });
+  let calls = 0;
   const fetchImpl = (async () => {
+    calls += 1;
     transferStarted();
     await gate;
     return new Response(streamBody([Buffer.from(MMDB_BODY)]), { status: 200 });
@@ -137,6 +139,8 @@ test("one aborted caller stops waiting without cancelling the shared transfer", 
   release();
   const result = await joined;
   assert.equal(result.downloaded, true);
+  // Two transfers would write the same temporary name (pid + Date.now) and race each other's rename.
+  assert.equal(calls, 1, "an aborted caller must not hand the next launch a second download");
   await fs.rm(root, { recursive: true, force: true });
 });
 

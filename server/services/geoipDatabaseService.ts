@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -70,14 +71,18 @@ export class GeoipDatabaseService {
     this.inFlightAbort = controller;
     const work = this.download(dbPath, controller.signal, options.onProgress);
     this.inFlight = work;
-    try {
-      return await withAbort(work, options.signal);
-    } finally {
+    // The shared slot is released by the transfer, never by the caller that happened to start it.
+    // Releasing it in this caller's `finally` unregisters a still-running transfer the moment that
+    // caller aborts, so the next launch starts a second download of the same file — and both write the
+    // same `pid` + `Date.now` temp name, so one rename lands and the other gets ENOENT.
+    const release = () => {
       if (this.inFlight === work) {
         this.inFlight = undefined;
         this.inFlightAbort = undefined;
       }
-    }
+    };
+    void work.then(release, release);
+    return await withAbort(work, options.signal);
   }
 
   /** Cancels a transfer still in progress (shutdown). Idempotent. */
@@ -94,8 +99,9 @@ export class GeoipDatabaseService {
     const fetchImpl = this.options.fetchImpl ?? fetch;
     await fs.mkdir(path.dirname(dbPath), { recursive: true });
     // The wrapper runs a background refresh in the same directory; a distinct temporary name keeps
-    // the two writes apart.
-    const tempPath = `${dbPath}.tmp-${process.pid}-${Date.now()}`;
+    // the two writes apart. The pid alone is not distinct: two downloads started in the same
+    // millisecond for the same process would collide, and the losing rename then reports ENOENT.
+    const tempPath = `${dbPath}.tmp-${process.pid}-${Date.now()}-${randomUUID()}`;
     try {
       const response = await fetchImpl(url, { redirect: "follow", signal });
       if (!response.ok || !response.body) {
