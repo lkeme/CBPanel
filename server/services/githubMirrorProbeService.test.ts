@@ -1,8 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CLOAKBROWSER_GEOIP_DB_URL, rewriteGithubDownloadUrl } from "../../src/shared/githubMirror";
+import { CLOAKBROWSER_GEOIP_DB_URL, XRAY_CORE_MIRROR_PROBE_URL, rewriteGithubDownloadUrl } from "../../src/shared/githubMirror";
 import { normalizeSettings } from "../../src/shared/settings";
 import { GithubMirrorProbeService, mirrorProbeTargets } from "./githubMirrorProbeService";
+
+function settingsOff() {
+  return normalizeSettings({
+    networkTrace: {
+      providerId: "cloudflare-www",
+      customProviderUrl: "",
+      timeoutSeconds: 8,
+      githubMirrorProviderId: "off",
+      customGithubMirrorPrefix: "",
+    },
+  });
+}
 
 test("mirrorProbeTargets returns built-in mirrors and valid custom mirror for all checks", () => {
   const settings = normalizeSettings({
@@ -17,19 +29,19 @@ test("mirrorProbeTargets returns built-in mirrors and valid custom mirror for al
 
   const targets = mirrorProbeTargets(settings, { providerId: "all" });
 
-  assert.equal(targets.length, 6);
+  assert.equal(targets.length, 7);
   assert.equal(targets.at(-1)?.providerId, "custom");
   assert.equal(targets.at(-1)?.prefix, "https://mirror.example.com/");
 });
 
-test("GithubMirrorProbeService checks GeoIP response headers without downloading the database", async () => {
+test("GithubMirrorProbeService probes GeoIP and Xray assets without downloading either", async () => {
   const seenUrls: string[] = [];
   const service = new GithubMirrorProbeService({
     fetchImpl: (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       seenUrls.push(url);
       assert.equal(init?.method, "HEAD");
-      if (url.startsWith("https://ghproxy.vip/")) {
+      if (url.startsWith("https://ghproxy.net/")) {
         return new Response(null, { status: 200, headers: { "content-type": "application/octet-stream", "content-length": "70000000" } });
       }
       return new Response("missing", { status: 502 });
@@ -47,10 +59,30 @@ test("GithubMirrorProbeService checks GeoIP response headers without downloading
 
   const response = await service.check(settings, { providerId: "all" });
 
-  assert.equal(response.recommendedProviderId, "ghproxy-vip");
-  assert.equal(response.results.find((item) => item.providerId === "ghproxy-vip")?.ok, true);
+  assert.equal(response.recommendedProviderId, "ghproxy-net");
+  assert.equal(response.results.find((item) => item.providerId === "ghproxy-net")?.ok, true);
   assert.equal(response.targetUrl, CLOAKBROWSER_GEOIP_DB_URL);
-  assert.ok(seenUrls.every((url) => url.endsWith(CLOAKBROWSER_GEOIP_DB_URL)));
+  assert.ok(seenUrls.some((url) => url.endsWith(CLOAKBROWSER_GEOIP_DB_URL)));
+  assert.ok(seenUrls.some((url) => url.endsWith(XRAY_CORE_MIRROR_PROBE_URL)));
+});
+
+test("a mirror that serves GeoIP but refuses release assets is not recommended", async () => {
+  const service = new GithubMirrorProbeService({
+    fetchImpl: (async (input: Parameters<typeof fetch>[0]) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.endsWith(CLOAKBROWSER_GEOIP_DB_URL)) {
+        return new Response(null, { status: 200, headers: { "content-type": "application/octet-stream", "content-length": "70000000" } });
+      }
+      return new Response("forbidden", { status: 403 });
+    }) as typeof fetch,
+  });
+
+  const response = await service.check(settingsOff(), { providerId: "all" });
+
+  const rejected = response.results.find((item) => item.providerId === "gh-proxy-com");
+  assert.equal(rejected?.ok, false);
+  assert.match(rejected?.error ?? "", /403/);
+  assert.equal(response.recommendedProviderId, undefined);
 });
 
 test("auto-best probe target checks all built-in mirrors", () => {
@@ -68,7 +100,7 @@ test("auto-best probe target checks all built-in mirrors", () => {
 
   assert.deepEqual(
     targets.map((target) => target.providerId),
-    ["gh-proxy-lipk", "ghfast-top", "ghproxy-net", "ghproxy-vip", "gh-proxy-com"],
+    ["gh-proxy-com", "gh-qfmc0721", "g-z321-cc-cd", "github-tbap-top", "gh-proxy-org", "ghproxy-net"],
   );
 });
 
@@ -117,7 +149,7 @@ test("GithubMirrorProbeService reuses recent mirror probe results", async () => 
   const first = await service.check(settings, { providerId: "all" });
   const second = await service.check(settings, { providerId: "all" });
 
-  assert.equal(fetchCalls, 5);
+  assert.equal(fetchCalls, 12);
   assert.deepEqual(second, first);
 });
 
@@ -146,7 +178,7 @@ test("GithubMirrorProbeService caches mirror probes by request shape", async () 
     customGithubMirrorPrefix: "https://mirror-two.example.com/",
   });
 
-  assert.equal(fetchCalls, 2);
+  assert.equal(fetchCalls, 4);
 });
 
 test("GitHub mirror probes use the current GeoIP asset independently of any installed core", () => {

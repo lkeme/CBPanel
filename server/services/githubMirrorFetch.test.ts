@@ -4,7 +4,7 @@ import { normalizeSettings } from "../../src/shared/settings";
 import { applyGithubMirrorFetch, restoreGithubMirrorFetch } from "./githubMirrorFetch";
 import { GithubMirrorProbeService } from "./githubMirrorProbeService";
 
-test("applyGithubMirrorFetch rewrites only supported CloakBrowser download URLs", async () => {
+test("applyGithubMirrorFetch rewrites only supported GitHub downloads", async () => {
   const originalFetch = globalThis.fetch;
   const seenUrls: string[] = [];
   globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
@@ -23,12 +23,15 @@ test("applyGithubMirrorFetch rewrites only supported CloakBrowser download URLs"
       },
     }));
 
+    // The retired official archive path and the API stay untouched; the Pro checksum manifest does not.
     await fetch("https://cloakbrowser.dev/chromium-v146.0.7680.177.5/cloakbrowser-windows-x64.zip");
     await fetch("https://api.github.com/repos/CloakHQ/cloakbrowser/releases");
+    await fetch("https://cloakbrowser.dev/releases/pro/chromium-v156.0.8078.47.1/SHA256SUMS");
 
     assert.deepEqual(seenUrls, [
-      "https://gh-proxy.com/https://github.com/CloakHQ/cloakbrowser/releases/download/chromium-v146.0.7680.177.5/cloakbrowser-windows-x64.zip",
+      "https://cloakbrowser.dev/chromium-v146.0.7680.177.5/cloakbrowser-windows-x64.zip",
       "https://api.github.com/repos/CloakHQ/cloakbrowser/releases",
+      "https://gh-proxy.com/https://github.com/CloakHQ/cloakbrowser/releases/download/chromium-v156.0.8078.47.1-pro/SHA256SUMS",
     ]);
   } finally {
     restoreGithubMirrorFetch();
@@ -42,7 +45,7 @@ test("auto-best mirror resolution rewrites downloads with the fastest successful
   const service = new GithubMirrorProbeService({
     fetchImpl: (async (input: Parameters<typeof fetch>[0]) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.startsWith("https://ghfast.top/")) {
+      if (url.startsWith("https://gh.qfmc0721.cc.cd/")) {
         await new Promise((resolve) => setTimeout(resolve, 1));
         return new Response(null, { headers: { "content-type": "application/octet-stream" } });
       }
@@ -69,9 +72,9 @@ test("auto-best mirror resolution rewrites downloads with the fastest successful
 
     await fetch("https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb");
 
-    assert.equal(resolution?.providerId, "ghfast-top");
+    assert.equal(resolution?.providerId, "gh-qfmc0721");
     assert.deepEqual(seenUrls, [
-      "https://ghfast.top/https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb",
+      "https://gh.qfmc0721.cc.cd/https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb",
     ]);
   } finally {
     restoreGithubMirrorFetch();

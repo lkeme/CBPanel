@@ -199,6 +199,56 @@ test("a non-HTTPS manifest URL is refused before any request", async () => {
   assert.equal(check.errorCode, "APP_UPDATE_MANIFEST_URL_UNSUPPORTED");
 });
 
+test("a configured mirror prefixes the public manifest request only", async () => {
+  const requests: string[] = [];
+  const service = new AppUpdateService({
+    currentVersion: "1.0.10",
+    readSettings: async () => DEFAULT_APP_SETTINGS,
+    fetchImpl: async (input) => {
+      requests.push(String(input));
+      return jsonResponse(manifestBody("1.0.11"));
+    },
+    resolveMirrorPrefix: async () => "https://gh-proxy.com",
+    platform: "win32",
+    arch: "x64",
+    now: () => new Date(NOW),
+  });
+
+  const check = await service.check();
+
+  assert.deepEqual(requests, [
+    "https://gh-proxy.com/https://github.com/lkeme/CBPanel/releases/latest/download/app-update-manifest.json",
+  ]);
+  assert.equal(check.updateAvailable, true);
+
+  // The asset URL stored for the operator stays canonical: the shell rebuilds it from version+name.
+  assert.equal(
+    check.download?.url,
+    "https://github.com/lkeme/CBPanel/releases/download/v1.0.11/CBPanel_1.0.11_x64-setup.exe",
+  );
+});
+
+test("a manifest URL override ignores the mirror prefix", async () => {
+  const requests: string[] = [];
+  const service = new AppUpdateService({
+    currentVersion: "1.0.10",
+    manifestUrl: MANIFEST_URL,
+    readSettings: async () => DEFAULT_APP_SETTINGS,
+    fetchImpl: async (input) => {
+      requests.push(String(input));
+      return jsonResponse(manifestBody("1.0.11"));
+    },
+    resolveMirrorPrefix: async () => "https://gh-proxy.com/",
+    platform: "win32",
+    arch: "x64",
+    now: () => new Date(NOW),
+  });
+
+  await service.check();
+
+  assert.deepEqual(requests, [MANIFEST_URL]);
+});
+
 test("read returns the stored check without touching the network", async () => {
   const harness = createHarness({ responses: [jsonResponse(manifestBody("1.0.11"))] });
   await harness.service.check();

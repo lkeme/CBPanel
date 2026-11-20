@@ -1,5 +1,6 @@
 import {
   CLOAKBROWSER_GEOIP_DB_URL,
+  XRAY_CORE_MIRROR_PROBE_URL,
   rewriteGithubDownloadUrl,
   selectRecommendedGithubMirror,
   type GithubMirrorProbeRequest,
@@ -60,7 +61,7 @@ export class GithubMirrorProbeService {
     const checkedAt = new Date().toISOString();
     const targetUrl = CLOAKBROWSER_GEOIP_DB_URL;
     const targets = mirrorProbeTargets(settings, request);
-    const results = await Promise.all(targets.map((target) => this.checkOne(target, targetUrl, checkedAt)));
+    const results = await Promise.all(targets.map((target) => this.checkOne(target, checkedAt)));
     const recommendedProviderId = selectRecommendedGithubMirror(results);
     const recommended = results.find((result) => result.providerId === recommendedProviderId);
     if (recommended?.ok) {
@@ -119,45 +120,31 @@ export class GithubMirrorProbeService {
 
   private async checkOne(
     target: GithubMirrorProbeTarget,
-    targetUrl: string,
     checkedAt: string,
   ): Promise<GithubMirrorProbeResult> {
-    const rewrite = rewriteGithubDownloadUrl(targetUrl, target.prefix);
-    if (!rewrite) {
-      return {
-        ...target,
-        ok: false,
-        checkedAt,
-        error: "Mirror prefix cannot rewrite the GeoIP database URL.",
-      };
-    }
-
     const startedAt = Date.now();
     try {
-      // The authenticated core no longer has public GitHub checksum assets. Probe
-      // the GeoIP asset still used by the wrapper, without transferring the database.
-      const response = await this.fetchImpl(rewrite.rewrittenUrl, {
-        method: "HEAD",
-        redirect: "follow",
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-      await response.body?.cancel();
-      const latencyMs = Date.now() - startedAt;
-      const contentType = response.headers.get("content-type") ?? "";
-      const length = response.headers.get("content-length");
-      const looksLikeDatabase = /^(?:application\/(?:octet-stream|x-binary|vnd\.maxmind\.maxmind-db)|binary\/octet-stream)(?:;|$)/i.test(contentType)
-        && (length === null || (Number.isFinite(Number(length)) && Number(length) > 0));
+      // Two assets, because a mirror can serve one GitHub path and refuse another: `ghfast.top` happily
+      // proxies the GeoIP raw file while answering 403 for every release asset. The Xray sidecar is a
+      // few hundred bytes, so checking both still transfers nothing.
+      const geoip = await this.headRewrite(rewriteGithubDownloadUrl(CLOAKBROWSER_GEOIP_DB_URL, target.prefix));
+      const xray = await this.headRewrite(rewriteGithubDownloadUrl(XRAY_CORE_MIRROR_PROBE_URL, target.prefix));
+      if (!geoip.ok || !xray.ok) {
+        return {
+          ...target,
+          ok: false,
+          latencyMs: Date.now() - startedAt,
+          status: geoip.status ?? xray.status,
+          checkedAt,
+          error: !geoip.ok ? geoip.error : xray.error,
+        };
+      }
       return {
         ...target,
-        ok: response.ok && looksLikeDatabase,
-        latencyMs,
-        status: response.status,
+        ok: true,
+        latencyMs: Date.now() - startedAt,
+        status: geoip.status,
         checkedAt,
-        ...(!response.ok
-          ? { error: `GeoIP database HTTP ${response.status}` }
-          : !looksLikeDatabase
-            ? { error: "Response headers do not identify a non-empty GeoIP database." }
-            : {}),
       };
     } catch (error) {
       return {
@@ -170,7 +157,47 @@ export class GithubMirrorProbeService {
     }
   }
 
+  /** HEAD without a body; falls back to a one-byte range read for hosts that reject HEAD outright. */
+  private async headRewrite(
+    rewrite: ReturnType<typeof rewriteGithubDownloadUrl>,
+  ): Promise<{ ok: boolean; status?: number; error?: string }> {
+    if (!rewrite) return { ok: false, error: "Mirror prefix cannot rewrite the probed GitHub URL." };
+    try {
+      const response = await this.fetchImpl(rewrite.rewrittenUrl, {
+        method: "HEAD",
+        redirect: "follow",
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      await response.body?.cancel();
+      const contentType = response.headers.get("content-type") ?? "";
+      const length = response.headers.get("content-length");
+      const isBinary = /^(?:application\/(?:octet-stream|x-binary|vnd\.maxmind\.maxmind-db)|binary\/octet-stream|text\/plain)(?:;|$)/i.test(contentType)
+        && (length === null || (Number.isFinite(Number(length)) && Number(length) > 0));
+      if (response.ok && isBinary) return { ok: true, status: response.status };
+      if (response.ok) return { ok: false, status: response.status, error: "Response headers do not identify the probed asset." };
+      if (!HEAD_REJECTED_STATUSES.has(response.status)) {
+        return { ok: false, status: response.status, error: `Mirror answered HTTP ${response.status}.` };
+      }
+    } catch (error) {
+      const message = (error as Error).message || "";
+      if (!/method|HEAD|not allowed/i.test(message)) throw error;
+    }
+
+    const range = await this.fetchImpl(rewrite.rewrittenUrl, {
+      headers: { range: "bytes=0-0" },
+      redirect: "follow",
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    const bytes = await range.arrayBuffer().catch(() => new ArrayBuffer(0));
+    return range.ok && bytes.byteLength > 0
+      ? { ok: true, status: range.status }
+      : { ok: false, status: range.status, error: `Mirror answered HTTP ${range.status} to a range read.` };
+  }
+
 }
+
+/** Hosts that answer a probe with "this verb is not supported" rather than "this asset is absent". */
+const HEAD_REJECTED_STATUSES = new Set([403, 405, 501]);
 
 export function mirrorProbeTargets(
   settings: AppSettings,

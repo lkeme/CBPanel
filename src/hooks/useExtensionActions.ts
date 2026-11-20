@@ -3,7 +3,7 @@ import type { Dispatch, SetStateAction } from "react";
 import type { TranslationKey } from "../i18n";
 import type { ExtensionImportDialogState } from "../components/registry/RegistryDialogs";
 import type { ConfirmDialogState } from "../components/ui/ConfirmDialog";
-import { api, type ApiError, errorMessage, extensionErrorMessage } from "../lib/apiClient";
+import { api, type ApiError, errorMessage, extensionErrorMessage, isReferenceConflict } from "../lib/apiClient";
 import { shortExtensionId } from "../lib/utils";
 import type {
   ExtensionDirectoryImportResult,
@@ -20,6 +20,9 @@ type ExtensionImportConflictOptions = {
   conflictDisposition?: ExtensionImportConflictDisposition;
   conflictExtensionId?: string;
 };
+
+/** The extension whose references are being resolved before a delete; owned by the page, like proxies. */
+export type ExtensionReferenceState = { extension: ExtensionEntity } | null;
 
 const AUTO_CHECK_CONCURRENCY = 3;
 const AUTO_CHECK_MIN_INTERVAL_MS = 60_000;
@@ -128,20 +131,25 @@ export function useExtensionActions({
   draft,
   draftIsNew,
   loadState,
+  referenceEnvironmentIds,
   selectedProfiles: _selectedProfiles,
   setBusy,
   setConfirmDialog,
   setExtensionImport,
+  setExtensionReference,
   t,
   toast,
 }: {
   draft: BrowserProfile | null;
   draftIsNew: boolean;
   loadState: () => Promise<unknown>;
+  /** Live environments still bound to one extension; the caller owns that projection. */
+  referenceEnvironmentIds: (extensionId: string) => string[];
   selectedProfiles: BrowserProfile[];
   setBusy: Dispatch<SetStateAction<string>>;
   setConfirmDialog: Dispatch<SetStateAction<ConfirmDialogState>>;
   setExtensionImport: Dispatch<SetStateAction<ExtensionImportDialogState>>;
+  setExtensionReference: Dispatch<SetStateAction<ExtensionReferenceState>>;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
   toast: (kind: "success" | "error" | "info", text: string) => void;
 }) {
@@ -592,6 +600,11 @@ export function useExtensionActions({
   }
 
   async function deleteExtension(extension: ExtensionEntity) {
+    // A referenced extension cannot be deleted, so the generic confirm would only promise a 409.
+    if (referenceEnvironmentIds(extension.id).length > 0) {
+      setExtensionReference({ extension });
+      return;
+    }
     setConfirmDialog({
       title: t("extension.delete.title", { name: extension.name }),
       body: t("extension.delete.body"),
@@ -607,9 +620,72 @@ export function useExtensionActions({
     try {
       await runMutation({
         mutate: () => api(`/api/extensions/${extension.id}`, { method: "DELETE" }),
+        onFailure: (error) => {
+          // Someone bound it between the click and the request. Show the same dialog, with fresh data.
+          if (isReferenceConflict(error)) {
+            setConfirmDialog(null);
+            setExtensionReference({ extension });
+            void loadState();
+            toast("error", t("error.referenceConflict", { count: error.usage.count }));
+            return;
+          }
+          toast("error", extensionErrorMessage(error, t));
+        },
         onSuccess: () => {
           setConfirmDialog(null);
+          setExtensionReference(null);
           toast("success", t("toast.extensionDeleted"));
+        },
+      });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  /** Unbinds every environment first, then deletes; the backend still refuses if a new binding raced in. */
+  async function unbindAndDeleteExtension(extension: ExtensionEntity) {
+    setBusy(`extension-delete:${extension.id}`);
+    try {
+      // No id list: the server unbinds whatever is bound now, so a binding the client state has not
+      // seen yet cannot survive and turn the delete into a second 409.
+      await api(`/api/extensions/${extension.id}/unbind-environments`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      await runMutation({
+        mutate: () => api(`/api/extensions/${extension.id}`, { method: "DELETE" }),
+        onFailure: (error) => {
+          if (isReferenceConflict(error)) {
+            void loadState();
+            toast("error", t("error.referenceConflict", { count: error.usage.count }));
+            return;
+          }
+          toast("error", extensionErrorMessage(error, t));
+        },
+        onSuccess: () => {
+          setExtensionReference(null);
+          toast("success", t("toast.extensionUnboundAndDeleted"));
+        },
+      });
+    } catch (error) {
+      toast("error", extensionErrorMessage(error, t));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  /** Clears the references without destroying the library entry. */
+  async function unbindExtensionReferences(extension: ExtensionEntity) {
+    setBusy(`extension-delete:${extension.id}`);
+    try {
+      await runMutation({
+        mutate: () => api(`/api/extensions/${extension.id}/unbind-environments`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+        onSuccess: () => {
+          setExtensionReference(null);
+          toast("success", t("toast.extensionReferencesUnbound"));
         },
       });
     } finally {
@@ -682,6 +758,8 @@ export function useExtensionActions({
     setDraftExtensionBinding,
     setExtensionUpdatePolicy,
     toggleExtensionStatus,
+    unbindAndDeleteExtension,
+    unbindExtensionReferences,
     updateExtension,
     uploadExtensionArchive,
   };

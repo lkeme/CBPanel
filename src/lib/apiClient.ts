@@ -383,7 +383,7 @@ export function profileErrorMessage(
   return t(key);
 }
 
-function isReferenceConflict(error: unknown): error is ApiError & { usage: ReferenceUsage } {
+export function isReferenceConflict(error: unknown): error is ApiError & { usage: ReferenceUsage } {
   return error instanceof Error && (error as ApiError).code === "REFERENCE_CONFLICT" && Boolean((error as ApiError).usage);
 }
 

@@ -142,6 +142,31 @@ function incrementStat(map: Map<string, { name: string; count: number; running: 
   map.set(name, current);
 }
 
+/**
+ * The environments that still load one extension, newest state first. Trashed environments keep
+ * their binding rows but are invisible in the UI, so counting them would name an environment the
+ * operator cannot find — the same rule the backend's delete guard applies.
+ */
+export function extensionReferenceEnvironments(
+  environments: NonNullable<PanelState["environments"]>,
+  extensionId: string,
+): Array<{ id: string }> {
+  return environments
+    .filter((environment) => !environment.deletedAt && environment.extensionIds.includes(extensionId))
+    .map((environment) => ({ id: environment.id }));
+}
+
+/** Resolves display names for reference rows; an id with no profile keeps its id visible. */
+export function nameExtensionReferenceEnvironments(
+  references: Array<{ id: string }>,
+  profiles: PanelState["profiles"] | undefined,
+): Array<{ id: string; name: string }> {
+  return references.map((reference) => ({
+    id: reference.id,
+    name: profiles?.find((profile) => profile.id === reference.id)?.name ?? reference.id,
+  }));
+}
+
 function sortStats<T extends { name: string; count: number }>(items: T[]): T[] {
   return items.sort((left, right) => right.count - left.count || left.name.localeCompare(right.name));
 }

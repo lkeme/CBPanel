@@ -55,6 +55,17 @@ export const APP_UPDATE_STARTUP_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
 export const APP_UPDATE_REPOSITORY = "lkeme/CBPanel";
 export const APP_UPDATE_MANIFEST_URL =
   `https://github.com/${APP_UPDATE_REPOSITORY}/releases/latest/download/app-update-manifest.json`;
+/**
+ * Applies a configured GitHub mirror prefix to the manifest URL. The manifest is a public release
+ * asset, so it takes the same rewriting the GeoIP and Xray downloads already do — but it is fetched
+ * by a service that bound `fetch` at construction time, so the global interception never reaches it.
+ */
+export function mirroredAppUpdateManifestUrl(manifestUrl: string, mirrorPrefix: string | undefined): string {
+  const prefix = mirrorPrefix?.trim();
+  if (!prefix) return manifestUrl;
+  const normalized = prefix.endsWith("/") ? prefix : `${prefix}/`;
+  return `${normalized}${manifestUrl}`;
+}
 /** A manifest is a few hundred bytes; anything past this is not the file this code wrote. */
 export const APP_UPDATE_MANIFEST_MAX_BYTES = 256 * 1024;
 export const APP_UPDATE_REQUEST_TIMEOUT_MS = 10_000;

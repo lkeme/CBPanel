@@ -289,6 +289,11 @@ const appUpdateService = new AppUpdateService({
   readSettings: () => repository.getSettings(),
   saveSettings: (patch) => repository.saveSettings(patch),
   portable: PORTABLE,
+  // Resolved per check: "auto-best" must use the probe's measured winner, not a constant.
+  resolveMirrorPrefix: async () => {
+    const settings = await repository.getSettings();
+    return (await githubMirrorProbeService.resolvePrefix(settings))?.prefix;
+  },
 });
 
 function isRuntimeDataPath(inputPath: string): boolean {

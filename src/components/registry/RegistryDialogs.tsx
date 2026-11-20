@@ -9,6 +9,7 @@ import type {
   ExtensionDirectoryImportResult,
   ExtensionDirectoryMode,
   ExtensionDirectoryPreviewResult,
+  ExtensionEntity,
   GroupEntity,
   ProxyEntity,
   ProxySubscriptionEntity,
@@ -781,6 +782,87 @@ function ExtensionDirectoryImportFailures({
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * Deleting an extension that several environments load is otherwise a scavenger hunt: the 409 names
+ * only a count, and each environment has to be found and unbound by hand. This lists the environments,
+ * offers the same "unbind everything, then delete" shortcut the proxy dialog already has, and links
+ * into the profile list filtered to this extension.
+ */
+export function ExtensionReferenceDialog({
+  busy,
+  close,
+  extension,
+  environments,
+  showProfiles,
+  t,
+  unbindAndDelete,
+  unbindOnly,
+}: {
+  busy: string;
+  close: () => void;
+  extension: ExtensionEntity;
+  /** Resolved names for every environment still holding this extension, in environment order. */
+  environments: Array<{ id: string; name: string }>;
+  showProfiles: (extensionId: string) => void;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  unbindAndDelete: (extension: ExtensionEntity) => Promise<void>;
+  unbindOnly: (extension: ExtensionEntity) => Promise<void>;
+}) {
+  const busyKey = `extension-delete:${extension.id}`;
+  const isBusy = busy === busyKey;
+  return (
+    <DialogShell
+      actions={
+        <>
+          <button className="command subtle" disabled={isBusy} onClick={close} type="button">
+            {t("actions.cancel")}
+          </button>
+          <button className="command subtle" disabled={isBusy} onClick={() => void unbindOnly(extension)} type="button">
+            {t("extension.references.unbindOnly")}
+          </button>
+          <button className="command danger" disabled={isBusy} onClick={() => void unbindAndDelete(extension)} type="button">
+            {t("extension.references.unbindAndDelete")}
+          </button>
+        </>
+      }
+      close={close}
+      closeDisabled={isBusy}
+      description={t("extension.references.body", { count: environments.length })}
+      labelledBy="extension-reference-title"
+      panelClassName="reference-panel"
+      t={t}
+      title={t("extension.references.title", { name: extension.name })}
+    >
+      <div className="reference-summary">
+        <span>{t("extension.references.currentExtension")}</span>
+        <strong>{extension.name}</strong>
+        <small className="mono-cell">v{extension.version}</small>
+      </div>
+      <ul className="reference-entity-list">
+        {environments.map((environment) => (
+          <li key={environment.id}>
+            <span>{environment.name}</span>
+            <small className="mono-cell">{environment.id}</small>
+          </li>
+        ))}
+      </ul>
+      <p className="muted-line">{t("extension.references.cleanupNote")}</p>
+      <div className="reference-action-grid">
+        <button
+          className="command"
+          onClick={() => {
+            showProfiles(extension.id);
+            close();
+          }}
+          type="button"
+        >
+          {t("extension.references.viewProfiles")}
+        </button>
+      </div>
+    </DialogShell>
   );
 }
 

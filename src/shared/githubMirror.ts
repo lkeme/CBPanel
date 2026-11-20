@@ -5,7 +5,18 @@ const CLOAKBROWSER_GITHUB_RELEASE_BASE_URL = "https://github.com/CloakHQ/cloakbr
 export const CLOAKBROWSER_GEOIP_DB_URL = "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb";
 export const XRAY_CORE_GITHUB_RELEASE_BASE_URL = "https://github.com/XTLS/Xray-core/releases/download";
 
-export type GithubMirrorRewriteKind = "cloakbrowser-core" | "cloakbrowser-geoip" | "xray-core";
+/**
+ * The cheapest Xray asset that still proves a mirror serves release archives: the checksum sidecar
+ * the installer already downloads alongside the archive. Probing with it keeps mirror checks at one
+ * small request instead of a multi-megabyte archive transfer, and `latest/download` keeps the probe
+ * valid across releases.
+ */
+export const XRAY_CORE_MIRROR_PROBE_URL = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip.dgst";
+
+export type GithubMirrorRewriteKind =
+  | "cloakbrowser-pro-manifest"
+  | "cloakbrowser-geoip"
+  | "xray-core";
 
 export interface GithubMirrorProbeRequest {
   providerId?: GithubMirrorProviderId | "all";
@@ -68,23 +79,23 @@ export function normalizeSupportedGithubDownloadUrl(inputUrl: string): { url: st
   }
 
   if (url.origin === CLOAKBROWSER_OFFICIAL_BASE_URL) {
-    const match = url.pathname.match(/^\/(chromium-v[^/]+)\/([^/?#]+)$/);
-    if (!match) return undefined;
-    const [, tag, asset] = match;
-    if (!isSupportedCloakBrowserReleaseAsset(asset)) return undefined;
+    // The archive itself carries a license token, so it never appears here: since the official core
+    // moved to a license-gated download URL, the only public GitHub content left on this origin is the
+    // Pro checksum manifest and its detached signature.
+    const proManifest = url.pathname.match(/^\/releases\/pro\/(chromium-v[^/]+)\/(SHA256SUMS(?:\.sig)?)$/);
+    if (!proManifest) return undefined;
+    const [, tag, asset] = proManifest;
     return {
-      url: `${CLOAKBROWSER_GITHUB_RELEASE_BASE_URL}/${tag}/${asset}`,
-      kind: "cloakbrowser-core",
+      url: `${CLOAKBROWSER_GITHUB_RELEASE_BASE_URL}/${tag}-pro/${asset}`,
+      kind: "cloakbrowser-pro-manifest",
     };
   }
 
   if (url.origin === "https://github.com") {
-    if (url.pathname.match(/^\/CloakHQ\/cloakbrowser\/releases\/download\/chromium-v[^/]+\/([^/?#]+)$/)) {
-      const asset = url.pathname.split("/").at(-1);
-      if (!asset || !isSupportedCloakBrowserReleaseAsset(asset)) return undefined;
+    if (url.pathname.match(/^\/CloakHQ\/cloakbrowser\/releases\/download\/chromium-v[^/]+-pro\/SHA256SUMS(?:\.sig)?$/)) {
       return {
         url: url.toString(),
-        kind: "cloakbrowser-core",
+        kind: "cloakbrowser-pro-manifest",
       };
     }
 
@@ -96,7 +107,8 @@ export function normalizeSupportedGithubDownloadUrl(inputUrl: string): { url: st
     }
 
     // The Xray engine's release archives are the one other GitHub download the panel performs.
-    if (url.pathname.match(/^\/XTLS\/Xray-core\/releases\/download\/v[^/]+\/Xray-[A-Za-z0-9._-]+\.zip(?:\.dgst)?$/)) {
+    // `latest/download` is the same asset as a versioned tag and is what mirror probing uses.
+    if (url.pathname.match(/^\/XTLS\/Xray-core\/releases\/(?:download\/v[^/]+|latest\/download)\/Xray-[A-Za-z0-9._-]+\.zip(?:\.dgst)?$/)) {
       return {
         url: url.toString(),
         kind: "xray-core",
@@ -105,12 +117,6 @@ export function normalizeSupportedGithubDownloadUrl(inputUrl: string): { url: st
   }
 
   return undefined;
-}
-
-function isSupportedCloakBrowserReleaseAsset(asset: string): boolean {
-  return asset === "SHA256SUMS"
-    || asset === "SHA256SUMS.sig"
-    || /^cloakbrowser-[A-Za-z0-9_-]+\.(zip|tar\.gz)$/.test(asset);
 }
 
 function normalizeMirrorPrefix(value: string | undefined): string | undefined {

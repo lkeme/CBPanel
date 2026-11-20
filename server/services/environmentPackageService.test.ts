@@ -250,7 +250,7 @@ test("environment package import creates new environments and restores browser d
   });
   const ensured = await extensionService.ensureExtensionsInstalled(newEnvironmentId);
   assert.deepEqual(ensured.paths, [path.join(targetDir, "extensions", newExtensionId)]);
-  assert.match(ensured.warnings[0]?.reason ?? "", /固定插件身份/);
+  assert.match(ensured.warnings[0]?.reason ?? "", /固定扩展身份/);
 
   targetRepository.close();
 });

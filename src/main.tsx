@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { type Root, createRoot } from "react-dom/client";
 import {
@@ -29,7 +29,15 @@ import {
   workbenchViewTitleKey,
 } from "./components/profiles/profileWorkbenchHelpers";
 import type { ExtensionImportDialogState, TextInputDialogState } from "./components/registry/RegistryDialogs";
-import { buildModuleStats, type ModeFilter, type ProxyFilter, type StatusFilter, type WorkbenchView } from "./components/registry/registryStats";
+import {
+  buildModuleStats,
+  extensionReferenceEnvironments,
+  nameExtensionReferenceEnvironments,
+  type ModeFilter,
+  type ProxyFilter,
+  type StatusFilter,
+  type WorkbenchView,
+} from "./components/registry/registryStats";
 import type { SettingsTab } from "./components/settings/SettingsDrawer";
 import type { ConfirmDialogState } from "./components/ui/ConfirmDialog";
 import { LoadingSkeleton } from "./components/ui/LoadingSkeleton";
@@ -84,7 +92,7 @@ import { useAppUpdateActions } from "./hooks/useAppUpdateActions";
 import { useDiagnosticsActions } from "./hooks/useDiagnosticsActions";
 import { useResolvedTheme } from "./hooks/useResolvedTheme";
 import { shouldRunStartupXrayUpdateCheck, useXrayActions } from "./hooks/useXrayActions";
-import { useExtensionActions } from "./hooks/useExtensionActions";
+import { useExtensionActions, type ExtensionReferenceState } from "./hooks/useExtensionActions";
 import {
   type AbortableSingleFlight,
   abortSingleFlight,
@@ -315,6 +323,7 @@ function App() {
   const [groupFilter, setGroupFilter] = useState("");
   const [tagFilters, setTagFilters] = useState<string[]>([]);
   const [proxyEntityFilter, setProxyEntityFilter] = useState("");
+  const [extensionEntityFilter, setExtensionEntityFilter] = useState("");
   const [profilePage, setProfilePage] = useState(1);
   const [filterPanelOpen, setFilterPanelOpen] = useState(false);
   const [workbenchView, setWorkbenchViewState] = useState<WorkbenchView>(() => workbenchViewFromHash(window.location.hash));
@@ -336,6 +345,10 @@ function App() {
     ensureReady: ensureRegistryDialogsReady,
   });
   const [proxyReference, setProxyReference] = useDeferredOpenState<ProxyReferenceState>(null, {
+    shouldWait: (nextState) => Boolean(nextState),
+    ensureReady: ensureRegistryDialogsReady,
+  });
+  const [extensionReference, setExtensionReference] = useDeferredOpenState<ExtensionReferenceState>(null, {
     shouldWait: (nextState) => Boolean(nextState),
     ensureReady: ensureRegistryDialogsReady,
   });
@@ -600,15 +613,33 @@ function App() {
 
   const selectedSession = sessionsByProfileId.get(selectedId);
   const activeFilterCount =
-    (statusFilter === "running" ? 1 : 0) +
-    (proxyFilter !== "all" ? 1 : 0) +
+    (statusFilter === "running" ? 1 : 0) +    (proxyFilter !== "all" ? 1 : 0) +
     (modeFilter !== "all" ? 1 : 0) +
     (groupFilter ? 1 : 0) +
     (proxyEntityFilter ? 1 : 0) +
+    (extensionEntityFilter ? 1 : 0) +
     tagFilters.length;
   const environmentsById = useMemo(
     () => new Map((state?.environments ?? []).map((environment) => [environment.id, environment])),
     [state?.environments],
+  );
+  /**
+   * Trashed environments keep their binding rows but are invisible in the UI, so they must not be
+   * counted here: the backend's delete guard already ignores them, and listing one would name an
+   * environment the operator cannot find or unbind.
+   */
+  const extensionReferenceEnvironmentIds = useCallback(
+    (extensionId: string) => extensionReferenceEnvironments(state?.environments ?? [], extensionId)
+      .map((reference) => reference.id),
+    [state?.environments],
+  );
+  /** Names for the reference dialog; an environment that vanished from state keeps its ID visible. */
+  const extensionReferenceEnvironmentEntries = useMemo(
+    () => nameExtensionReferenceEnvironments(
+      extensionReference ? extensionReferenceEnvironmentIds(extensionReference.extension.id).map((id) => ({ id })) : [],
+      state?.profiles,
+    ),
+    [extensionReference, extensionReferenceEnvironmentIds, state?.profiles],
   );
   const allTags = useMemo(() => {
     const tags = new Set<string>();
@@ -632,6 +663,7 @@ function App() {
       if (proxyFilter === "enabled" && !buildProxyUrl(profile.proxy)) return false;
       if (proxyFilter === "disabled" && buildProxyUrl(profile.proxy)) return false;
       if (proxyEntityFilter && environmentsById.get(profile.id)?.proxyId !== proxyEntityFilter) return false;
+      if (extensionEntityFilter && !environmentsById.get(profile.id)?.extensionIds.includes(extensionEntityFilter)) return false;
       if (modeFilter !== "all" && profile.mode !== modeFilter) return false;
       if (groupFilter && profile.group !== groupFilter) return false;
       if (tagFilters.length > 0 && !tagFilters.every((tag) => profile.tags.includes(tag))) return false;
@@ -641,7 +673,7 @@ function App() {
       );
     });
     return sortProfiles(filtered, settings);
-  }, [environmentsById, groupFilter, modeFilter, proxyEntityFilter, proxyFilter, query, sessionsByProfileId, settings, state?.profiles, statusFilter, tagFilters]);
+  }, [environmentsById, extensionEntityFilter, groupFilter, modeFilter, proxyEntityFilter, proxyFilter, query, sessionsByProfileId, settings, state?.profiles, statusFilter, tagFilters]);
 
   const visibleColumns = useMemo(
     () =>
@@ -751,13 +783,14 @@ function App() {
   const RegistryMergeDialogRenderer = RegistryDialogsRenderer?.RegistryMergeDialog;
   const ExtensionImportDialogRenderer = RegistryDialogsRenderer?.ExtensionImportDialog;
   const ProxyReferenceDialogRenderer = RegistryDialogsRenderer?.ProxyReferenceDialog;
+  const ExtensionReferenceDialogRenderer = RegistryDialogsRenderer?.ExtensionReferenceDialog;
   const ProxyAddDialogRenderer = RegistryDialogsRenderer?.ProxyAddDialog;
   const ProxySubscriptionDialogRenderer = RegistryDialogsRenderer?.ProxySubscriptionDialog;
   const TextInputDialogRenderer = RegistryDialogsRenderer?.TextInputDialog;
 
   useEffect(() => {
     setProfilePage(1);
-  }, [groupFilter, modeFilter, proxyEntityFilter, proxyFilter, query, statusFilter, tagFilters.join("\u0000")]);
+  }, [extensionEntityFilter, groupFilter, modeFilter, proxyEntityFilter, proxyFilter, query, statusFilter, tagFilters.join("\u0000")]);
 
   useEffect(() => {
     // The inspector can be opened before the initial state request settles. Once rows arrive, honor that
@@ -1404,16 +1437,20 @@ function App() {
     setDraftExtensionBinding,
     setExtensionUpdatePolicy,
     toggleExtensionStatus,
+    unbindAndDeleteExtension,
+    unbindExtensionReferences,
     updateExtension,
     uploadExtensionArchive,
   } = useExtensionActions({
     draft,
     draftIsNew,
     loadState,
+    referenceEnvironmentIds: extensionReferenceEnvironmentIds,
     selectedProfiles,
     setBusy,
     setConfirmDialog,
     setExtensionImport,
+    setExtensionReference,
     t,
     toast,
   });
@@ -1444,6 +1481,7 @@ function App() {
     setStatusFilter("all");
     setProxyFilter("all");
     setProxyEntityFilter("");
+    setExtensionEntityFilter("");
     setModeFilter("all");
     setGroupFilter("");
     setTagFilters([]);
@@ -1456,7 +1494,7 @@ function App() {
   }
 
   function showProfileView(
-    patch: { group?: string; query?: string; status?: StatusFilter; proxy?: ProxyFilter; proxyId?: string; mode?: ModeFilter; tags?: string[] } = {},
+    patch: { group?: string; query?: string; status?: StatusFilter; proxy?: ProxyFilter; proxyId?: string; extensionId?: string; mode?: ModeFilter; tags?: string[] } = {},
   ) {
     setWorkbenchView("profiles");
     setFilterPanelOpen(false);
@@ -1465,6 +1503,7 @@ function App() {
     setStatusFilter(patch.status ?? "all");
     setProxyFilter(patch.proxy ?? "all");
     setProxyEntityFilter(patch.proxyId ?? "");
+    setExtensionEntityFilter(patch.extensionId ?? "");
     setModeFilter(patch.mode ?? "all");
     setTagFilters(patch.tags ?? []);
   }
@@ -2185,6 +2224,19 @@ function App() {
           type={proxyReference.action}
           unbindAndDelete={unbindProxyReferencesAndDelete}
           unbindReferences={unbindProxyReferences}
+        />
+      )}
+
+      {extensionReference && ExtensionReferenceDialogRenderer && (
+        <ExtensionReferenceDialogRenderer
+          busy={busy}
+          close={() => setExtensionReference(null)}
+          environments={extensionReferenceEnvironmentEntries}
+          extension={extensionReference.extension}
+          showProfiles={(extensionId) => showProfileView({ extensionId })}
+          t={t}
+          unbindAndDelete={unbindAndDeleteExtension}
+          unbindOnly={unbindExtensionReferences}
         />
       )}
 

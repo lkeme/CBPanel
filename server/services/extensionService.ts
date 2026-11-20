@@ -1366,7 +1366,7 @@ export class ExtensionService {
             name: installed.name,
             reason: installed.directoryMode === "reference"
               ? "引用模式扩展缺少稳定 manifest.key，无法启用启动生命周期保护；请重新以复制模式导入。"
-              : "扩展缺少稳定 manifest.key，启动生命周期保护已禁用，重复初始化仍可能发生；请先停止相关环境，再执行“固定身份”以固定插件身份。此操作会改变插件 ID，并可能使已有插件数据不可见。",
+              : "扩展缺少稳定 manifest.key，启动生命周期保护已禁用，重复初始化仍可能发生；请先停止相关环境，再执行“固定身份”以固定扩展身份。此操作会改变扩展 ID，并可能使已有扩展数据不可见。",
           });
           if (!this.options.activeEnvironmentIds?.().has(environmentId)) {
             await this.runtimeService.removeExtension(installed.id, [environmentId]);

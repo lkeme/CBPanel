@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "cbpanel"
-version = "1.0.10"
+version = "1.0.20"
 dependencies = [
  "serde",
  "serde_json",

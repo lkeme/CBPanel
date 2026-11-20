@@ -416,7 +416,7 @@ test("app backup restore warns that a reference-mode extension is re-homed into 
   });
   const ensured = await extensionService.ensureExtensionsInstalled(profile.id);
   assert.deepEqual(ensured.paths, [path.join(directory, "extensions", extension.id)]);
-  assert.match(ensured.warnings[0]?.reason ?? "", /固定插件身份/);
+  assert.match(ensured.warnings[0]?.reason ?? "", /固定扩展身份/);
 
   repository.close();
 });

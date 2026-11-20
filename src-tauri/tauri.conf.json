@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "CBPanel",
-  "version": "1.0.10",
+  "version": "1.0.20",
   "identifier": "com.cbpanel.client",
   "build": {
     "beforeDevCommand": "npm run frontend:dev",

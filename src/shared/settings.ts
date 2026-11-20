@@ -33,10 +33,11 @@ export type BrowserCoreEnvValueKind = "text" | "path" | "directory" | "url" | "b
 export type GithubMirrorProviderId =
   | "off"
   | "auto-best"
-  | "gh-proxy-lipk"
-  | "ghfast-top"
+  | "gh-qfmc0721"
+  | "g-z321-cc-cd"
+  | "github-tbap-top"
+  | "gh-proxy-org"
   | "ghproxy-net"
-  | "ghproxy-vip"
   | "gh-proxy-com"
   | "custom";
 
@@ -672,11 +673,32 @@ export const BUILTIN_NETWORK_TRACE_PROVIDERS: NetworkTraceProvider[] = [
 ];
 
 export const BUILTIN_GITHUB_MIRROR_PROVIDERS: GithubMirrorProvider[] = [
-  { id: "gh-proxy-lipk", name: "gh-proxy.lipk.org", prefix: "https://gh-proxy.lipk.org/" },
-  { id: "ghfast-top", name: "ghfast.top", prefix: "https://ghfast.top/" },
-  { id: "ghproxy-net", name: "ghproxy.net", prefix: "https://ghproxy.net/" },
-  { id: "ghproxy-vip", name: "ghproxy.vip", prefix: "https://ghproxy.vip/" },
   { id: "gh-proxy-com", name: "gh-proxy.com", prefix: "https://gh-proxy.com/" },
+  { id: "gh-qfmc0721", name: "gh.qfmc0721.cc.cd", prefix: "https://gh.qfmc0721.cc.cd/" },
+  { id: "g-z321-cc-cd", name: "g.z321.cc.cd", prefix: "https://g.z321.cc.cd/" },
+  { id: "github-tbap-top", name: "github.tbap.top", prefix: "https://github.tbap.top/" },
+  { id: "gh-proxy-org", name: "gh-proxy.org", prefix: "https://gh-proxy.org/" },
+  { id: "ghproxy-net", name: "ghproxy.net", prefix: "https://ghproxy.net/" },
+];
+
+/** The mirror a fresh install starts on; `DEFAULT_GITHUB_MIRROR_PROVIDER_ID` still means "off". */
+export const PREFERRED_GITHUB_MIRROR_PROVIDER_ID: Exclude<GithubMirrorProviderId, "off" | "auto-best" | "custom"> = "gh-proxy-com";
+
+/**
+ * Providers retired from the list. Their ids still normalize to a working mirror, because a stored
+ * setting would otherwise fall back to "off" and silently stop accelerating anything.
+ */
+const RETIRED_GITHUB_MIRROR_PROVIDER_IDS: Record<string, Exclude<GithubMirrorProviderId, "off" | "auto-best" | "custom">> = {
+  "ghproxy-vip": "gh-proxy-com",
+  "ghfast-top": "gh-proxy-com",
+  "gh-proxy-lipk": "gh-proxy-com",
+};
+
+export const GITHUB_MIRROR_PROVIDER_IDS: readonly GithubMirrorProviderId[] = [
+  "off",
+  "auto-best",
+  ...BUILTIN_GITHUB_MIRROR_PROVIDERS.map((provider) => provider.id),
+  "custom",
 ];
 
 export const FORCED_UI_FONT_FAMILY =
@@ -1048,11 +1070,7 @@ export function normalizeNetworkTraceSettings(input: Partial<NetworkTraceSetting
     providerId,
     customProviderUrl: normalizeTraceUrl(input.customProviderUrl, ""),
     timeoutSeconds: normalizeNumber(input.timeoutSeconds, 8, 2, 30),
-    githubMirrorProviderId: enumValue(
-      input.githubMirrorProviderId,
-      ["off", "auto-best", "gh-proxy-lipk", "ghfast-top", "ghproxy-net", "ghproxy-vip", "gh-proxy-com", "custom"],
-      DEFAULT_GITHUB_MIRROR_PROVIDER_ID,
-    ),
+    githubMirrorProviderId: normalizeGithubMirrorProviderId(input.githubMirrorProviderId),
     customGithubMirrorPrefix: normalizeUrlPrefix(input.customGithubMirrorPrefix, ""),
   };
 }
@@ -1171,6 +1189,15 @@ export function resolveGithubMirrorPrefix(input: Partial<NetworkTraceSettings> =
 
 function enumNumberValue(value: unknown, allowed: readonly number[], fallback: number): number {
   return typeof value === "number" && allowed.includes(value) ? value : fallback;
+}
+
+/**
+ * A retired mirror keeps accelerating: mapping it forward is the only outcome that neither drops
+ * the operator's acceleration nor asks them to notice a setting they never touched.
+ */
+function normalizeGithubMirrorProviderId(value: unknown): GithubMirrorProviderId {
+  const retired = typeof value === "string" ? RETIRED_GITHUB_MIRROR_PROVIDER_IDS[value] : undefined;
+  return retired ?? enumValue(value, GITHUB_MIRROR_PROVIDER_IDS, DEFAULT_GITHUB_MIRROR_PROVIDER_ID);
 }
 
 function normalizeNumber(value: unknown, fallback: number, min: number, max: number): number {

@@ -7,6 +7,7 @@ import {
   type AppUpdateDownload,
   appUpdateAssetUrl,
   compareAppVersions,
+  mirroredAppUpdateManifestUrl,
   parseAppUpdateManifest,
   selectAppUpdateArtifact,
 } from "../../src/shared/appUpdate";
@@ -22,6 +23,11 @@ export type AppUpdateServiceOptions = {
   arch?: string;
   portable?: boolean;
   now?: () => Date;
+  /**
+   * The mirror prefix a check should use, resolved at call time. Injected rather than read from
+   * settings here so `auto-best` keeps using the probe service's measured winner.
+   */
+  resolveMirrorPrefix?: () => Promise<string | undefined>;
 };
 
 export type AppUpdateInfo = {
@@ -104,7 +110,8 @@ export class AppUpdateService {
   }
 
   private async fetchManifest() {
-    const url = new URL(this.manifestUrl);
+    const mirrorPrefix = await this.resolveMirrorPrefix();
+    const url = new URL(mirroredAppUpdateManifestUrl(this.manifestUrl, mirrorPrefix));
     if (url.protocol !== "https:" && !isLoopbackHttp(url)) {
       throw Object.assign(new Error("The app update manifest must be served over HTTPS."), {
         code: "APP_UPDATE_MANIFEST_URL_UNSUPPORTED",
@@ -142,6 +149,20 @@ export class AppUpdateService {
       arch: this.options.arch ?? process.arch,
       portable: this.options.portable ?? false,
     };
+  }
+
+  /**
+   * A mirror only ever wraps a public GitHub asset. The override URL an operator can point at a local
+   * server must stay untouched, or an unrelated (and possibly loopback) destination would be prefixed.
+   */
+  private async resolveMirrorPrefix(): Promise<string | undefined> {
+    if (this.manifestUrl !== APP_UPDATE_MANIFEST_URL) return undefined;
+    try {
+      return await this.options.resolveMirrorPrefix?.();
+    } catch {
+      // A mirror that cannot be resolved is not a reason to fail the update check.
+      return undefined;
+    }
   }
 }
 

@@ -5186,6 +5186,42 @@ textarea {
   gap: 8px;
 }
 
+/* A referenced entity can be held by dozens of environments; the list scrolls, the actions stay put. */
+.reference-entity-list {
+  display: grid;
+  gap: 2px;
+  max-height: 220px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.reference-entity-list > li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 6px 8px;
+  border-radius: calc(var(--radius) - 4px);
+}
+
+.reference-entity-list > li:nth-child(odd) {
+  background: var(--surface-muted);
+}
+
+.reference-entity-list > li > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reference-entity-list > li > small {
+  color: var(--foreground-muted);
+  font-size: var(--font-size-code);
+}
+
 .proxy-editor-body .toggle-field {
   align-self: stretch;
 }

@@ -15,9 +15,11 @@ import {
   normalizeCloakBrowserEnvKey,
   normalizeNetworkTraceSettings,
   normalizeSettings,
+  PREFERRED_GITHUB_MIRROR_PROVIDER_ID,
   resolveGithubMirrorPrefix,
   resolveNetworkTraceProvider,
   resolveLanguageMode,
+  type GithubMirrorProviderId,
 } from "./settings";
 
 test("normalizeSettings returns stable defaults", () => {
@@ -69,15 +71,31 @@ test("normalizeSettings supports optional GitHub mirror prefixes under network s
       providerId: "chatgpt",
       customProviderUrl: "",
       timeoutSeconds: 8,
-      githubMirrorProviderId: "ghproxy-vip",
+      githubMirrorProviderId: "ghproxy-net",
       customGithubMirrorPrefix: " https://gh-proxy.example.com/// ",
     },
   });
 
-  assert.equal(settings.networkTrace.githubMirrorProviderId, "ghproxy-vip");
+  assert.equal(settings.networkTrace.githubMirrorProviderId, "ghproxy-net");
   assert.equal(settings.networkTrace.customGithubMirrorPrefix, "https://gh-proxy.example.com/");
-  assert.equal(resolveGithubMirrorPrefix(settings.networkTrace), "https://ghproxy.vip/");
-  assert.ok(BUILTIN_GITHUB_MIRROR_PROVIDERS.some((provider) => provider.id === "ghproxy-vip"));
+  assert.equal(resolveGithubMirrorPrefix(settings.networkTrace), "https://ghproxy.net/");
+  assert.ok(BUILTIN_GITHUB_MIRROR_PROVIDERS.some((provider) => provider.id === "ghproxy-net"));
+});
+
+test("retired GitHub mirror ids migrate to the preferred mirror instead of silently disabling it", () => {
+  // Stored settings are untrusted input: these ids were valid in earlier releases.
+  for (const retired of ["ghproxy-vip", "ghfast-top", "gh-proxy-lipk"] as const) {
+    const settings = normalizeNetworkTraceSettings({
+      githubMirrorProviderId: retired as GithubMirrorProviderId,
+    });
+
+    assert.equal(settings.githubMirrorProviderId, PREFERRED_GITHUB_MIRROR_PROVIDER_ID);
+    assert.equal(resolveGithubMirrorPrefix(settings), "https://gh-proxy.com/");
+  }
+  assert.equal(
+    normalizeNetworkTraceSettings({ githubMirrorProviderId: "nonsense" as GithubMirrorProviderId }).githubMirrorProviderId,
+    "off",
+  );
 });
 
 test("resolveGithubMirrorPrefix supports custom and disabled modes", () => {

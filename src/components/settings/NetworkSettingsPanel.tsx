@@ -7,6 +7,7 @@ import type { GithubMirrorProbeResponse } from "../../shared/githubMirror";
 import {
   BUILTIN_GITHUB_MIRROR_PROVIDERS,
   BUILTIN_NETWORK_TRACE_PROVIDERS,
+  PREFERRED_GITHUB_MIRROR_PROVIDER_ID,
   type AppSettings,
   type AppSettingsPatch,
   type GithubMirrorProviderId,
@@ -563,7 +564,7 @@ function GithubMirrorSelect({
         icon: "mirror" as const,
         result,
         isBest: item.id === bestId,
-        isDefault: item.id === "gh-proxy-com",
+        isDefault: item.id === PREFERRED_GITHUB_MIRROR_PROVIDER_ID,
       };
     }),
     {
